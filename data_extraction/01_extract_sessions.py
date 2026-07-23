@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+"""
+SeeWeed3D - Stage 1: Session extraction and indexing  (v2)
+===========================================================
+Decodes ZED recordings into an annotation-ready, traceable dataset.
+
+Handles BOTH capture formats transparently:
+
+  v1 (legacy, zed_app_updated_2026_jan.py)
+      RGB_video.mkv + Depth_video.mkv + calibration_params.txt
+      [+ session_meta.txt] [+ frames.csv with column `frame_idx`]
+
+  v2 (zed_capture_v2.py)
+      + RGB_right_video.mkv, Confidence_video.mkv, recording.svo2
+      + calibration.json, session.json, dropped_frames.csv
+      + frames.csv with `video_frame_idx` / `capture_frame_idx`, exposure,
+        gain, white balance, pose and IMU per frame
+
+Everything a format offers is used; nothing missing is fatal. Sessions are
+tagged `capture_format` so downstream code knows what exists.
+
+CORE INVARIANTS
+---------------
+* Frames are selected by FRAME INDEX, never by `-vf fps=`. Capture drops frames
+  when the writer queue fills while the encoder is told the stream is constant
+  fps, so video time does not track real time. All streams are written from the
+  same queue item and are aligned by index.
+* Depth: 1 PNG count = 1 mm, 0 = invalid. `depth_vis_max_mm` in v1
+  session_meta.txt is a GUI preview constant and must never be applied to data.
+* Confidence (v2): stored raw. Polarity is recorded per session from the
+  capture-time probe - do not assume it.
+"""
+
+import csv
+import json
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+# =============================================================================
+# CONFIG - EDIT THIS BLOCK ONLY
+# =============================================================================
+
+CONFIG = {
+    # -- Where the raw recordings live. One entry per field visit / trip. ------
+    # `path`  : folder CONTAINING the Session_* folders (searched recursively)
+    # `trip`  : short code, becomes the session_id prefix. Keep short + stable.
+    "INPUT_ROOTS": [
+        {
+            "path":       r"C:\ZED\DataCollection\Vidalia2",
+            "trip":       "vid2",
+            "site":       "vidalia",
+            "field":      "field_A",
+            "scene_hint": "mixed",        # mixed | onion_only | weed_only | unknown
+            "notes":      "March 2025 visit - v1 capture format",
+        },
+        # {
+        #     "path":       r"M:\Research\Data\Vidalia_onions_visit3",
+        #     "trip":       "vid3", "site": "vidalia", "field": "field_A",
+        #     "scene_hint": "mixed",
+        #     "notes":      "v2 capture - SVO + confidence + locked exposure",
+        # },
+    ],
+
+    "OUTPUT_ROOT": r"M:\Research\Data\SeeWeed3D\dataset",
+
+    "FFMPEG":  r"C:\ffmpeg\ffmpeg-7.1-essentials_build\bin\ffmpeg.exe",
+    "FFPROBE": r"C:\ffmpeg\ffmpeg-7.1-essentials_build\bin\ffprobe.exe",
+
+    # -- File discovery (case-insensitive). Covers every visit variant. --------
+    "RGB_PATTERNS":   ["rgb_video.mkv", "rgb.mkv", "left.mkv", "*left*.mkv"],
+    "RIGHT_PATTERNS": ["rgb_right_video.mkv", "right.mkv", "*right*.mkv"],
+    "DEPTH_PATTERNS": ["depth_video.mkv", "depth.mkv", "*depth*.mkv"],
+    "CONF_PATTERNS":  ["confidence_video.mkv", "confidence.mkv", "*conf*.mkv"],
+
+    # -- What to write out (ignored when the session has no such stream) ------
+    "WRITE_RIGHT": True,
+    "WRITE_CONF":  True,
+
+    # -- Sampling ---------------------------------------------------------------
+    # POOL_STRIDE=None derives the stride from TARGET_POOL_FPS. The pool is
+    # deliberately generous; stage 2 does the real selection. The MKV/SVO files
+    # stay the archive, so the pool is always regenerable.
+    "POOL_STRIDE":     None,
+    "TARGET_POOL_FPS": 3.0,
+    "MAX_POOL_PER_SESSION": 400,   # None = unlimited
+
+    # -- Depth semantics (verified against capture source) ----------------------
+    "DEPTH_SCALE_MM_PER_UNIT": 1.0,
+    "DEPTH_INVALID_VALUE":     0,
+    "DEPTH_MIN_VALID_MM":      300,
+    "DEPTH_MAX_VALID_MM":      2000,
+
+    "METRIC_WIDTH": 512,
+    "PNG_COMPRESSION": 3,
+    "OVERWRITE": False,
+    "DRY_RUN": False,
+}
+
+# =============================================================================
+
+SESSION_RE = re.compile(r"(\d{8})[_\-]?(\d{6})")
+
+
+def run_json(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {r.stderr[:400]}")
+    return json.loads(r.stdout)
+
+
+def probe(ffprobe, path):
+    """Real stream parameters from the file header - never trust sidecar files."""
+    d = run_json([ffprobe, "-v", "error", "-select_streams", "v:0",
+                  "-show_streams", "-show_format", "-of", "json", str(path)])
+    s = d["streams"][0]
+    num, den = (s.get("r_frame_rate") or "0/1").split("/")
+    fps = float(num) / float(den) if float(den) else 0.0
+    nb = s.get("nb_frames")
+    if nb in (None, "N/A"):
+        nb = None
+    return {"width": int(s["width"]), "height": int(s["height"]),
+            "pix_fmt": s.get("pix_fmt"), "codec": s.get("codec_name"),
+            "nominal_fps": fps, "nb_frames_header": int(nb) if nb else None,
+            "duration_s": float(d["format"].get("duration", 0) or 0),
+            "size_bytes": int(d["format"].get("size", 0) or 0)}
+
+
+def _glob_match(name, pat):
+    import fnmatch
+    return fnmatch.fnmatch(name, pat)
+
+
+def find_one(folder, patterns, want_right=False):
+    """Case-insensitive first match in priority order. Files with 'right' in the
+    name are only matched by right-hand patterns, so RGB_right_video.mkv can
+    never be mistaken for the left stream."""
+    try:
+        files = [f for f in folder.iterdir() if f.is_file()]
+    except (PermissionError, OSError):
+        return None
+    for pat in patterns:
+        pat_l = pat.lower()
+        for f in files:
+            n = f.name.lower()
+            if ("right" in n) != want_right:
+                continue
+            if ("*" in pat_l and _glob_match(n, pat_l)) or n == pat_l:
+                return f
+    return None
+
+
+def _derive_calib(out):
+    L = out.get("left") or {}
+    fx = L.get("fx")
+    if fx:
+        out["mm_per_px_at_1000mm"] = round(1000.0 / fx, 4)
+        b = out.get("baseline_mm")
+        if b:
+            # dz = z^2 / (f*B) * d_disp, evaluated at 1 m for 0.1 px of disparity
+            out["depth_err_mm_at_1000mm_per_0p1px"] = round(
+                (1000.0 ** 2) / (fx * b) * 0.1, 4)
+    return out
+
+
+def parse_calibration_txt(path):
+    """v1 calibration_params.txt. RECTIFIED parameters (zero distortion) that
+    apply directly to the saved VIEW.LEFT images. Tx is the baseline in mm."""
+    if path is None or not path.exists():
+        return None
+    txt = path.read_text(errors="ignore")
+    out = {"source": path.name, "format": "v1_txt"}
+
+    def grab(section):
+        m = re.search(section + r".*?fx:\s*([\d.\-]+),\s*fy:\s*([\d.\-]+).*?"
+                      r"cx:\s*([\d.\-]+),\s*cy:\s*([\d.\-]+)", txt, re.S)
+        if not m:
+            return None
+        return {"fx": float(m.group(1)), "fy": float(m.group(2)),
+                "cx": float(m.group(3)), "cy": float(m.group(4)),
+                "distortion": [0.0] * 5, "model": "rectified_pinhole"}
+
+    out["left"] = grab("Left Camera Intrinsic")
+    out["right"] = grab("Right Camera Intrinsic")
+    m = re.search(r"Tx:\s*([\d.\-]+).*?Ty:\s*([\d.\-]+).*?Tz:\s*([\d.\-]+)", txt, re.S)
+    if m:
+        out["stereo_translation_mm"] = [float(m.group(i)) for i in (1, 2, 3)]
+        out["baseline_mm"] = abs(float(m.group(1)))
+    m = re.search(r"Horizontal FOV \(Left Cam\):\s*([\d.]+)", txt)
+    if m:
+        out["hfov_deg"] = float(m.group(1))
+    return _derive_calib(out)
+
+
+def parse_calibration_json(path):
+    """v2 calibration.json - raw AND rectified, both cameras, stereo rotation."""
+    if path is None or not path.exists():
+        return None
+    j = json.loads(path.read_text())
+    rect = j.get("rectified", {})
+    out = {"source": path.name, "format": "v2_json",
+           "left": rect.get("left"), "right": rect.get("right"),
+           "baseline_mm": rect.get("baseline_mm"),
+           "stereo_translation_mm": rect.get("translation_mm"),
+           "rotation_vector_rad": rect.get("rotation_vector_rad"),
+           "raw": j.get("raw"), "serial_number": j.get("serial_number"),
+           "firmware": j.get("firmware")}
+    if out["left"] and out["left"].get("h_fov"):
+        out["hfov_deg"] = out["left"]["h_fov"]
+    return _derive_calib(out)
+
+
+def parse_session_meta(txt_path, json_path):
+    """v2 session.json wins; v1 session_meta.txt is the fallback."""
+    if json_path and json_path.exists():
+        return json.loads(json_path.read_text()), "v2"
+    if txt_path and txt_path.exists():
+        meta = {}
+        for line in txt_path.read_text(errors="ignore").splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                meta[k.strip()] = v.strip()
+        return meta, "v1"
+    return None, None
+
+
+def read_frames_csv(path):
+    """Rows are one per ENCODED frame in write order, so video frame i <-> row i.
+    Recovers true capture indices and timestamps despite dropped frames.
+    Accepts both the v1 and v2 column schemas."""
+    if path is None or not path.exists():
+        return None, None
+    rows = []
+    with open(path, newline="", encoding="utf-8", errors="ignore") as f:
+        rdr = csv.DictReader(f)
+        cols = set(rdr.fieldnames or [])
+        ver = "v2" if "capture_frame_idx" in cols else "v1"
+        for r in rdr:
+            try:
+                if ver == "v2":
+                    rows.append({
+                        "capture_frame_idx": int(r["capture_frame_idx"]),
+                        "timestamp_ns": int(r["image_timestamp_ns"]),
+                        "host_realtime_ns": r.get("host_realtime_ns", ""),
+                        "exposure": r.get("exposure", ""),
+                        "gain": r.get("gain", ""),
+                        "wb_temp": r.get("wb_temp", ""),
+                        "pose_state": r.get("pose_state", ""),
+                        "tx_mm": r.get("tx_mm", ""),
+                        "ty_mm": r.get("ty_mm", ""),
+                        "tz_mm": r.get("tz_mm", "")})
+                else:
+                    rows.append({"capture_frame_idx": int(r["frame_idx"]),
+                                 "timestamp_ns": int(r["timestamp_ns"])})
+            except (KeyError, ValueError):
+                return None, None
+    return (rows, ver) if rows else (None, None)
+
+
+class RawDecoder:
+    """Decode FFV1/MKV to raw frames. -vsync 0 guarantees one output frame per
+    coded frame (no duplication or dropping), which keeps indices honest."""
+
+    def __init__(self, ffmpeg, path, pix_fmt, w, h, channels, dtype):
+        self.shape = (h, w, channels) if channels > 1 else (h, w)
+        self.dtype = dtype
+        self.bpf = w * h * channels * np.dtype(dtype).itemsize
+        self.proc = subprocess.Popen(
+            [ffmpeg, "-loglevel", "error", "-i", str(path),
+             "-f", "rawvideo", "-pix_fmt", pix_fmt, "-vsync", "0", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=self.bpf * 2)
+
+    def __iter__(self):
+        while True:
+            buf = self.proc.stdout.read(self.bpf)
+            if len(buf) < self.bpf:
+                break
+            yield np.frombuffer(buf, dtype=self.dtype).reshape(self.shape)
+        self.close()
+
+    def close(self):
+        try:
+            if self.proc.stdout:
+                self.proc.stdout.close()
+            self.proc.wait(timeout=10)
+        except Exception:
+            self.proc.kill()
+
+
+def phash64(gray_small):
+    img = cv2.resize(gray_small, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+    d = cv2.dct(img)[:8, :8]
+    med = np.median(d.flatten()[1:])
+    return "".join(f"{b:02x}" for b in np.packbits((d.flatten() > med).astype(np.uint8)))
+
+
+def frame_metrics(bgr, depth, conf, cfg):
+    """Per-frame QC, computed on a downscaled copy."""
+    h, w = bgr.shape[:2]
+    scale = cfg["METRIC_WIDTH"] / float(w)
+    small = cv2.resize(bgr, (cfg["METRIC_WIDTH"], max(1, int(h * scale))),
+                       interpolation=cv2.INTER_AREA)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+    b, g, r = [small[:, :, i].astype(np.float32) for i in range(3)]
+    s = b + g + r + 1e-6
+    exg = 2 * (g / s) - (r / s) - (b / s)      # excess green index
+    veg = exg > 0.05
+
+    m = {"sharpness": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+         "mean_luma": float(gray.mean()),
+         "clip_frac": float((gray >= 250).mean()),
+         "dark_frac": float((gray <= 12).mean()),
+         "veg_frac": float(veg.mean()),
+         "phash": phash64(gray)}
+
+    if depth is None:
+        m.update({k: "" for k in ("depth_valid_frac", "depth_valid_frac_veg",
+                                  "depth_median_mm", "depth_inrange_frac")})
+    else:
+        ds = cv2.resize(depth, (small.shape[1], small.shape[0]),
+                        interpolation=cv2.INTER_NEAREST)
+        valid = ds > cfg["DEPTH_INVALID_VALUE"]
+        inr = valid & (ds >= cfg["DEPTH_MIN_VALID_MM"]) & (ds <= cfg["DEPTH_MAX_VALID_MM"])
+        m["depth_valid_frac"] = round(float(valid.mean()), 4)
+        m["depth_inrange_frac"] = round(float(inr.mean()), 4)
+        # The metric that matters for LEP work: is there depth ON the plants?
+        m["depth_valid_frac_veg"] = round(float(valid[veg].mean()), 4) if veg.any() else 0.0
+        m["depth_median_mm"] = int(np.median(ds[valid])) if valid.any() else ""
+
+    if conf is None:
+        m.update({"conf_mean": "", "conf_mean_veg": ""})
+    else:
+        cs = cv2.resize(conf, (small.shape[1], small.shape[0]),
+                        interpolation=cv2.INTER_NEAREST).astype(np.float32)
+        m["conf_mean"] = round(float(cs.mean()), 2)
+        m["conf_mean_veg"] = round(float(cs[veg].mean()), 2) if veg.any() else ""
+    return m
+
+
+def make_session_id(folder, trip):
+    m = SESSION_RE.search(folder.name)
+    if m:
+        return f"{trip}_{m.group(1)}_{m.group(2)}"
+    ts = datetime.fromtimestamp(folder.stat().st_mtime, tz=timezone.utc)
+    return f"{trip}_{ts:%Y%m%d_%H%M%S}"
+
+
+def discover(cfg):
+    """A folder is a session if it directly contains a left/RGB mkv."""
+    found = []
+    for rc in cfg["INPUT_ROOTS"]:
+        root = Path(rc["path"])
+        if not root.exists():
+            print(f"  [SKIP] input root does not exist: {root}")
+            continue
+        for folder in [root] + [p for p in root.rglob("*") if p.is_dir()]:
+            rgb = find_one(folder, cfg["RGB_PATTERNS"])
+            if rgb is None:
+                continue
+
+            def opt(name):
+                p = folder / name
+                return p if p.exists() else None
+
+            found.append({
+                "folder": folder, "rgb": rgb,
+                "right": find_one(folder, cfg["RIGHT_PATTERNS"], want_right=True),
+                "depth": find_one(folder, cfg["DEPTH_PATTERNS"]),
+                "conf": find_one(folder, cfg["CONF_PATTERNS"]),
+                "calib_txt": opt("calibration_params.txt"),
+                "calib_json": opt("calibration.json"),
+                "meta_txt": opt("session_meta.txt"),
+                "meta_json": opt("session.json"),
+                "frames_csv": opt("frames.csv"),
+                "dropped_csv": opt("dropped_frames.csv"),
+                "svo": next((p for p in folder.glob("*.svo*")), None),
+                "cfg": rc})
+    return found
+
+
+def extract_session(sess, out_root, cfg):
+    rc = sess["cfg"]
+    sid = make_session_id(sess["folder"], rc["trip"])
+    sdir = out_root / "sessions" / sid
+    warnings = []
+
+    if sdir.exists() and not cfg["OVERWRITE"]:
+        print(f"  [SKIP] {sid} already extracted (OVERWRITE=False)")
+        return None
+
+    fmt = "v2" if (sess["meta_json"] or sess["conf"] or sess["calib_json"]) else "v1"
+
+    rgb_info = probe(cfg["FFPROBE"], sess["rgb"])
+    W, H = rgb_info["width"], rgb_info["height"]
+    infos = {"rgb": rgb_info}
+    for key in ("right", "depth", "conf"):
+        if sess[key]:
+            infos[key] = probe(cfg["FFPROBE"], sess[key])
+            if (infos[key]["width"], infos[key]["height"]) != (W, H):
+                warnings.append(f"{key} resolution differs from RGB - stream dropped")
+                sess[key] = None
+
+    if sess["depth"] is None:
+        warnings.append("no depth video - RGB only session")
+    if fmt == "v1":
+        warnings.append("v1 capture format: no confidence map, no right image, no "
+                        "SVO, no exposure/pose log - see docs/CAPTURE_CHANGELOG.md")
+
+    calib = (parse_calibration_json(sess["calib_json"])
+             or parse_calibration_txt(sess["calib_txt"]))
+    if calib is None:
+        warnings.append("NO calibration - session unusable for 3D work")
+
+    meta, meta_ver = parse_session_meta(sess["meta_txt"], sess["meta_json"])
+    if meta is None:
+        warnings.append("no session metadata - parameters taken from video header")
+
+    fcsv, csv_ver = read_frames_csv(sess["frames_csv"])
+    ts_source = f"frames_csv_{csv_ver}" if fcsv else "nominal_fps"
+    if not fcsv:
+        warnings.append("no frames.csv - timestamps synthesised from nominal fps; "
+                        "dropped frames make these approximate, not for pose sync")
+
+    n_dropped = 0
+    if sess["dropped_csv"]:
+        n_dropped = max(0, sum(1 for _ in open(sess["dropped_csv"])) - 1)
+        if n_dropped:
+            warnings.append(f"{n_dropped} frames dropped from MKV at capture "
+                            f"(the SVO archive is complete)")
+
+    fps = rgb_info["nominal_fps"] or 15.0
+    stride = cfg["POOL_STRIDE"] or max(1, int(round(fps / cfg["TARGET_POOL_FPS"])))
+    have = [k for k in ("right", "depth", "conf") if sess[k]]
+
+    print(f"  [{sid}] {fmt} | {W}x{H} @ {fps:.2f}fps | stride={stride} | "
+          f"ts={ts_source} | left+{'+'.join(have) if have else 'none'}"
+          f"{' | SVO' if sess['svo'] else ''}")
+    if cfg["DRY_RUN"]:
+        return {"session_id": sid, "dry_run": True, "warnings": warnings}
+
+    want_right = bool(sess["right"]) and cfg["WRITE_RIGHT"]
+    want_conf = bool(sess["conf"]) and cfg["WRITE_CONF"]
+    subs = ["rgb", "meta"] + (["depth"] if sess["depth"] else []) \
+        + (["right"] if want_right else []) + (["conf"] if want_conf else [])
+    for sub in subs:
+        (sdir / sub).mkdir(parents=True, exist_ok=True)
+
+    F = cfg["FFMPEG"]
+    decs = {"rgb": RawDecoder(F, sess["rgb"], "bgr24", W, H, 3, np.uint8)}
+    if sess["depth"]:
+        decs["depth"] = RawDecoder(F, sess["depth"], "gray16le", W, H, 1, np.uint16)
+    if sess["right"]:
+        decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3, np.uint8)
+    if sess["conf"]:
+        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8)
+    its = {k: iter(v) for k, v in decs.items() if k != "rgb"}
+
+    index_rows, pool_rows = [], []
+    n_written = 0
+    png_opt = [cv2.IMWRITE_PNG_COMPRESSION, cfg["PNG_COMPRESSION"]]
+    cap = cfg["MAX_POOL_PER_SESSION"]
+
+    for i, bgr in enumerate(decs["rgb"]):
+        got = {k: next(v, None) for k, v in its.items()}
+        met = frame_metrics(bgr, got.get("depth"), got.get("conf"), cfg)
+
+        fr = fcsv[i] if (fcsv and i < len(fcsv)) else \
+            {"capture_frame_idx": i, "timestamp_ns": int(i / fps * 1e9)}
+
+        row = {"video_frame_idx": i,
+               "capture_frame_idx": fr["capture_frame_idx"],
+               "timestamp_ns": fr["timestamp_ns"],
+               "host_realtime_ns": fr.get("host_realtime_ns", ""),
+               "exposure": fr.get("exposure", ""), "gain": fr.get("gain", ""),
+               "wb_temp": fr.get("wb_temp", ""),
+               "pose_state": fr.get("pose_state", ""),
+               "tx_mm": fr.get("tx_mm", ""), "ty_mm": fr.get("ty_mm", ""),
+               "tz_mm": fr.get("tz_mm", ""), "in_pool": 0, **met}
+
+        if (i % stride == 0) and (cap is None or n_written < cap):
+            name = f"{sid}_{i:06d}.png"
+            cv2.imwrite(str(sdir / "rgb" / name), bgr, png_opt)
+            if got.get("depth") is not None:
+                cv2.imwrite(str(sdir / "depth" / name), got["depth"], png_opt)
+            if want_right and got.get("right") is not None:
+                cv2.imwrite(str(sdir / "right" / name), got["right"], png_opt)
+            if want_conf and got.get("conf") is not None:
+                cv2.imwrite(str(sdir / "conf" / name), got["conf"], png_opt)
+            row["in_pool"], row["filename"] = 1, name
+            n_written += 1
+            pool_rows.append({**row, "session_id": sid, "trip": rc["trip"],
+                              "site": rc["site"], "field": rc["field"],
+                              "scene_hint": rc["scene_hint"],
+                              "capture_format": fmt})
+        index_rows.append(row)
+
+    for d in decs.values():
+        d.close()
+
+    if not index_rows:
+        warnings.append("decoded 0 frames - file may be truncated")
+    hdr = rgb_info.get("nb_frames_header")
+    if hdr and hdr != len(index_rows):
+        warnings.append(f"header claims {hdr} frames, decoded {len(index_rows)}")
+
+    def write_csv(path, rows):
+        if not rows:
+            return
+        keys = list(rows[0].keys())
+        for r in rows:
+            for k in r:
+                if k not in keys:
+                    keys.append(k)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
+
+    write_csv(sdir / "meta" / "frames_index.csv", index_rows)
+    write_csv(sdir / "meta" / "pool.csv", pool_rows)
+    if calib:
+        (sdir / "meta" / "calibration.json").write_text(json.dumps(calib, indent=2))
+    for key in ("calib_txt", "calib_json", "meta_txt", "meta_json",
+                "frames_csv", "dropped_csv"):
+        src = sess[key]
+        if src and src.exists():
+            shutil.copy2(src, sdir / "meta" / f"orig_{src.name}")
+
+    pooled = [r for r in index_rows if r["in_pool"]]
+    dv = [r["depth_valid_frac_veg"] for r in pooled
+          if isinstance(r.get("depth_valid_frac_veg"), float)]
+
+    conf_pol = None
+    if fmt == "v2" and isinstance(meta, dict):
+        conf_pol = (meta.get("confidence_encoding") or {}).get("polarity")
+
+    session_json = {
+        "session_id": sid, "capture_format": fmt,
+        "trip": rc["trip"], "site": rc["site"], "field": rc["field"],
+        "scene_hint": rc["scene_hint"], "notes": rc.get("notes", ""),
+        "extracted_utc": datetime.now(timezone.utc).isoformat(),
+        "source": {"folder": str(sess["folder"]),
+                   "rgb_video": str(sess["rgb"]),
+                   "right_video": str(sess["right"]) if sess["right"] else None,
+                   "depth_video": str(sess["depth"]) if sess["depth"] else None,
+                   "confidence_video": str(sess["conf"]) if sess["conf"] else None,
+                   "svo_archive": str(sess["svo"]) if sess["svo"] else None,
+                   "probes": infos},
+        "capture_metadata": meta, "capture_metadata_version": meta_ver,
+        "camera": {"model": "ZED 2i", "view": "VIEW.LEFT (rectified)",
+                   "calibration": calib},
+        "depth_encoding": {
+            "container": "16-bit grayscale PNG",
+            "scale_mm_per_unit": cfg["DEPTH_SCALE_MM_PER_UNIT"],
+            "invalid_value": cfg["DEPTH_INVALID_VALUE"],
+            "note": "Raw millimetres. depth_vis_max_mm in v1 session_meta.txt is "
+                    "a GUI preview constant - do not rescale by it. 0 = invalid."},
+        "confidence_encoding": ({"container": "8-bit PNG", "polarity": conf_pol}
+                                if want_conf else None),
+        "frames": {"decoded": len(index_rows), "pool": len(pooled),
+                   "stride": stride, "nominal_fps": fps,
+                   "timestamp_source": ts_source,
+                   "dropped_at_capture": n_dropped,
+                   "alignment": "all streams share the video frame index; each is "
+                                "written from the same capture queue item"},
+        "pool_summary": {
+            "median_depth_valid_frac_veg": round(float(np.median(dv)), 4) if dv else None,
+            "median_sharpness": round(float(np.median(
+                [r["sharpness"] for r in pooled])), 2) if pooled else None,
+            "median_veg_frac": round(float(np.median(
+                [r["veg_frac"] for r in pooled])), 4) if pooled else None},
+        "warnings": warnings}
+    (sdir / "meta" / "session.json").write_text(json.dumps(session_json, indent=2))
+
+    for w in warnings:
+        print(f"      ! {w}")
+    print(f"      -> {len(pooled)} pool frames of {len(index_rows)} decoded")
+    if dv:
+        print(f"      -> median valid depth on vegetation: {np.median(dv):.1%}")
+    return session_json
+
+
+def main():
+    cfg = CONFIG
+    out_root = Path(cfg["OUTPUT_ROOT"])
+    for tool in ("FFMPEG", "FFPROBE"):
+        if not Path(cfg[tool]).exists() and not shutil.which(cfg[tool]):
+            sys.exit(f"ERROR: {tool} not found at {cfg[tool]}")
+
+    print("Discovering sessions...")
+    sessions = discover(cfg)
+    print(f"Found {len(sessions)} session folder(s)\n")
+    if not sessions:
+        sys.exit("Nothing to do. Check INPUT_ROOTS and RGB_PATTERNS.")
+
+    out_root.mkdir(parents=True, exist_ok=True)
+    results = []
+    for s in sessions:
+        try:
+            r = extract_session(s, out_root, cfg)
+            if r:
+                results.append(r)
+        except Exception as e:
+            print(f"  [FAIL] {s['folder']}: {e}")
+
+    rows = [{"session_id": r["session_id"], "capture_format": r["capture_format"],
+             "trip": r["trip"], "site": r["site"], "field": r["field"],
+             "scene_hint": r["scene_hint"],
+             "decoded": r["frames"]["decoded"], "pool": r["frames"]["pool"],
+             "timestamp_source": r["frames"]["timestamp_source"],
+             "dropped_at_capture": r["frames"]["dropped_at_capture"],
+             "has_svo": bool(r["source"]["svo_archive"]),
+             "has_confidence": bool(r["source"]["confidence_video"]),
+             "has_right": bool(r["source"]["right_video"]),
+             "median_depth_valid_frac_veg": r["pool_summary"]["median_depth_valid_frac_veg"],
+             "median_sharpness": r["pool_summary"]["median_sharpness"],
+             "n_warnings": len(r["warnings"]),
+             "source_folder": r["source"]["folder"]}
+            for r in results if not r.get("dry_run")]
+    if rows and not cfg["DRY_RUN"]:
+        with open(out_root / "registry.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+        print(f"\nRegistry written: {out_root / 'registry.csv'}")
+
+    print(f"\nDone. {len(results)} session(s) processed.")
+
+
+if __name__ == "__main__":
+    main()
