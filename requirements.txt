@@ -3,10 +3,9 @@ numpy
 opencv-python
 # ffmpeg / ffprobe are system tools and must be on PATH (not pip-installable).
 
-# Onion prelabeling with SAM 3 (annotation/prelabel_onions_sam3.py) only.
-# Needs a transformers version that includes SAM 3 (Sam3Model / Sam3Processor).
-transformers>=4.57
-torch
+# Onion prelabeling with SAM 3 / 3.1 (annotation/prelabel_onions_sam3.py) only.
+# Uses Meta's official sam3 package (pulls in torch); install it directly:
+#   pip install "git+https://github.com/facebookresearch/sam3.git"
 pillow
 
 # ZED field capture (capture/zed_capture.py) only.

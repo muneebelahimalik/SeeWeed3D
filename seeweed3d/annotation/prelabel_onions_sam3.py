@@ -28,6 +28,14 @@ THE TECHNIQUE (see also docs)
 
 Everything except the SAM 3 call is plain OpenCV/NumPy and is unit-testable
 without a GPU. The SAM 3 call is isolated in load_sam3()/sam3_masks().
+
+SAM 3 BACKEND
+-------------
+Uses Meta's official `sam3` package (github.com/facebookresearch/sam3), which
+loads a `.pt` checkpoint and supports BOTH SAM 3 and the faster SAM 3.1. This
+avoids depending on a transformers release that bundles SAM 3. Install once:
+
+    pip install "git+https://github.com/facebookresearch/sam3.git"
 """
 
 import csv
@@ -41,25 +49,25 @@ import numpy as np
 
 # #############################################################################
 # ##   DATASET_ROOT  -  the OUTPUT_ROOT you gave extract_sessions.py          ##
-# ##   SAM3_MODEL    -  HF model id "facebook/sam3", OR a local FOLDER that   ##
-# ##                    holds the downloaded model (config.json +             ##
-# ##                    model.safetensors + tokenizer files). This is the     ##
-# ##                    Transformers route; it does NOT use sam3.pt.          ##
+# ##   SAM_VERSION   -  "sam3" or "sam3.1" (the faster variant)               ##
+# ##   SAM_CHECKPOINT-  path to a local .pt (sam3.pt / sam3.1_multiplex.pt),  ##
+# ##                    or None to auto-download SAM_VERSION from Hugging Face ##
+# ##                    (needs `huggingface-cli login` for the gated repo).    ##
 # #############################################################################
 
-DATASET_ROOT = r"E:\Dataset_Vidalia"
-# Either the hub id (auto-downloads; needs `huggingface-cli login` for the gated
-# repo) or a local folder you downloaded it into, e.g.
-# r"C:\Users\mm17889\models\sam3".
-SAM3_MODEL   = "facebook/sam3"
+DATASET_ROOT   = r"E:\Dataset_Vidalia"
+SAM_VERSION    = "sam3.1"        # "sam3" | "sam3.1"
+# e.g. r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt". None => auto-download.
+SAM_CHECKPOINT = None
 
 # =============================================================================
 # CONFIG - advanced tuning below; defaults are sensible for onion-only scenes
 # =============================================================================
 
 CONFIG = {
-    "DATASET_ROOT": DATASET_ROOT,
-    "SAM3_MODEL":   SAM3_MODEL,
+    "DATASET_ROOT":   DATASET_ROOT,
+    "SAM_VERSION":    SAM_VERSION,
+    "SAM_CHECKPOINT": SAM_CHECKPOINT,
     "OUTPUT_SUBDIR": "auto_labels_onion",   # written under DATASET_ROOT/
 
     # Which sessions to prelabel. Empty = every session found under sessions/.
@@ -74,8 +82,7 @@ CONFIG = {
     "EXEMPLARS": {
         # "vid3_20260108_132749": [[900, 500, 1050, 780], [1200, 300, 1350, 560]],
     },
-    "SAM_CONF": 0.25,        # SAM 3 score threshold (post_process threshold=)
-    "MASK_THRESHOLD": 0.5,   # per-pixel mask binarization threshold
+    "SAM_CONF": 0.25,        # SAM 3 confidence threshold (detections below dropped)
     "DEVICE": "cuda",        # "cuda" | "cpu"
 
     # -- Vegetation prior (Excess-Green) --------------------------------------
@@ -109,30 +116,42 @@ ONION_LABEL = "onion plant"     # must match cvat_labels.json / project ontology
 
 # --------------------------------------------------------------------------- #
 # SAM 3 - the only GPU-dependent part, isolated so the rest is testable.
-# Uses the official Hugging Face Transformers API (Sam3Model / Sam3Processor),
-# exactly as documented on the facebook/sam3 model card. Imports are lazy so
-# this module loads (and the OpenCV logic is testable) without torch present.
+# Uses Meta's official `sam3` package (build_sam3_image_model + Sam3Processor),
+# which loads a .pt checkpoint and supports SAM 3 and SAM 3.1. Imports are lazy
+# so this module loads (and the OpenCV logic is testable) without sam3/torch.
 # --------------------------------------------------------------------------- #
 def load_sam3(cfg):
-    """Load SAM 3 via Transformers. Returns a handle dict used by sam3_masks()."""
+    """Load SAM 3 / 3.1 via the official sam3 package. Returns a handle dict."""
     import torch
-    from transformers import Sam3Model, Sam3Processor
+    from sam3.model_builder import build_sam3_image_model
+    from sam3.model.sam3_image_processor import Sam3Processor
+
     want = cfg["DEVICE"]
     device = "cuda" if (want.startswith("cuda") and torch.cuda.is_available()) else "cpu"
     if want.startswith("cuda") and device == "cpu":
         print("[WARN] CUDA requested but not available - running SAM 3 on CPU (slow).")
-    model = Sam3Model.from_pretrained(cfg["SAM3_MODEL"]).to(device)
-    model.eval()
-    processor = Sam3Processor.from_pretrained(cfg["SAM3_MODEL"])
+
+    ckpt = cfg["SAM_CHECKPOINT"]
+    if ckpt is None and cfg["SAM_VERSION"] != "sam3":
+        # Auto-fetch a non-default version (e.g. sam3.1) by its HF checkpoint.
+        from sam3.model_builder import download_ckpt_from_hf
+        ckpt = download_ckpt_from_hf(version=cfg["SAM_VERSION"])
+    print(f"[INFO] loading {cfg['SAM_VERSION']} on {device} "
+          f"({'auto-download' if ckpt is None else ckpt})")
+
+    model = build_sam3_image_model(device=device, checkpoint_path=ckpt,
+                                   load_from_HF=(ckpt is None), eval_mode=True)
+    processor = Sam3Processor(model)
+    try:
+        processor.set_confidence_threshold(cfg["SAM_CONF"])
+    except Exception as e:
+        print(f"[WARN] could not set confidence threshold: {e}")
     return {"model": model, "processor": processor, "device": device, "torch": torch}
 
 
-def _post_masks(processor, outputs, inputs, cfg):
-    """Run post_process_instance_segmentation -> list of boolean HxW masks."""
-    res = processor.post_process_instance_segmentation(
-        outputs, threshold=cfg["SAM_CONF"], mask_threshold=cfg["MASK_THRESHOLD"],
-        target_sizes=inputs.get("original_sizes").tolist())[0]
-    masks = res.get("masks")
+def _state_masks(state):
+    """Pull binary masks (original resolution) out of a processor state dict."""
+    masks = state.get("masks") if isinstance(state, dict) else None
     if masks is None or len(masks) == 0:
         return []
     masks = masks.cpu().numpy() if hasattr(masks, "cpu") else np.asarray(masks)
@@ -146,25 +165,26 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
     visually; otherwise each text concept is run and their masks are unioned for
     recall. Returns [] if SAM produced nothing (caller falls back to ExG)."""
     from PIL import Image
-    torch = predictor["torch"]
-    model, processor, device = predictor["model"], predictor["processor"], predictor["device"]
+    processor = predictor["processor"]
     image = Image.open(str(image_path)).convert("RGB")
+    w, h = image.size
+    state = processor.set_image(image)      # backbone features computed once
 
     out = []
     if exemplars:
-        boxes = [[list(map(float, b)) for b in exemplars]]     # [batch, n_boxes, 4]
-        labels = [[1] * len(exemplars)]                        # 1 = positive
-        inputs = processor(images=image, input_boxes=boxes,
-                           input_boxes_labels=labels, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = model(**inputs)
-        out.extend(_post_masks(processor, outputs, inputs, cfg))
+        # add_geometric_prompt wants normalized [cx, cy, w, h]; config is xyxy px.
+        processor.reset_all_prompts(state)
+        for b in exemplars:
+            x1, y1, x2, y2 = map(float, b)
+            box = [((x1 + x2) / 2) / w, ((y1 + y2) / 2) / h,
+                   (x2 - x1) / w, (y2 - y1) / h]
+            state = processor.add_geometric_prompt(box=box, label=True, state=state)
+        out.extend(_state_masks(state))
     else:
         for text in cfg["SAM_TEXT_PROMPTS"]:
-            inputs = processor(images=image, text=text, return_tensors="pt").to(device)
-            with torch.no_grad():
-                outputs = model(**inputs)
-            out.extend(_post_masks(processor, outputs, inputs, cfg))
+            processor.reset_all_prompts(state)
+            state = processor.set_text_prompt(prompt=text, state=state)
+            out.extend(_state_masks(state))
     return out
 
 

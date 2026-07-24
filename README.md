@@ -66,8 +66,9 @@ v1→v2 changes are in `docs/capture_changelog.md`.
   `requirements.txt`.
 - Capture additionally needs the **ZED SDK** + `pyzed` (installed via the SDK,
   not pip).
-- Onion prelabeling additionally needs `transformers` + `torch` and access to
-  the gated `facebook/sam3` model.
+- Onion prelabeling additionally needs Meta's official `sam3` package (`pip
+  install "git+https://github.com/facebookresearch/sam3.git"`, which pulls in
+  `torch`) and access to the gated `facebook/sam3` / `facebook/sam3.1` weights.
 
 ```bash
 pip install -r requirements.txt
