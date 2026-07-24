@@ -43,35 +43,71 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# #############################################################################
+# ##                                                                         ##
+# ##   1)  INPUT DIRECTORIES  -  where your recorded sessions live           ##
+# ##   2)  OUTPUT DIRECTORY   -  where the extracted dataset is written      ##
+# ##                                                                         ##
+# ##   These are the ONLY two things you usually need to change. Everything  ##
+# ##   below them has working defaults. ffmpeg is found on PATH automatically##
+# ##                                                                         ##
+# #############################################################################
+
+# ---------------------------------------------------------------------------
+# 1) INPUT DIRECTORIES
+# ---------------------------------------------------------------------------
+# Add one block per field visit / camera / trip. Each `path` is a folder that
+# CONTAINS the Session_* recording folders; it is searched RECURSIVELY, so a
+# single path covering many sessions is fine. Add as many blocks as you like -
+# v1 (March 2025) and v2 recordings can be mixed freely; the format of each
+# session is detected automatically.
+#
+#   path        : folder holding the Session_* folders (searched recursively).
+#                 Use a raw string on Windows: r"C:\ZED\DataCollection\Vidalia2"
+#                 A plain POSIX path also works:   "/data/zed/vidalia2"
+#   trip        : short, STABLE code. Becomes the session_id prefix, so keep it
+#                 unique per visit and never rename it once annotation starts.
+#   site/field  : provenance, copied into every session's metadata.
+#   scene_hint  : mixed | onion_only | weed_only | unknown  (best guess is fine)
+#   notes       : free text, stored in the registry for your own reference.
+
+INPUT_ROOTS = [
+    {
+        "path":       r"C:\ZED\DataCollection\Vidalia2",
+        "trip":       "vid2",
+        "site":       "vidalia",
+        "field":      "field_A",
+        "scene_hint": "mixed",        # mixed | onion_only | weed_only | unknown
+        "notes":      "March 2025 visit - v1 capture format",
+    },
+    # Add more visits by uncommenting and editing:
+    # {
+    #     "path":       r"M:\Research\Data\Vidalia_onions_visit3",
+    #     "trip":       "vid3", "site": "vidalia", "field": "field_A",
+    #     "scene_hint": "mixed",
+    #     "notes":      "v2 capture - SVO + confidence + locked exposure",
+    # },
+]
+
+# ---------------------------------------------------------------------------
+# 2) OUTPUT DIRECTORY  -  the indexed, QC'd dataset is written here
+# ---------------------------------------------------------------------------
+OUTPUT_ROOT = r"M:\Research\Data\SeeWeed3D\dataset"
+
 # =============================================================================
-# CONFIG - EDIT THIS BLOCK ONLY
+# Everything below is advanced tuning. The defaults are sensible.
 # =============================================================================
 
 CONFIG = {
-    # -- Where the raw recordings live. One entry per field visit / trip. ------
-    # `path`  : folder CONTAINING the Session_* folders (searched recursively)
-    # `trip`  : short code, becomes the session_id prefix. Keep short + stable.
-    "INPUT_ROOTS": [
-        {
-            "path":       r"C:\ZED\DataCollection\Vidalia2",
-            "trip":       "vid2",
-            "site":       "vidalia",
-            "field":      "field_A",
-            "scene_hint": "mixed",        # mixed | onion_only | weed_only | unknown
-            "notes":      "March 2025 visit - v1 capture format",
-        },
-        # {
-        #     "path":       r"M:\Research\Data\Vidalia_onions_visit3",
-        #     "trip":       "vid3", "site": "vidalia", "field": "field_A",
-        #     "scene_hint": "mixed",
-        #     "notes":      "v2 capture - SVO + confidence + locked exposure",
-        # },
-    ],
+    "INPUT_ROOTS": INPUT_ROOTS,
+    "OUTPUT_ROOT": OUTPUT_ROOT,
 
-    "OUTPUT_ROOT": r"M:\Research\Data\SeeWeed3D\dataset",
-
-    "FFMPEG":  r"C:\ffmpeg\ffmpeg-7.1-essentials_build\bin\ffmpeg.exe",
-    "FFPROBE": r"C:\ffmpeg\ffmpeg-7.1-essentials_build\bin\ffprobe.exe",
+    # -- ffmpeg / ffprobe ------------------------------------------------------
+    # Left as bare names, they are found on PATH automatically (Linux/macOS, or
+    # Windows once ffmpeg is on PATH). Override with a full path only if ffmpeg
+    # is not on PATH, e.g. r"C:\ffmpeg\bin\ffmpeg.exe".
+    "FFMPEG":  "ffmpeg",
+    "FFPROBE": "ffprobe",
 
     # -- File discovery (case-insensitive). Covers every visit variant. --------
     "RGB_PATTERNS":   ["rgb_video.mkv", "rgb.mkv", "left.mkv", "*left*.mkv"],
@@ -339,8 +375,12 @@ def frame_metrics(bgr, depth, conf, cfg):
     else:
         cs = cv2.resize(conf, (small.shape[1], small.shape[0]),
                         interpolation=cv2.INTER_NEAREST).astype(np.float32)
-        m["conf_mean"] = round(float(cs.mean()), 2)
-        m["conf_mean_veg"] = round(float(cs[veg].mean()), 2) if veg.any() else ""
+        # 255 is the capture-time "no measure" sentinel (real confidence is
+        # 0-100); exclude it so the mean reflects genuine confidence only.
+        real = cs <= 100
+        vegr = veg & real
+        m["conf_mean"] = round(float(cs[real].mean()), 2) if real.any() else ""
+        m["conf_mean_veg"] = round(float(cs[vegr].mean()), 2) if vegr.any() else ""
     return m
 
 
@@ -363,6 +403,14 @@ def discover(cfg):
         for folder in [root] + [p for p in root.rglob("*") if p.is_dir()]:
             rgb = find_one(folder, cfg["RGB_PATTERNS"])
             if rgb is None:
+                # Flag folders that look like a recording but have no decodable
+                # left/RGB video (e.g. SVO-only), so they are not silently lost.
+                has_depth = find_one(folder, cfg["DEPTH_PATTERNS"]) is not None
+                has_svo = next((p for p in folder.glob("*.svo*")), None) is not None
+                if has_depth or has_svo:
+                    why = "SVO only - decode it to MKV first" if has_svo else \
+                          "depth present but no RGB/left MKV"
+                    print(f"  [SKIP] {folder} : no RGB video ({why})")
                 continue
 
             def opt(name):
@@ -589,10 +637,21 @@ def extract_session(sess, out_root, cfg):
 
 def main():
     cfg = CONFIG
-    out_root = Path(cfg["OUTPUT_ROOT"])
+
+    # Resolve ffmpeg/ffprobe: accept a full path, otherwise look on PATH.
     for tool in ("FFMPEG", "FFPROBE"):
-        if not Path(cfg[tool]).exists() and not shutil.which(cfg[tool]):
-            sys.exit(f"ERROR: {tool} not found at {cfg[tool]}")
+        given = cfg[tool]
+        resolved = given if Path(given).exists() else shutil.which(given)
+        if not resolved:
+            sys.exit(f"ERROR: {tool} '{given}' not found. Install ffmpeg and put "
+                     f"it on PATH, or set CONFIG['{tool}'] to its full path.")
+        cfg[tool] = resolved
+        print(f"  {tool}: {resolved}")
+
+    if not cfg["INPUT_ROOTS"]:
+        sys.exit("ERROR: INPUT_ROOTS is empty. Add at least one input directory "
+                 "at the top of this file.")
+    out_root = Path(cfg["OUTPUT_ROOT"])
 
     print("Discovering sessions...")
     sessions = discover(cfg)

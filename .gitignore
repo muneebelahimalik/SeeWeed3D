@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Dataset / recordings (regenerable or large; keep out of git)
+dataset/
+batches/
+*.mkv
+*.svo
+*.svo2
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

@@ -411,6 +411,10 @@ class WriterThread(threading.Thread):
                     d = np.clip(it["depth"], 0, clip).astype(np.uint16)
                     self.procs["depth"].stdin.write(d.tobytes())
                 if "conf" in self.procs and it["conf"] is not None:
+                    # ZED confidence occupies 0-100. NaN (no measure computed) is
+                    # stored as 255, a value OUTSIDE that range, so it can never
+                    # be confused with a real confidence reading. Documented as a
+                    # reserved sentinel in session.json -> confidence_encoding.
                     c = np.clip(np.nan_to_num(it["conf"], nan=255.0),
                                 0, 255).astype(np.uint8)
                     self.procs["conf"].stdin.write(c.tobytes())
@@ -500,7 +504,11 @@ def write_session_json(save_dir, cfg, zed, calib, cap_thread, writer, w, h, fps,
                     "in this file: depth_vis_max_mm in the v1 format was a GUI "
                     "value that was repeatedly mistaken for a data scale."},
         "confidence_encoding": {
-            "container": "FFV1 MKV, gray8", "range": [0, 255],
+            "container": "FFV1 MKV, gray8", "range": [0, 100],
+            "no_measure_sentinel": 255,
+            "note": "Real confidence is 0-100. 255 is a reserved sentinel for "
+                    "pixels with no confidence measure (NaN at capture); it is "
+                    "out of the valid range and must be excluded before filtering.",
             "polarity": cap_thread.confidence_polarity() if cap_thread else {}},
         "clocks": {
             "image_timestamp_ns": "ZED IMAGE clock",

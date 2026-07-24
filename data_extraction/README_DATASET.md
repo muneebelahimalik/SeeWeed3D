@@ -156,7 +156,10 @@ prelabel quality and annotation time honestly, then `b02_seed`.
 
 ## 7. Suggested run order
 
-1. Set `INPUT_ROOTS` / `OUTPUT_ROOT` / `FFMPEG`, run stage 1 with `DRY_RUN=True`.
+1. Set the two prominent blocks at the top of `01_extract_sessions.py` —
+   `INPUT_ROOTS` (one entry per visit; paths are searched recursively) and
+   `OUTPUT_ROOT`. `ffmpeg`/`ffprobe` are found on PATH automatically; only set
+   `CONFIG["FFMPEG"]` if they are not on PATH. Run stage 1 with `DRY_RUN=True`.
 2. Confirm session IDs and warnings, then run for real.
 3. Read `registry.csv` — pick holdout sessions, sanity-check `median_depth_valid_frac_veg`.
 4. Run stage 2 with only `b01_gold` enabled; the gate report tells you which

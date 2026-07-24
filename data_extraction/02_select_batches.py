@@ -20,17 +20,24 @@ import csv
 import json
 import random
 import shutil
+import zlib
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# #############################################################################
+# ##   DATASET_ROOT  -  MUST match OUTPUT_ROOT from 01_extract_sessions.py    ##
+# ##   This is the one path you must set. Everything else has defaults.       ##
+# #############################################################################
+
+DATASET_ROOT = r"M:\Research\Data\SeeWeed3D\dataset"
+
 # =============================================================================
-# CONFIG - EDIT THIS BLOCK ONLY
+# CONFIG - advanced tuning below; defaults are sensible
 # =============================================================================
 
 CONFIG = {
-    # Must match OUTPUT_ROOT from 01_extract_sessions.py
-    "DATASET_ROOT": r"M:\Research\Data\SeeWeed3D\dataset",
+    "DATASET_ROOT": DATASET_ROOT,
 
     # -- Held-out sessions: whole sessions reserved for testing. ---------------
     # Put entire SESSIONS here, never individual frames. Fill this in after you
@@ -250,7 +257,11 @@ def build_batch(spec, rows, root, cfg, taken_hashes, taken_ids):
     stress_pool = ranked[:max(n_stress * 6, 40)]
     normal_pool = ranked[max(n_stress * 6, 40):] or ranked
 
-    rng = random.Random(cfg["RANDOM_SEED"] + hash(spec["name"]) % 10000)
+    # zlib.crc32 gives a STABLE per-batch offset. Python's built-in hash() is
+    # salted per process (PYTHONHASHSEED), so it would make RANDOM_SEED useless
+    # for reproducibility across runs - which is the whole point of a seed.
+    name_offset = zlib.crc32(spec["name"].encode("utf-8"))
+    rng = random.Random(cfg["RANDOM_SEED"] + name_offset)
     rng.shuffle(stress_pool)
     rng.shuffle(normal_pool)
 
@@ -258,6 +269,11 @@ def build_batch(spec, rows, root, cfg, taken_hashes, taken_ids):
                          cap, taken_hashes, taken_ids)
     sel += greedy_diverse(normal_pool, n - len(sel), cfg["MIN_PHASH_DISTANCE"],
                           cap, taken_hashes, taken_ids)
+
+    if not sel:
+        print(f"  [{spec['name']}] selected 0 frames - nothing left after "
+              f"dedup/quotas (earlier batches may have taken everything). Skipped.")
+        return None
 
     bdir = root / "batches" / spec["name"]
     (bdir / "images").mkdir(parents=True, exist_ok=True)
@@ -279,6 +295,11 @@ def build_batch(spec, rows, root, cfg, taken_hashes, taken_ids):
             "depth_valid_frac", "depth_valid_frac_veg", "depth_median_mm", "phash")}
             | {"difficulty_score": round(difficulty(r), 3),
                "batch": spec["name"], "split_pool": spec["pool"]})
+
+    if not man:
+        print(f"  [{spec['name']}] {len(sel)} frames selected but none copied - "
+              f"their RGB files are missing under sessions/. Re-run stage 1?")
+        return None
 
     with open(bdir / "manifest.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(man[0].keys()))
