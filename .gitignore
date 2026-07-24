@@ -12,6 +12,11 @@ batches/
 *.svo
 *.svo2
 
+# Model weights (huge; download separately, keep out of git)
+*.pt
+*.safetensors
+models/
+
 # OS / editor
 .DS_Store
 .idea/

@@ -7,7 +7,7 @@ writes it as CVAT-importable COCO, so annotators VERIFY masks instead of
 drawing them. Meant for onion-only recordings, where the hard onion-vs-weed
 decision does not exist and green vegetation can be treated as onion.
 
-    Run 01_extract_sessions.py first (this reads its output pool).
+    Run extraction/extract_sessions.py first (this reads its output pool).
 
 WHY THIS IS SAFE HERE, AND ONLY HERE
 ------------------------------------
@@ -40,12 +40,18 @@ import cv2
 import numpy as np
 
 # #############################################################################
-# ##   DATASET_ROOT  -  the OUTPUT_ROOT you gave 01_extract_sessions.py       ##
-# ##   SAM3_MODEL    -  path to the gated sam3.pt weights (3.45 GB)           ##
+# ##   DATASET_ROOT  -  the OUTPUT_ROOT you gave extract_sessions.py          ##
+# ##   SAM3_MODEL    -  HF model id "facebook/sam3", OR a local FOLDER that   ##
+# ##                    holds the downloaded model (config.json +             ##
+# ##                    model.safetensors + tokenizer files). This is the     ##
+# ##                    Transformers route; it does NOT use sam3.pt.          ##
 # #############################################################################
 
 DATASET_ROOT = r"E:\Dataset_Vidalia"
-SAM3_MODEL   = r"sam3.pt"     # request access + download from the SAM 3 HF page
+# Either the hub id (auto-downloads; needs `huggingface-cli login` for the gated
+# repo) or a local folder you downloaded it into, e.g.
+# r"C:\Users\mm17889\models\sam3".
+SAM3_MODEL   = "facebook/sam3"
 
 # =============================================================================
 # CONFIG - advanced tuning below; defaults are sensible for onion-only scenes
@@ -68,9 +74,9 @@ CONFIG = {
     "EXEMPLARS": {
         # "vid3_20260108_132749": [[900, 500, 1050, 780], [1200, 300, 1350, 560]],
     },
-    "SAM_CONF": 0.25,        # SAM 3 confidence floor
-    "DEVICE": "cuda:0",      # "cuda:0" | "cpu"
-    "QUANTIZE": 16,          # 16 = FP16 (faster on GPU); 32 = FP32
+    "SAM_CONF": 0.25,        # SAM 3 score threshold (post_process threshold=)
+    "MASK_THRESHOLD": 0.5,   # per-pixel mask binarization threshold
+    "DEVICE": "cuda",        # "cuda" | "cpu"
 
     # -- Vegetation prior (Excess-Green) --------------------------------------
     "EXG_THRESHOLD": 0.05,   # exg > this = vegetation. Lower = more permissive.
@@ -103,34 +109,63 @@ ONION_LABEL = "onion plant"     # must match cvat_labels.json / project ontology
 
 # --------------------------------------------------------------------------- #
 # SAM 3 - the only GPU-dependent part, isolated so the rest is testable.
+# Uses the official Hugging Face Transformers API (Sam3Model / Sam3Processor),
+# exactly as documented on the facebook/sam3 model card. Imports are lazy so
+# this module loads (and the OpenCV logic is testable) without torch present.
 # --------------------------------------------------------------------------- #
 def load_sam3(cfg):
-    """Build a SAM 3 semantic predictor. Import is lazy so this module can be
-    imported (and the OpenCV logic tested) without ultralytics/torch present."""
-    from ultralytics.models.sam import SAM3SemanticPredictor
-    overrides = {"conf": cfg["SAM_CONF"], "task": "segment", "mode": "predict",
-                 "model": cfg["SAM3_MODEL"], "quantize": cfg["QUANTIZE"],
-                 "device": cfg["DEVICE"], "save": False, "verbose": False}
-    return SAM3SemanticPredictor(overrides=overrides)
+    """Load SAM 3 via Transformers. Returns a handle dict used by sam3_masks()."""
+    import torch
+    from transformers import Sam3Model, Sam3Processor
+    want = cfg["DEVICE"]
+    device = "cuda" if (want.startswith("cuda") and torch.cuda.is_available()) else "cpu"
+    if want.startswith("cuda") and device == "cpu":
+        print("[WARN] CUDA requested but not available - running SAM 3 on CPU (slow).")
+    model = Sam3Model.from_pretrained(cfg["SAM3_MODEL"]).to(device)
+    model.eval()
+    processor = Sam3Processor.from_pretrained(cfg["SAM3_MODEL"])
+    return {"model": model, "processor": processor, "device": device, "torch": torch}
+
+
+def _post_masks(processor, outputs, inputs, cfg):
+    """Run post_process_instance_segmentation -> list of boolean HxW masks."""
+    res = processor.post_process_instance_segmentation(
+        outputs, threshold=cfg["SAM_CONF"], mask_threshold=cfg["MASK_THRESHOLD"],
+        target_sizes=inputs.get("original_sizes").tolist())[0]
+    masks = res.get("masks")
+    if masks is None or len(masks) == 0:
+        return []
+    masks = masks.cpu().numpy() if hasattr(masks, "cpu") else np.asarray(masks)
+    return [m.astype(bool) for m in masks]
 
 
 def sam3_masks(predictor, image_path, cfg, exemplars=None):
-    """Return a list of boolean HxW masks for the onion concept in one image.
+    """Return boolean HxW onion masks for one image.
 
-    Uses image-exemplar bboxes when provided for this session, else the text
-    concepts. Returns [] if SAM produced nothing (caller falls back to ExG)."""
-    predictor.set_image(str(image_path))
+    With exemplars (positive bboxes on this session's frames) SAM 3 is prompted
+    visually; otherwise each text concept is run and their masks are unioned for
+    recall. Returns [] if SAM produced nothing (caller falls back to ExG)."""
+    from PIL import Image
+    torch = predictor["torch"]
+    model, processor, device = predictor["model"], predictor["processor"], predictor["device"]
+    image = Image.open(str(image_path)).convert("RGB")
+
+    out = []
     if exemplars:
-        results = predictor(bboxes=[list(map(float, b)) for b in exemplars])
+        boxes = [[list(map(float, b)) for b in exemplars]]     # [batch, n_boxes, 4]
+        labels = [[1] * len(exemplars)]                        # 1 = positive
+        inputs = processor(images=image, input_boxes=boxes,
+                           input_boxes_labels=labels, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        out.extend(_post_masks(processor, outputs, inputs, cfg))
     else:
-        results = predictor(text=list(cfg["SAM_TEXT_PROMPTS"]))
-    res = results[0] if isinstance(results, (list, tuple)) else results
-    masks = getattr(res, "masks", None)
-    if masks is None or getattr(masks, "data", None) is None:
-        return []
-    arr = masks.data
-    arr = arr.cpu().numpy() if hasattr(arr, "cpu") else np.asarray(arr)
-    return [m > 0.5 for m in arr]
+        for text in cfg["SAM_TEXT_PROMPTS"]:
+            inputs = processor(images=image, text=text, return_tensors="pt").to(device)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            out.extend(_post_masks(processor, outputs, inputs, cfg))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -324,7 +359,7 @@ def main(predictor_factory=load_sam3, sam_fn=sam3_masks):
     root = Path(cfg["DATASET_ROOT"])
     sessions_root = root / "sessions"
     if not sessions_root.exists():
-        sys.exit(f"ERROR: {sessions_root} not found. Run 01_extract_sessions.py first.")
+        sys.exit(f"ERROR: {sessions_root} not found. Run extract_sessions.py first.")
 
     sids = sorted(p.name for p in sessions_root.iterdir() if p.is_dir())
     if cfg["ONLY_SESSIONS"]:

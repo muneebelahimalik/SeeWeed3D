@@ -10,7 +10,7 @@ Handles BOTH capture formats transparently:
       RGB_video.mkv + Depth_video.mkv + calibration_params.txt
       [+ session_meta.txt] [+ frames.csv with column `frame_idx`]
 
-  v2 (zed_capture_v2.py)
+  v2 (capture/zed_capture.py)
       + RGB_right_video.mkv, Confidence_video.mkv, recording.svo2
       + calibration.json, session.json, dropped_frames.csv
       + frames.csv with `video_frame_idx` / `capture_frame_idx`, exposure,
@@ -459,7 +459,7 @@ def extract_session(sess, out_root, cfg):
         warnings.append("no depth video - RGB only session")
     if fmt == "v1":
         warnings.append("v1 capture format: no confidence map, no right image, no "
-                        "SVO, no exposure/pose log - see docs/CAPTURE_CHANGELOG.md")
+                        "SVO, no exposure/pose log - see docs/capture_changelog.md")
 
     calib = (parse_calibration_json(sess["calib_json"])
              or parse_calibration_txt(sess["calib_txt"]))

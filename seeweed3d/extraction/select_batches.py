@@ -13,7 +13,7 @@ test set into training and inflates every metric. Sessions listed in
 HOLDOUT_SESSIONS are removed from all training batches and can only be drawn
 into a batch explicitly marked pool="holdout".
 
-Run 01_extract_sessions.py first.
+Run extraction/extract_sessions.py first.
 """
 
 import csv
@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # #############################################################################
-# ##   DATASET_ROOT  -  MUST match OUTPUT_ROOT from 01_extract_sessions.py    ##
+# ##   DATASET_ROOT  -  MUST match OUTPUT_ROOT from extract_sessions.py       ##
 # ##   This is the one path you must set. Everything else has defaults.       ##
 # #############################################################################
 
