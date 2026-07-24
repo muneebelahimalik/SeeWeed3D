@@ -1,4 +1,4 @@
-# Stage 3 — Onion prelabeling with SAM 3 (`03_prelabel_onions_sam3.py`)
+# Onion prelabeling with SAM 3 (`annotation/prelabel_onions_sam3.py`)
 
 Auto-generates a high-recall onion **safety mask** for every pooled frame and
 writes it as CVAT-importable COCO, so annotators **verify** masks instead of
@@ -24,28 +24,52 @@ signal. **Do not point this script at mixed or weed scenes.**
    polygons under the `onion plant` label.
 
 Everything except the SAM 3 call is plain OpenCV/NumPy; the SAM 3 call is
-isolated in `load_sam3()` / `sam3_masks()`.
+isolated in `load_sam3()` / `sam3_masks()`, so the rest is unit-testable and the
+model backend can be swapped without touching the pipeline.
 
 ## Prerequisites
 
 ```bash
-pip install ultralytics opencv-python numpy
+pip install -U transformers torch pillow opencv-python numpy
 ```
-`sam3.pt` (3.45 GB) is gated: request access on the SAM 3 Hugging Face page,
-download it, and point `SAM3_MODEL` at it. A CUDA GPU is expected
-(`DEVICE="cuda:0"`); `"cpu"` works but is slow.
+SAM 3 is loaded through the **official Hugging Face Transformers API**
+(`Sam3Model` / `Sam3Processor`), exactly as documented on the `facebook/sam3`
+model card. You need a `transformers` version new enough to include SAM 3.
+
+`facebook/sam3` is a **gated** model — request access on its Hugging Face page,
+then either:
+- log in once with `huggingface-cli login` and set `SAM3_MODEL = "facebook/sam3"`
+  (weights auto-download and cache), **or**
+- download the model folder yourself and point `SAM3_MODEL` at that folder.
+
+### Where to put the model files
+The download is ~6.9 GB — keep it **outside the git repo** (it is gitignored
+anyway). The Transformers route needs the *folder* containing `config.json`,
+`model.safetensors`, `processor_config.json` and the tokenizer files — **not**
+`sam3.pt` (that checkpoint is for the separate `sam3` package route). Example:
+
+```
+C:\Users\mm17889\models\sam3\
+    config.json  model.safetensors  processor_config.json
+    tokenizer.json  tokenizer_config.json  vocab.json  merges.txt  special_tokens_map.json
+```
+```python
+SAM3_MODEL = r"C:\Users\mm17889\models\sam3"
+```
+
+A CUDA GPU is expected (`DEVICE="cuda"`); `"cpu"` works but is slow.
 
 ## Run
 
-Set the two values at the top:
+Set the two values at the top of the script:
 ```python
-DATASET_ROOT = r"E:\Dataset_Vidalia"   # = OUTPUT_ROOT from stage 1
-SAM3_MODEL   = r"C:\models\sam3.pt"
+DATASET_ROOT = r"E:\Dataset_Vidalia"      # = OUTPUT_ROOT from extract_sessions.py
+SAM3_MODEL   = "facebook/sam3"            # or a local model folder
 ```
 Trial on a few frames first (`CONFIG["LIMIT_PER_SESSION"] = 20`), eyeball the
 overlays, then set it back to `None` for the full pool:
 ```bash
-python data_extraction/03_prelabel_onions_sam3.py
+python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
 Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
@@ -59,7 +83,7 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 ## Into CVAT
 
 1. Create a task from `sessions/<session_id>/rgb/`.
-2. Paste `cvat_labels.json` (from stage 2) into the **Raw** label editor.
+2. Paste `cvat_labels.json` (from `select_batches.py`) into the **Raw** label editor.
 3. Import that session's `instances_default.json` as **COCO 1.0**.
 4. **Verify**: fix leaf edges, delete the rare stray weed. Prioritize coverage
    over splitting overlapping leaves — this is a safety mask.
@@ -69,7 +93,8 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 
 | Key | Effect |
 |---|---|
-| `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts vs. per-session exemplar boxes (more reliable if text under-segments) |
+| `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts (unioned) vs. per-session exemplar boxes (more reliable if text under-segments) |
+| `SAM_CONF` / `MASK_THRESHOLD` | SAM 3 score floor / per-pixel mask binarization |
 | `EXG_THRESHOLD` | lower = more permissive vegetation prior |
 | `SAM_VEG_OVERLAP_MIN` | how much of a SAM mask must sit on vegetation to be kept |
 | `RECOVER_VEG_MIN_PX` | min size of a veg region SAM missed before it is added back |

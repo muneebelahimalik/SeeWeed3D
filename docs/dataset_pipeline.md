@@ -3,16 +3,17 @@
 Edit only the `CONFIG` block at the top of each script.
 
 ```
-python capture/zed_capture_v2.py          # field capture (v2 format)
-python dataset/01_extract_sessions.py     # recordings -> indexed, QC'd frame pool
-python dataset/02_select_batches.py       # pool -> CVAT-ready annotation batches
+python seeweed3d/capture/zed_capture.py          # field capture (v2 format)
+python seeweed3d/extraction/extract_sessions.py  # recordings -> indexed, QC'd pool
+python seeweed3d/extraction/select_batches.py    # pool -> CVAT-ready batches
+python seeweed3d/annotation/prelabel_onions_sam3.py  # onion-only SAM 3 prelabels
 ```
 
 ## Capture formats
 
 The extractor reads both and tags each session in `registry.csv`:
 
-| | v1 (legacy, March 2025) | v2 (`zed_capture_v2.py`) |
+| | v1 (legacy, March 2025) | v2 (`capture/zed_capture.py`) |
 |---|---|---|
 | Left rectified | yes | yes |
 | Right image | no | via SVO (+ optional MKV) |
@@ -23,13 +24,13 @@ The extractor reads both and tags each session in `registry.csv`:
 | Pose / IMU | **no** | per frame + ROS 2 join key |
 | Dropped frames | counted then discarded | listed in `dropped_frames.csv` |
 
-Existing v1 data needs no migration. See `docs/CAPTURE_CHANGELOG.md`.
+Existing v1 data needs no migration. See `docs/capture_changelog.md`.
 
 ---
 
 ## 1. Depth semantics — read this before touching a depth file
 
-Verified directly against `zed_app_updated_2026_jan.py`, not assumed:
+Verified directly against the v1 capture app (`legacy/zed_app_v1.py`), not assumed:
 
 | Property | Value | Source |
 |---|---|---|
@@ -156,7 +157,7 @@ prelabel quality and annotation time honestly, then `b02_seed`.
 
 ## 7. Suggested run order
 
-1. Set the two prominent blocks at the top of `01_extract_sessions.py` —
+1. Set the two prominent blocks at the top of `extraction/extract_sessions.py` —
    `INPUT_ROOTS` (one entry per visit; paths are searched recursively) and
    `OUTPUT_ROOT`. `ffmpeg`/`ffprobe` are found on PATH automatically; only set
    `CONFIG["FFMPEG"]` if they are not on PATH. Run stage 1 with `DRY_RUN=True`.
@@ -175,7 +176,7 @@ prelabel quality and annotation time honestly, then `b02_seed`.
 ## 8. Gaps in the v1 data (fixed in v2 capture, not retroactively)
 
 These constrain what the March 2025 recordings can support. All are addressed in
-`zed_capture_v2.py` going forward, but none can be recovered from existing files:
+`capture/zed_capture.py` going forward, but none can be recovered from existing files:
 
 - **No right image.** Only `VIEW.LEFT` was saved, so stereo cannot be
   re-processed with different matching settings, and the plan's "retain raw left

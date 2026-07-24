@@ -5,7 +5,7 @@ SeeWeed3D - ZED capture application v2
 Rewrite of zed_app_updated_2026_jan.py. Fixes the five limitations that made the
 existing recordings unable to support 3D LEP error measurement.
 
-WHAT CHANGED AND WHY  (full rationale in docs/CAPTURE_CHANGELOG.md)
+WHAT CHANGED AND WHY  (full rationale in docs/capture_changelog.md)
 --------------------------------------------------------------------
  1. SVO2 archive.        The SDK records the raw stereo stream on every grab().
                          This single change retroactively fixes "no right image"
@@ -102,7 +102,7 @@ CONFIG = {
     # -- Pose ------------------------------------------------------------------
     # ZED visual-inertial odometry. Convenience only: it drifts badly over
     # repetitive crop rows. Record Amiga/ROS 2 odometry in parallel and join on
-    # host_realtime_ns. See docs/CAPTURE_CHANGELOG.md section "Clock alignment".
+    # host_realtime_ns. See docs/capture_changelog.md section "Clock alignment".
     "ENABLE_POSITIONAL_TRACKING": True,
     "LOG_IMU": True,
 

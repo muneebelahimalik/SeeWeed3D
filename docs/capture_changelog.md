@@ -1,6 +1,6 @@
 # Capture changelog — v1 → v2
 
-`capture/zed_capture_v2.py` replaces `zed_app_updated_2026_jan.py`.
+`seeweed3d/capture/zed_capture.py` replaces the v1 app (now `legacy/zed_app_v1.py`).
 
 Every change below exists because something in the v1 recordings could not be
 recovered afterwards. Nothing here is stylistic.
@@ -144,7 +144,7 @@ which is the number to check before trusting any sub-millimetre LEP target.
 
 ## Backward compatibility
 
-`01_extract_sessions.py` reads **both** formats and tags each session
+`extraction/extract_sessions.py` reads **both** formats and tags each session
 `capture_format: v1 | v2` in `registry.csv`. Existing March 2025 data needs no
 migration and no re-processing. v1 sessions get a warning listing what is
 missing, so a later analysis cannot silently assume confidence data exists.
