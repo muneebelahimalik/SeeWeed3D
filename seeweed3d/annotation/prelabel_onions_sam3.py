@@ -150,13 +150,28 @@ def load_sam3(cfg):
     return {"model": model, "processor": processor, "device": device, "torch": torch}
 
 
+_SHAPE_LOGGED = False
+
+
 def _state_masks(state):
-    """Pull binary masks (original resolution) out of a processor state dict."""
+    """Pull binary masks out of a processor state dict as a list of 2-D bool
+    arrays, whatever nesting SAM used ([N,H,W], [N,1,H,W], [H,W], ...)."""
+    global _SHAPE_LOGGED
     masks = state.get("masks") if isinstance(state, dict) else None
-    if masks is None or len(masks) == 0:
+    if masks is None:
         return []
-    masks = masks.cpu().numpy() if hasattr(masks, "cpu") else np.asarray(masks)
-    return [m.astype(bool) for m in masks]
+    arr = masks.detach().cpu().numpy() if hasattr(masks, "detach") else np.asarray(masks)
+    if not _SHAPE_LOGGED:
+        print(f"[DEBUG] SAM raw masks: shape={getattr(arr, 'shape', None)} "
+              f"dtype={getattr(arr, 'dtype', None)}")
+        _SHAPE_LOGGED = True
+    arr = np.squeeze(arr)                 # drop singleton dims, e.g. [N,1,H,W]->[N,H,W]
+    if arr.ndim == 2:                     # a single mask -> add batch dim
+        arr = arr[None]
+    if arr.ndim != 3:
+        return []
+    return [arr[i].astype(bool) for i in range(arr.shape[0])
+            if arr[i].ndim == 2 and arr[i].size > 0]
 
 
 def sam3_masks(predictor, image_path, cfg, exemplars=None):
@@ -236,10 +251,13 @@ def fuse(sam_list, veg, cfg):
       frame still gets a label rather than being silently dropped.
     Returns (final_bool_mask, stats_dict).
     """
-    h, w = veg.shape
+    h, w = int(veg.shape[0]), int(veg.shape[1])
     sam_union = np.zeros((h, w), bool)
     kept = 0
     for m in sam_list:
+        m = np.asarray(m)
+        if m.ndim != 2 or 0 in m.shape:        # skip degenerate masks
+            continue
         if m.shape != veg.shape:
             m = cv2.resize(m.astype(np.uint8), (w, h),
                            interpolation=cv2.INTER_NEAREST).astype(bool)
