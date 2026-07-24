@@ -30,41 +30,44 @@ model backend can be swapped without touching the pipeline.
 ## Prerequisites
 
 ```bash
-pip install -U transformers torch pillow opencv-python numpy
+pip install pillow opencv-python numpy
+pip install "git+https://github.com/facebookresearch/sam3.git"   # pulls in torch
 ```
-SAM 3 is loaded through the **official Hugging Face Transformers API**
-(`Sam3Model` / `Sam3Processor`), exactly as documented on the `facebook/sam3`
-model card. You need a `transformers` version new enough to include SAM 3.
+SAM 3 is loaded through Meta's **official `sam3` package**
+(`build_sam3_image_model` + `Sam3Processor`), which loads a `.pt` checkpoint and
+supports **both SAM 3 and the faster SAM 3.1**. This deliberately avoids
+depending on a `transformers` release that bundles SAM 3.
 
-`facebook/sam3` is a **gated** model — request access on its Hugging Face page,
-then either:
-- log in once with `huggingface-cli login` and set `SAM3_MODEL = "facebook/sam3"`
-  (weights auto-download and cache), **or**
-- download the model folder yourself and point `SAM3_MODEL` at that folder.
+`facebook/sam3` and `facebook/sam3.1` are **gated** — request access on their
+Hugging Face pages, then either:
+- log in once with `huggingface-cli login` and leave `SAM_CHECKPOINT = None`
+  (the chosen `SAM_VERSION` auto-downloads and caches), **or**
+- download the checkpoint yourself and point `SAM_CHECKPOINT` at the `.pt` file
+  (`sam3.pt` for SAM 3, `sam3.1_multiplex.pt` for SAM 3.1).
 
-### Where to put the model files
-The download is ~6.9 GB — keep it **outside the git repo** (it is gitignored
-anyway). The Transformers route needs the *folder* containing `config.json`,
-`model.safetensors`, `processor_config.json` and the tokenizer files — **not**
-`sam3.pt` (that checkpoint is for the separate `sam3` package route). Example:
+### Which checkpoint / where to put it
+Checkpoints are multi-GB — keep them **outside the git repo** (gitignored
+anyway). Only the `.pt` is needed for this route (the `model.safetensors` +
+tokenizer files are for the separate transformers route and are not used here).
 
-```
-C:\Users\mm17889\models\sam3\
-    config.json  model.safetensors  processor_config.json
-    tokenizer.json  tokenizer_config.json  vocab.json  merges.txt  special_tokens_map.json
-```
+| `SAM_VERSION` | Checkpoint file | Notes |
+|---|---|---|
+| `"sam3"` | `sam3.pt` | base model |
+| `"sam3.1"` | `sam3.1_multiplex.pt` | faster variant (default here) |
+
 ```python
-SAM3_MODEL = r"C:\Users\mm17889\models\sam3"
+SAM_CHECKPOINT = r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt"
 ```
 
 A CUDA GPU is expected (`DEVICE="cuda"`); `"cpu"` works but is slow.
 
 ## Run
 
-Set the two values at the top of the script:
+Set the values at the top of the script:
 ```python
-DATASET_ROOT = r"E:\Dataset_Vidalia"      # = OUTPUT_ROOT from extract_sessions.py
-SAM3_MODEL   = "facebook/sam3"            # or a local model folder
+DATASET_ROOT   = r"E:\Dataset_Vidalia"   # = OUTPUT_ROOT from extract_sessions.py
+SAM_VERSION    = "sam3.1"                # "sam3" | "sam3.1"
+SAM_CHECKPOINT = None                    # None auto-downloads; or a local .pt path
 ```
 Trial on a few frames first (`CONFIG["LIMIT_PER_SESSION"] = 20`), eyeball the
 overlays, then set it back to `None` for the full pool:
@@ -94,7 +97,8 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 | Key | Effect |
 |---|---|
 | `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts (unioned) vs. per-session exemplar boxes (more reliable if text under-segments) |
-| `SAM_CONF` / `MASK_THRESHOLD` | SAM 3 score floor / per-pixel mask binarization |
+| `SAM_VERSION` / `SAM_CHECKPOINT` | choose SAM 3 vs 3.1, and where the `.pt` lives |
+| `SAM_CONF` | SAM 3 confidence threshold (detections below are dropped) |
 | `EXG_THRESHOLD` | lower = more permissive vegetation prior |
 | `SAM_VEG_OVERLAP_MIN` | how much of a SAM mask must sit on vegetation to be kept |
 | `RECOVER_VEG_MIN_PX` | min size of a veg region SAM missed before it is added back |
