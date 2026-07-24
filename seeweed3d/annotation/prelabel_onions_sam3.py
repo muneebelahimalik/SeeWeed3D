@@ -38,6 +38,7 @@ avoids depending on a transformers release that bundles SAM 3. Install once:
     pip install "git+https://github.com/facebookresearch/sam3.git"
 """
 
+import contextlib
 import csv
 import json
 import sys
@@ -165,26 +166,34 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
     visually; otherwise each text concept is run and their masks are unioned for
     recall. Returns [] if SAM produced nothing (caller falls back to ExG)."""
     from PIL import Image
-    processor = predictor["processor"]
+    torch = predictor["torch"]
+    processor, device = predictor["processor"], predictor["device"]
     image = Image.open(str(image_path)).convert("RGB")
     w, h = image.size
-    state = processor.set_image(image)      # backbone features computed once
+
+    # SAM 3's backbone mixes bf16 activations with fp32 weights, which raises
+    # "mat1 and mat2 must have the same dtype" outside autocast. Autocast casts
+    # per-op so the two always agree; on CPU there is nothing to reconcile.
+    amp = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+           if device == "cuda" else contextlib.nullcontext())
 
     out = []
-    if exemplars:
-        # add_geometric_prompt wants normalized [cx, cy, w, h]; config is xyxy px.
-        processor.reset_all_prompts(state)
-        for b in exemplars:
-            x1, y1, x2, y2 = map(float, b)
-            box = [((x1 + x2) / 2) / w, ((y1 + y2) / 2) / h,
-                   (x2 - x1) / w, (y2 - y1) / h]
-            state = processor.add_geometric_prompt(box=box, label=True, state=state)
-        out.extend(_state_masks(state))
-    else:
-        for text in cfg["SAM_TEXT_PROMPTS"]:
+    with amp:
+        state = processor.set_image(image)      # backbone features computed once
+        if exemplars:
+            # add_geometric_prompt wants normalized [cx, cy, w, h]; config is xyxy px.
             processor.reset_all_prompts(state)
-            state = processor.set_text_prompt(prompt=text, state=state)
+            for b in exemplars:
+                x1, y1, x2, y2 = map(float, b)
+                box = [((x1 + x2) / 2) / w, ((y1 + y2) / 2) / h,
+                       (x2 - x1) / w, (y2 - y1) / h]
+                state = processor.add_geometric_prompt(box=box, label=True, state=state)
             out.extend(_state_masks(state))
+        else:
+            for text in cfg["SAM_TEXT_PROMPTS"]:
+                processor.reset_all_prompts(state)
+                state = processor.set_text_prompt(prompt=text, state=state)
+                out.extend(_state_masks(state))
     return out
 
 
