@@ -87,7 +87,12 @@ CONFIG = {
     "DEVICE": "cuda",        # "cuda" | "cpu"
 
     # -- Vegetation prior (Excess-Green) --------------------------------------
+    # ExG alone masks bare soil whenever a frame has a green colour-cast (soil
+    # then reads as weak green). Two extra gates fix that: a pixel is vegetation
+    # only if green is the dominant channel AND it is saturated enough - real
+    # onion leaves are saturated green, colour-cast soil is not.
     "EXG_THRESHOLD": 0.05,   # exg > this = vegetation. Lower = more permissive.
+    "VEG_MIN_SATURATION": 40,  # HSV S (0-255); rejects desaturated colour-cast soil
     "VEG_MORPH_KERNEL": 3,   # close/open kernel px to tidy the veg mask
     "VEG_MIN_COMPONENT_PX": 80,   # drop veg specks smaller than this
 
@@ -95,9 +100,16 @@ CONFIG = {
     # A SAM mask is accepted only if this fraction of it overlaps vegetation
     # (kills SAM masks that grabbed soil / background).
     "SAM_VEG_OVERLAP_MIN": 0.30,
+    # Reject any single SAM mask covering more than this fraction of the frame -
+    # a whole-frame "onion" detection is a false positive, not a plant.
+    "SAM_MAX_MASK_FRAC": 0.5,
     # Recover onion tissue SAM missed: veg-only components >= this area are added
     # to the final mask. Keeps recall high without importing ExG noise.
     "RECOVER_VEG_MIN_PX": 400,
+    # Safety cap: an onion-only field frame is mostly soil, so a final mask
+    # covering more than this fraction is wrong. Such frames are blanked (no
+    # auto-labels) and counted as 'flagged' for manual annotation.
+    "MAX_MASK_FRACTION": 0.5,
 
     # -- Polygon export --------------------------------------------------------
     "POLY_MIN_AREA_PX": 120,     # skip tiny polygons (noise, single leaf tips)
@@ -216,12 +228,17 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
 # Vegetation prior + fusion  (pure OpenCV/NumPy - testable without a GPU)
 # --------------------------------------------------------------------------- #
 def vegetation_mask(bgr, cfg):
-    """Excess-Green vegetation mask. In an onion-only scene this is the onion
-    tissue: soil is brown (low ExG), so it is not a green-vs-anything guess."""
+    """Vegetation mask for onion-only scenes. Excess-Green, gated by green
+    dominance and saturation so a green colour-cast on bare soil (which reads as
+    weak, desaturated green) is not masked as plant tissue."""
     b, g, r = [bgr[:, :, i].astype(np.float32) for i in range(3)]
     s = b + g + r + 1e-6
     exg = 2 * (g / s) - (r / s) - (b / s)
-    veg = (exg > cfg["EXG_THRESHOLD"]).astype(np.uint8)
+    veg = exg > cfg["EXG_THRESHOLD"]
+    veg &= (g >= r) & (g >= b)                         # green must dominate
+    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
+    veg &= sat >= cfg["VEG_MIN_SATURATION"]            # reject desaturated soil
+    veg = veg.astype(np.uint8)
     k = cfg["VEG_MORPH_KERNEL"]
     if k > 0:
         ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
@@ -262,8 +279,8 @@ def fuse(sam_list, veg, cfg):
             m = cv2.resize(m.astype(np.uint8), (w, h),
                            interpolation=cv2.INTER_NEAREST).astype(bool)
         area = int(m.sum())
-        if area == 0:
-            continue
+        if area == 0 or area > cfg["SAM_MAX_MASK_FRAC"] * h * w:
+            continue                           # skip empty and whole-frame masks
         overlap = float((m & veg).sum()) / area
         if overlap >= cfg["SAM_VEG_OVERLAP_MIN"]:
             sam_union |= m
@@ -372,7 +389,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         (out / "preview").mkdir(parents=True, exist_ok=True)
     coco = Coco()
     exemplars = cfg["EXEMPLARS"].get(sid)
-    stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0}
+    stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0, "flagged": 0}
+    flagged = []
 
     for fn in frames:
         rgb_path = session_dir / "rgb" / fn
@@ -382,6 +400,14 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         veg = vegetation_mask(bgr, cfg)
         sam = sam_fn(predictor, rgb_path, cfg, exemplars) if predictor is not None else []
         final, fstat = fuse(sam, veg, cfg)
+
+        # Safety cap: an onion-only frame is mostly soil. A mask covering more
+        # than MAX_MASK_FRACTION is a colour-cast/glare failure - blank it and
+        # flag the frame for manual annotation rather than exporting garbage.
+        is_flagged = float(final.mean()) > cfg["MAX_MASK_FRACTION"]
+        if is_flagged:
+            final = np.zeros_like(final)
+            flagged.append(fn)
         polys = mask_to_polygons(final, cfg)
 
         cv2.imwrite(str(out / "masks" / fn), (final.astype(np.uint8) * 255))
@@ -392,12 +418,15 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["frames"] += 1
         stats["fallback"] += int(fstat.get("fallback_veg_only", False))
         stats["empty"] += int(not final.any())
+        stats["flagged"] += int(is_flagged)
         stats["polys"] += len(polys)
 
     coco.dump(out / "instances_default.json")
+    if flagged:
+        (out / "flagged_for_manual.txt").write_text("\n".join(flagged))
     print(f"  [{sid}] {stats['frames']} frames | {stats['polys']} onion polygons "
-          f"| {stats['fallback']} veg-fallback | {stats['empty']} empty "
-          f"-> {out}")
+          f"| {stats['fallback']} veg-fallback | {stats['flagged']} flagged "
+          f"| {stats['empty']} empty -> {out}")
     return stats
 
 
