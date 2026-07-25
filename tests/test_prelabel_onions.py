@@ -30,6 +30,21 @@ def test_vegetation_mask_rejects_desaturated_green_cast_soil():
     assert veg2[50, 50] and veg2.mean() < 0.10
 
 
+def test_auto_exemplars_from_veg_blobs():
+    veg = np.zeros((200, 200), bool)
+    veg[20:60, 20:60] = True      # blob A (bigger)
+    veg[120:140, 120:135] = True  # blob B (smaller, but > EXEMPLAR_MIN? 20*15=300<500)
+    veg[150:180, 150:190] = True  # blob C (30*40=1200 > 500)
+    boxes = pre.auto_exemplars(veg, pre.CONFIG)
+    assert boxes, "should produce exemplar boxes for large veg blobs"
+    # every box is xyxy within image bounds, and biggest blob comes first
+    for x1, y1, x2, y2 in boxes:
+        assert 0 <= x1 < x2 <= 200 and 0 <= y1 < y2 <= 200
+    assert boxes[0][0] < 20 + pre.CONFIG["EXEMPLAR_PAD_PX"] + 1   # blob A first
+    # empty vegetation -> no exemplars (bare-soil frame)
+    assert pre.auto_exemplars(np.zeros((50, 50), bool), pre.CONFIG) == []
+
+
 def test_fuse_rejects_whole_frame_sam_mask():
     veg = np.zeros((100, 100), bool); veg[30:70, 30:70] = True
     whole = np.ones((100, 100), bool)          # SAM false positive over everything
