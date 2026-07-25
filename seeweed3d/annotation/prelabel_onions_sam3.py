@@ -57,9 +57,9 @@ import numpy as np
 # #############################################################################
 
 DATASET_ROOT   = r"E:\Dataset_Vidalia"
-SAM_VERSION    = "sam3.1"        # "sam3" | "sam3.1"
+SAM_VERSION    = "sam3"        # "sam3" | "sam3.1"
 # e.g. r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt". None => auto-download.
-SAM_CHECKPOINT = None
+SAM_CHECKPOINT = "E:\Models\sam3.pt"
 
 # =============================================================================
 # CONFIG - advanced tuning below; defaults are sensible for onion-only scenes
@@ -94,7 +94,7 @@ CONFIG = {
     "EXG_THRESHOLD": 0.05,   # exg > this = vegetation. Lower = more permissive.
     "VEG_MIN_SATURATION": 40,  # HSV S (0-255); rejects desaturated colour-cast soil
     "VEG_MORPH_KERNEL": 3,   # close/open kernel px to tidy the veg mask
-    "VEG_MIN_COMPONENT_PX": 80,   # drop veg specks smaller than this
+    "VEG_MIN_COMPONENT_PX": 300,   # drop veg specks smaller than this
 
     # -- Fusion ----------------------------------------------------------------
     # A SAM mask is accepted only if this fraction of it overlaps vegetation
@@ -112,7 +112,7 @@ CONFIG = {
     "MAX_MASK_FRACTION": 0.5,
 
     # -- Polygon export --------------------------------------------------------
-    "POLY_MIN_AREA_PX": 120,     # skip tiny polygons (noise, single leaf tips)
+    "POLY_MIN_AREA_PX": 300,     # skip tiny polygons (noise, single leaf tips)
     "POLY_APPROX_EPS": 1.5,      # Douglas-Peucker simplification (px)
     "MERGE_INTO_ONE_MASK": False,  # False = one polygon per leaf clump (editable)
 
