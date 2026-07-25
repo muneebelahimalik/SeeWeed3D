@@ -18,10 +18,11 @@ NOT point this script at mixed or weed scenes.
 
 THE TECHNIQUE (see also docs)
 -----------------------------
-1. SAM 3 concept segmentation ("onion" text, or image-exemplar boxes) gives
-   clean masks on thin, crossing leaves and returns every instance at once.
-2. An Excess-Green (ExG) vegetation prior validates SAM masks (drops anything
-   not sitting on green tissue) and recovers onion tissue SAM missed.
+1. An Excess-Green (ExG) vegetation prior finds the onion tissue and its blobs
+   become SAM 3 exemplar boxes (the text concept "onion" does not ground on
+   top-down field imagery, so exemplars are the default - see SAM_PROMPT_MODE).
+2. SAM 3 segments from those exemplars for clean boundaries on thin, crossing
+   leaves; the ExG prior then validates SAM masks and recovers tissue SAM missed.
 3. The fused per-frame mask is a SEMANTIC onion safety mask (coverage over
    instance separation, exactly what the laser must avoid), exported as
    polygons under the "onion plant" label for correction in CVAT.
@@ -76,13 +77,23 @@ CONFIG = {
     "ONLY_SESSIONS": [],
 
     # -- SAM 3 prompting -------------------------------------------------------
-    # Text concepts are the zero-config default. Image exemplars (bboxes on a
-    # reference frame) are more reliable for a specific crop; add them per
-    # session in EXEMPLARS if text under-segments. Boxes are [x1,y1,x2,y2] px.
+    # How SAM 3 is prompted:
+    #   "auto_exemplar" - derive onion boxes from the vegetation blobs and feed
+    #                     them to SAM 3 as positive exemplars. Best for a crop
+    #                     the text concept "onion" does not ground (the default).
+    #   "text"          - use SAM_TEXT_PROMPTS (unioned). Often returns nothing
+    #                     on top-down field imagery.
+    #   "manual"        - only the hand-drawn boxes in EXEMPLARS per session.
+    # A per-session entry in EXEMPLARS always overrides the mode for that session.
+    "SAM_PROMPT_MODE": "auto_exemplar",
     "SAM_TEXT_PROMPTS": ["onion", "onion plant", "green onion leaves"],
     "EXEMPLARS": {
         # "vid3_20260108_132749": [[900, 500, 1050, 780], [1200, 300, 1350, 560]],
     },
+    # Auto-exemplar box derivation from the vegetation mask:
+    "EXEMPLAR_MIN_AREA_PX": 500,   # min veg blob to use as a SAM exemplar box
+    "EXEMPLAR_MAX_BOXES": 20,      # cap exemplar boxes per frame (largest first)
+    "EXEMPLAR_PAD_PX": 6,          # pad each box so thin leaf tips are included
     "SAM_CONF": 0.25,        # SAM 3 confidence threshold (detections below dropped)
     "DEVICE": "cuda",        # "cuda" | "cpu"
 
@@ -189,10 +200,12 @@ def _state_masks(state):
 def sam3_masks(predictor, image_path, cfg, exemplars=None):
     """Return boolean HxW onion masks for one image.
 
-    With exemplars (positive bboxes on this session's frames) SAM 3 is prompted
-    visually; otherwise each text concept is run and their masks are unioned for
-    recall. Returns [] if SAM produced nothing (caller falls back to ExG)."""
+    exemplars is a list of positive [x1,y1,x2,y2] px boxes (SAM is prompted
+    visually), an empty list (nothing to prompt -> no SAM), or None (fall back to
+    text concepts). Returns [] if SAM produced nothing (caller then uses ExG)."""
     from PIL import Image
+    if exemplars is not None and len(exemplars) == 0:
+        return []                               # e.g. bare-soil frame, no boxes
     torch = predictor["torch"]
     processor, device = predictor["processor"], predictor["device"]
     image = Image.open(str(image_path)).convert("RGB")
@@ -207,7 +220,7 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
     out = []
     with amp:
         state = processor.set_image(image)      # backbone features computed once
-        if exemplars:
+        if exemplars is not None:
             # add_geometric_prompt wants normalized [cx, cy, w, h]; config is xyxy px.
             processor.reset_all_prompts(state)
             for b in exemplars:
@@ -257,6 +270,28 @@ def remove_small(mask, min_px):
         if stats[i, cv2.CC_STAT_AREA] >= min_px:
             keep[lbl == i] = True
     return keep
+
+
+def auto_exemplars(veg, cfg):
+    """Bounding boxes of the largest vegetation blobs, as [x1,y1,x2,y2] px, to
+    prompt SAM 3 with real onion exemplars instead of the ungrounded word
+    'onion'. In an onion-only scene these blobs are onion tissue."""
+    if not veg.any():
+        return []
+    h, w = veg.shape
+    pad = cfg["EXEMPLAR_PAD_PX"]
+    n, _, stats, _ = cv2.connectedComponentsWithStats(veg.astype(np.uint8), 8)
+    boxes = []
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < cfg["EXEMPLAR_MIN_AREA_PX"]:
+            continue
+        x, y = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
+        bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        boxes.append((area, [max(0, int(x - pad)), max(0, int(y - pad)),
+                             min(w, int(x + bw + pad)), min(h, int(y + bh + pad))]))
+    boxes.sort(key=lambda b: -b[0])
+    return [b for _, b in boxes[:cfg["EXEMPLAR_MAX_BOXES"]]]
 
 
 def fuse(sam_list, veg, cfg):
@@ -388,7 +423,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     if cfg["SAVE_PREVIEWS"]:
         (out / "preview").mkdir(parents=True, exist_ok=True)
     coco = Coco()
-    exemplars = cfg["EXEMPLARS"].get(sid)
+    manual_boxes = cfg["EXEMPLARS"].get(sid)       # hand-drawn, override the mode
     stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0, "flagged": 0}
     flagged = []
 
@@ -398,6 +433,15 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         if bgr is None:
             print(f"      ! missing {rgb_path}"); continue
         veg = vegetation_mask(bgr, cfg)
+
+        # Choose SAM 3 prompts for this frame.
+        if manual_boxes:
+            exemplars = manual_boxes
+        elif cfg["SAM_PROMPT_MODE"] == "auto_exemplar":
+            exemplars = auto_exemplars(veg, cfg)   # onion boxes from the veg blobs
+        else:
+            exemplars = None                       # text mode (SAM_TEXT_PROMPTS)
+
         sam = sam_fn(predictor, rgb_path, cfg, exemplars) if predictor is not None else []
         final, fstat = fuse(sam, veg, cfg)
 

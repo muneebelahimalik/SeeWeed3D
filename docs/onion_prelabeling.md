@@ -96,7 +96,9 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 
 | Key | Effect |
 |---|---|
-| `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts (unioned) vs. per-session exemplar boxes (more reliable if text under-segments) |
+| `SAM_PROMPT_MODE` | `auto_exemplar` (default: onion boxes from veg blobs), `text`, or `manual` |
+| `EXEMPLAR_MIN_AREA_PX` / `EXEMPLAR_MAX_BOXES` / `EXEMPLAR_PAD_PX` | auto-exemplar box derivation |
+| `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts (unioned) vs. per-session hand-drawn exemplar boxes |
 | `SAM_VERSION` / `SAM_CHECKPOINT` | choose SAM 3 vs 3.1, and where the `.pt` lives |
 | `SAM_CONF` | SAM 3 confidence threshold (detections below are dropped) |
 | `EXG_THRESHOLD` | lower = more permissive vegetation prior |
