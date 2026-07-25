@@ -18,6 +18,25 @@ def test_vegetation_mask_green_in_soil_out():
     assert veg[50, 50] and not veg[5, 5]
 
 
+def test_vegetation_mask_rejects_desaturated_green_cast_soil():
+    # Soil with a green colour-cast: green-dominant and high ExG, but LOW
+    # saturation. This is exactly what masked whole frames before the fix.
+    soil = np.full((100, 100, 3), (120, 140, 120), np.uint8)  # BGR, desaturated
+    veg = pre.vegetation_mask(soil, pre.CONFIG)
+    assert veg.mean() < 0.02          # essentially nothing masked
+    # A saturated onion-green leaf on the same frame must still be kept.
+    soil[40:60, 40:60] = (40, 200, 40)
+    veg2 = pre.vegetation_mask(soil, pre.CONFIG)
+    assert veg2[50, 50] and veg2.mean() < 0.10
+
+
+def test_fuse_rejects_whole_frame_sam_mask():
+    veg = np.zeros((100, 100), bool); veg[30:70, 30:70] = True
+    whole = np.ones((100, 100), bool)          # SAM false positive over everything
+    final, st = pre.fuse([whole], veg, pre.CONFIG)
+    assert st["sam_kept"] == 0 and st["fallback_veg_only"]   # oversized mask dropped
+
+
 def test_fuse_keeps_on_veg_drops_off_veg():
     veg = np.zeros((100, 100), bool); veg[30:70, 30:70] = True
     on = np.zeros((100, 100), bool); on[35:65, 35:65] = True
