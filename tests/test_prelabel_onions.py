@@ -73,10 +73,23 @@ def test_polygons_valid():
     assert polys and all(len(p) >= 6 and len(p) % 2 == 0 for p in polys)
 
 
-def _stub_sam(predictor, image_path, cfg, exemplars=None):
-    bgr = cv2.imread(str(image_path))
+def _stub_sam(predictor, image, cfg, exemplars=None):
+    bgr = image if isinstance(image, np.ndarray) else cv2.imread(str(image))
     v = pre.vegetation_mask(bgr, cfg)
     return [cv2.dilate(v.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)]
+
+
+def test_white_balance_neutralizes_green_cast():
+    # A green-cast frame: green channel much higher than red/blue.
+    green_cast = np.zeros((60, 60, 3), np.uint8)
+    green_cast[:, :] = (40, 200, 40)                 # BGR, strong green
+    wb = pre.white_balance(green_cast, pre.CONFIG)
+    mb, mg, mr = wb.reshape(-1, 3).mean(axis=0)
+    assert max(mb, mg, mr) / (min(mb, mg, mr) + 1e-6) < 1.2   # cast removed
+    # A neutral (already balanced) frame is left essentially unchanged.
+    neutral = np.full((60, 60, 3), (110, 115, 112), np.uint8)
+    assert np.abs(pre.white_balance(neutral, pre.CONFIG).astype(int)
+                  - neutral.astype(int)).mean() < 2.0
 
 
 def test_prelabel_session_produces_valid_coco(extracted_root, tmp_path):
