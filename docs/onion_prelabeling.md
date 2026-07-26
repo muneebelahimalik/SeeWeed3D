@@ -96,6 +96,7 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 
 | Key | Effect |
 |---|---|
+| `WHITE_BALANCE` / `WB_CAST_RATIO` | gray-world correction to recover green colour-cast frames (neutral frames untouched) |
 | `SAM_PROMPT_MODE` | `auto_exemplar` (default: onion boxes from veg blobs), `text`, or `manual` |
 | `EXEMPLAR_MIN_AREA_PX` / `EXEMPLAR_MAX_BOXES` / `EXEMPLAR_PAD_PX` | auto-exemplar box derivation |
 | `SAM_TEXT_PROMPTS` / `EXEMPLARS` | text concepts (unioned) vs. per-session hand-drawn exemplar boxes |

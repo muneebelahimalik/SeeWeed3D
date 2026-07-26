@@ -76,6 +76,15 @@ CONFIG = {
     # These MUST be onion-only recordings.
     "ONLY_SESSIONS": [],
 
+    # -- Preprocessing ---------------------------------------------------------
+    # Gray-world white balance neutralises a colour-cast before segmentation.
+    # Some ZED frames have a strong green white-balance error - the whole frame
+    # reads green - which would otherwise be flagged and lost. Soil-dominant
+    # frames are barely changed; green-cast frames are recovered so ExG and SAM
+    # work on them. Only kicks in when a frame is actually cast (see threshold).
+    "WHITE_BALANCE": True,
+    "WB_CAST_RATIO": 1.15,   # apply WB only if max/min channel-mean exceeds this
+
     # -- SAM 3 prompting -------------------------------------------------------
     # How SAM 3 is prompted:
     #   "auto_exemplar" - derive onion boxes from the vegetation blobs and feed
@@ -208,7 +217,12 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
         return []                               # e.g. bare-soil frame, no boxes
     torch = predictor["torch"]
     processor, device = predictor["processor"], predictor["device"]
-    image = Image.open(str(image_path)).convert("RGB")
+    # Accept a pre-loaded BGR array (so SAM sees the same white-balanced image as
+    # the vegetation prior) or a path.
+    if isinstance(image_path, np.ndarray):
+        image = Image.fromarray(cv2.cvtColor(image_path, cv2.COLOR_BGR2RGB))
+    else:
+        image = Image.open(str(image_path)).convert("RGB")
     w, h = image.size
 
     # SAM 3's backbone mixes bf16 activations with fp32 weights, which raises
@@ -235,6 +249,24 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
                 state = processor.set_text_prompt(prompt=text, state=state)
                 out.extend(_state_masks(state))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Preprocessing
+# --------------------------------------------------------------------------- #
+def white_balance(bgr, cfg):
+    """Gray-world white balance to neutralise a colour-cast, applied only when a
+    frame is actually cast (channel means diverge past WB_CAST_RATIO). This
+    recovers the green white-balance-error frames instead of losing them, while
+    leaving already-neutral frames essentially untouched."""
+    if not cfg["WHITE_BALANCE"]:
+        return bgr
+    means = bgr.reshape(-1, 3).mean(axis=0) + 1e-6         # B, G, R
+    if float(means.max() / means.min()) < cfg["WB_CAST_RATIO"]:
+        return bgr                                         # not cast - leave it
+    gray = float(means.mean())
+    out = bgr.astype(np.float32) * (gray / means)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 # --------------------------------------------------------------------------- #
@@ -432,7 +464,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         bgr = cv2.imread(str(rgb_path))
         if bgr is None:
             print(f"      ! missing {rgb_path}"); continue
-        veg = vegetation_mask(bgr, cfg)
+        proc = white_balance(bgr, cfg)             # neutralise colour-cast frames
+        veg = vegetation_mask(proc, cfg)
 
         # Choose SAM 3 prompts for this frame.
         if manual_boxes:
@@ -442,7 +475,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         else:
             exemplars = None                       # text mode (SAM_TEXT_PROMPTS)
 
-        sam = sam_fn(predictor, rgb_path, cfg, exemplars) if predictor is not None else []
+        # SAM sees the same white-balanced image as the vegetation prior.
+        sam = sam_fn(predictor, proc, cfg, exemplars) if predictor is not None else []
         final, fstat = fuse(sam, veg, cfg)
 
         # Safety cap: an onion-only frame is mostly soil. A mask covering more
@@ -457,7 +491,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         cv2.imwrite(str(out / "masks" / fn), (final.astype(np.uint8) * 255))
         if cfg["SAVE_PREVIEWS"]:
             cv2.imwrite(str(out / "preview" / fn.replace(".png", ".jpg")),
-                        overlay(bgr, final, cfg["PREVIEW_SCALE"]))
+                        overlay(proc, final, cfg["PREVIEW_SCALE"]))
         coco.add(fn, bgr.shape[0], bgr.shape[1], polys)
         stats["frames"] += 1
         stats["fallback"] += int(fstat.get("fallback_veg_only", False))
