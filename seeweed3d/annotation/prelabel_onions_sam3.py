@@ -42,6 +42,8 @@ avoids depending on a transformers release that bundles SAM 3. Install once:
 import contextlib
 import csv
 import json
+import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +73,17 @@ CONFIG = {
     "SAM_VERSION":    SAM_VERSION,
     "SAM_CHECKPOINT": SAM_CHECKPOINT,
     "OUTPUT_SUBDIR": "auto_labels_onion",   # written under DATASET_ROOT/
+    # Per-session subfolders (under OUTPUT_SUBDIR/<sid>/) so the frame set you
+    # upload to CVAT never needs manual filtering:
+    #   CVAT_READY_SUBDIR  - frames WITH a usable prelabel. instances_default.json
+    #                        covers exactly these frames, so uploading this folder
+    #                        + importing that COCO always matches with no errors.
+    #   FLAGGED_RGB_SUBDIR - frames blanked by the MAX_MASK_FRACTION safety cap
+    #                        (see flagged_for_manual.txt). No auto-label exists for
+    #                        these; upload this folder as its own task for a
+    #                        purely manual pass, kept separate from the main set.
+    "CVAT_READY_SUBDIR":  "cvat_ready",
+    "FLAGGED_RGB_SUBDIR": "flagged_rgb",
 
     # Which sessions to prelabel. Empty = every session found under sessions/.
     # These MUST be onion-only recordings.
@@ -432,6 +445,18 @@ def overlay(bgr, mask, scale):
     return vis
 
 
+def link_or_copy(src, dst):
+    """Hardlink src at dst (zero extra disk space, same volume); fall back to a
+    copy if hardlinking isn't possible (different volume/filesystem)."""
+    dst = Path(dst)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 # --------------------------------------------------------------------------- #
 # Driver
 # --------------------------------------------------------------------------- #
@@ -454,6 +479,10 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     (out / "masks").mkdir(parents=True, exist_ok=True)
     if cfg["SAVE_PREVIEWS"]:
         (out / "preview").mkdir(parents=True, exist_ok=True)
+    cvat_dir = out / cfg["CVAT_READY_SUBDIR"]
+    flagged_dir = out / cfg["FLAGGED_RGB_SUBDIR"]
+    cvat_dir.mkdir(parents=True, exist_ok=True)
+    flagged_dir.mkdir(parents=True, exist_ok=True)
     coco = Coco()
     manual_boxes = cfg["EXEMPLARS"].get(sid)       # hand-drawn, override the mode
     stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0, "flagged": 0}
@@ -481,18 +510,23 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
 
         # Safety cap: an onion-only frame is mostly soil. A mask covering more
         # than MAX_MASK_FRACTION is a colour-cast/glare failure - blank it and
-        # flag the frame for manual annotation rather than exporting garbage.
+        # route the frame to a separate manual-only set rather than exporting
+        # garbage or leaving it mixed into the main prelabeled dataset.
         is_flagged = float(final.mean()) > cfg["MAX_MASK_FRACTION"]
         if is_flagged:
             final = np.zeros_like(final)
             flagged.append(fn)
+            link_or_copy(rgb_path, flagged_dir / fn)
+        else:
+            link_or_copy(rgb_path, cvat_dir / fn)
         polys = mask_to_polygons(final, cfg)
+        if not is_flagged:
+            coco.add(fn, bgr.shape[0], bgr.shape[1], polys)
 
         cv2.imwrite(str(out / "masks" / fn), (final.astype(np.uint8) * 255))
         if cfg["SAVE_PREVIEWS"]:
             cv2.imwrite(str(out / "preview" / fn.replace(".png", ".jpg")),
                         overlay(proc, final, cfg["PREVIEW_SCALE"]))
-        coco.add(fn, bgr.shape[0], bgr.shape[1], polys)
         stats["frames"] += 1
         stats["fallback"] += int(fstat.get("fallback_veg_only", False))
         stats["empty"] += int(not final.any())
@@ -504,7 +538,10 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         (out / "flagged_for_manual.txt").write_text("\n".join(flagged))
     print(f"  [{sid}] {stats['frames']} frames | {stats['polys']} onion polygons "
           f"| {stats['fallback']} veg-fallback | {stats['flagged']} flagged "
-          f"| {stats['empty']} empty -> {out}")
+          f"| {stats['empty']} empty -> {out}\n"
+          f"      cvat_ready/ has {stats['frames'] - stats['flagged']} frames "
+          f"matching instances_default.json exactly; flagged_rgb/ has "
+          f"{stats['flagged']} frames for a separate manual pass")
     return stats
 
 
@@ -529,9 +566,11 @@ def main(predictor_factory=load_sam3, sam_fn=sam3_masks):
         prelabel_session(sid, sessions_root / sid, out_root, cfg, predictor, sam_fn)
 
     print(f"\nDone. COCO + masks + previews under {out_root}")
-    print("Next: create a CVAT task from sessions/<sid>/rgb/, import that "
-          "session's instances_default.json (COCO 1.0), VERIFY, then export "
-          "the corrected masks as your training labels.")
+    print("Next: create a CVAT task from <sid>/cvat_ready/ (NOT sessions/<sid>/rgb/ "
+          "- that folder matches instances_default.json exactly, so the COCO 1.0 "
+          "import always succeeds), VERIFY, then export the corrected masks as "
+          "your training labels. Frames in <sid>/flagged_rgb/ have no auto-label "
+          "(see flagged_for_manual.txt) - handle them as a separate manual task.")
 
 
 if __name__ == "__main__":
