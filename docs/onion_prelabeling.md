@@ -90,7 +90,30 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 3. Import that session's `instances_default.json` as **COCO 1.0**.
 4. **Verify**: fix leaf edges, delete the rare stray weed. Prioritize coverage
    over splitting overlapping leaves — this is a safety mask.
-5. Export corrected masks as your training labels.
+5. **Export the task as COCO 1.0.**
+
+## Back to training labels (`annotation/cvat_roundtrip.py`)
+
+Closes the loop after verification. Put each session's CVAT export at
+`VERIFIED_ROOT/<session_id>/instances_default.json`, then:
+
+```bash
+python seeweed3d/annotation/cvat_roundtrip.py
+```
+
+It writes, under `DATASET_ROOT/training_onion/`:
+
+| Item | Purpose |
+|---|---|
+| `onion_cvat_labels.json` | the label schema to paste into a CVAT task |
+| `masks/<sid>/<frame>.png` | training-ready binary onion masks from your corrections |
+| `manifest.csv` | rgb ↔ mask pairing per frame |
+| `agreement.csv` / `agreement_summary.csv` | per-frame and per-session IoU / precision / recall of the **auto-prelabels vs your verified masks** |
+
+The agreement numbers are the evidence for *model-assisted vs manual* annotation
+(project plan §22): a high mean IoU / high `pct_iou_ge_0.9` means prelabeling
+already matched your corrections, so it saved time and the pseudo-labels are
+trustworthy for the teacher–student stage.
 
 ## Tuning (all in `CONFIG`)
 
