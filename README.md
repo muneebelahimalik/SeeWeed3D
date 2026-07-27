@@ -18,9 +18,11 @@ seeweed3d/
   extraction/   extract_sessions.py       recordings -> indexed, QC'd frame pool (v1 & v2)
                 select_batches.py          pool -> CVAT-ready annotation batches (holdout-safe)
   annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
+                prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
+  common/       vegetation.py              shared ExG vegetation prior + white balance
+                depth_utils.py             canonical depth reader + robust 3D point sampling
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream
-  common/       depth_utils.py             canonical depth reader + robust 3D point sampling
 docs/           pipeline, capture, and prelabeling guides
 legacy/         superseded scripts, kept for provenance
 tests/          synthetic end-to-end checks for the extraction + prelabel logic

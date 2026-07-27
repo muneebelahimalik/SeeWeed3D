@@ -51,6 +51,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.vegetation import component_boxes, remove_small  # noqa: E402
+from common.vegetation import vegetation_mask as _vegetation_mask  # noqa: E402
+from common.vegetation import white_balance as _white_balance  # noqa: E402
+
 # #############################################################################
 # ##   DATASET_ROOT  -  the OUTPUT_ROOT you gave extract_sessions.py          ##
 # ##   SAM_VERSION   -  "sam3" or "sam3.1" (the faster variant)               ##
@@ -268,75 +273,32 @@ def sam3_masks(predictor, image_path, cfg, exemplars=None):
 # Preprocessing
 # --------------------------------------------------------------------------- #
 def white_balance(bgr, cfg):
-    """Gray-world white balance to neutralise a colour-cast, applied only when a
-    frame is actually cast (channel means diverge past WB_CAST_RATIO). This
+    """Gray-world white balance to neutralise a colour-cast (shared implementation
+    in common/vegetation.py), applied only when a frame is actually cast. This
     recovers the green white-balance-error frames instead of losing them, while
     leaving already-neutral frames essentially untouched."""
     if not cfg["WHITE_BALANCE"]:
         return bgr
-    means = bgr.reshape(-1, 3).mean(axis=0) + 1e-6         # B, G, R
-    if float(means.max() / means.min()) < cfg["WB_CAST_RATIO"]:
-        return bgr                                         # not cast - leave it
-    gray = float(means.mean())
-    out = bgr.astype(np.float32) * (gray / means)
-    return np.clip(out, 0, 255).astype(np.uint8)
+    return _white_balance(bgr, cfg["WB_CAST_RATIO"])
 
 
 # --------------------------------------------------------------------------- #
 # Vegetation prior + fusion  (pure OpenCV/NumPy - testable without a GPU)
 # --------------------------------------------------------------------------- #
 def vegetation_mask(bgr, cfg):
-    """Vegetation mask for onion-only scenes. Excess-Green, gated by green
-    dominance and saturation so a green colour-cast on bare soil (which reads as
-    weak, desaturated green) is not masked as plant tissue."""
-    b, g, r = [bgr[:, :, i].astype(np.float32) for i in range(3)]
-    s = b + g + r + 1e-6
-    exg = 2 * (g / s) - (r / s) - (b / s)
-    veg = exg > cfg["EXG_THRESHOLD"]
-    veg &= (g >= r) & (g >= b)                         # green must dominate
-    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1]
-    veg &= sat >= cfg["VEG_MIN_SATURATION"]            # reject desaturated soil
-    veg = veg.astype(np.uint8)
-    k = cfg["VEG_MORPH_KERNEL"]
-    if k > 0:
-        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
-        veg = cv2.morphologyEx(veg, cv2.MORPH_CLOSE, ker)
-        veg = cv2.morphologyEx(veg, cv2.MORPH_OPEN, ker)
-    return remove_small(veg.astype(bool), cfg["VEG_MIN_COMPONENT_PX"])
-
-
-def remove_small(mask, min_px):
-    """Drop connected components below min_px."""
-    if min_px <= 0 or not mask.any():
-        return mask
-    n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
-    keep = np.zeros_like(mask)
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] >= min_px:
-            keep[lbl == i] = True
-    return keep
+    """Vegetation mask for onion-only scenes: Excess-Green gated by green
+    dominance and saturation (shared implementation in common/vegetation.py), so
+    a green colour-cast on bare soil is not masked as plant tissue."""
+    return _vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                            cfg["VEG_MORPH_KERNEL"], cfg["VEG_MIN_COMPONENT_PX"])
 
 
 def auto_exemplars(veg, cfg):
     """Bounding boxes of the largest vegetation blobs, as [x1,y1,x2,y2] px, to
     prompt SAM 3 with real onion exemplars instead of the ungrounded word
     'onion'. In an onion-only scene these blobs are onion tissue."""
-    if not veg.any():
-        return []
-    h, w = veg.shape
-    pad = cfg["EXEMPLAR_PAD_PX"]
-    n, _, stats, _ = cv2.connectedComponentsWithStats(veg.astype(np.uint8), 8)
-    boxes = []
-    for i in range(1, n):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < cfg["EXEMPLAR_MIN_AREA_PX"]:
-            continue
-        x, y = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]
-        bw, bh = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-        boxes.append((area, [max(0, int(x - pad)), max(0, int(y - pad)),
-                             min(w, int(x + bw + pad)), min(h, int(y + bh + pad))]))
-    boxes.sort(key=lambda b: -b[0])
-    return [b for _, b in boxes[:cfg["EXEMPLAR_MAX_BOXES"]]]
+    return component_boxes(veg, cfg["EXEMPLAR_MIN_AREA_PX"],
+                           cfg["EXEMPLAR_PAD_PX"], cfg["EXEMPLAR_MAX_BOXES"])
 
 
 def fuse(sam_list, veg, cfg):
