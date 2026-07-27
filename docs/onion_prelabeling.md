@@ -79,18 +79,30 @@ Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 
 | Item | Purpose |
 |---|---|
+| `cvat_ready/<frame>.png` | **upload this folder to CVAT** — only frames with a usable prelabel, matching `instances_default.json` exactly |
 | `instances_default.json` | COCO, import into CVAT (category `onion plant`) |
-| `masks/<frame>.png` | binary onion mask (255 = onion) |
-| `preview/<frame>.jpg` | overlay for fast QC / FiftyOne review |
+| `flagged_rgb/<frame>.png` | frames blanked by the safety cap (colour-cast/glare) — no auto-label; handle as a separate manual task |
+| `flagged_for_manual.txt` | filenames in `flagged_rgb/`, one per line |
+| `masks/<frame>.png` | binary onion mask for every frame (255 = onion, all-zero for flagged) |
+| `preview/<frame>.jpg` | overlay for fast QC / FiftyOne review, for every frame |
+
+`cvat_ready/` and `flagged_rgb/` are hardlinks where possible (same volume), so
+they cost no extra disk space — `sessions/<session_id>/rgb/` is never modified.
 
 ## Into CVAT
 
-1. Create a task from `sessions/<session_id>/rgb/`.
+1. Create a task from **`auto_labels_onion/<session_id>/cvat_ready/`** — not
+   `sessions/<session_id>/rgb/`. That folder is exactly the frame set
+   `instances_default.json` covers, so the COCO import always matches with no
+   "could not match item id" errors, and never mixes in unlabeled frames.
 2. Paste `cvat_labels.json` (from `select_batches.py`) into the **Raw** label editor.
 3. Import that session's `instances_default.json` as **COCO 1.0**.
 4. **Verify**: fix leaf edges, delete the rare stray weed. Prioritize coverage
    over splitting overlapping leaves — this is a safety mask.
 5. **Export the task as COCO 1.0.**
+6. Separately, create a task from `flagged_rgb/` for a purely manual pass on the
+   frames that had no usable prelabel (or leave them for later — they are never
+   mixed into the main dataset).
 
 ## Back to training labels (`annotation/cvat_roundtrip.py`)
 

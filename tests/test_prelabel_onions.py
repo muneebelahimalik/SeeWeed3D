@@ -92,6 +92,40 @@ def test_white_balance_neutralizes_green_cast():
                   - neutral.astype(int)).mean() < 2.0
 
 
+def test_flagged_frames_separated_from_cvat_ready(tmp_path):
+    """Flagged (mostly-green, safety-cap) frames must never appear in
+    cvat_ready/ or instances_default.json - only in flagged_rgb/ - so an upload
+    of cvat_ready/ always matches the COCO import with no missing-frame errors."""
+    sess = tmp_path / "sess"
+    (sess / "rgb").mkdir(parents=True)
+    (sess / "meta").mkdir(parents=True)
+
+    bad = np.full((80, 80, 3), (40, 200, 40), np.uint8)      # solid green -> flagged
+    good = np.full((80, 80, 3), (70, 40, 60), np.uint8)      # soil
+    good[20:50, 20:50] = (40, 200, 40)                       # small onion patch
+    cv2.imwrite(str(sess / "rgb" / "bad.png"), bad)
+    cv2.imwrite(str(sess / "rgb" / "good.png"), good)
+    with open(sess / "meta" / "pool.csv", "w", newline="") as f:
+        f.write("filename\nbad.png\ngood.png\n")
+
+    cfg = dict(pre.CONFIG)
+    cfg["WHITE_BALANCE"] = False   # isolate the flagging logic; WB has its own test
+    out = tmp_path / "out"
+    st = pre.prelabel_session("sess", sess, out, cfg, predictor="STUB", sam_fn=_stub_sam)
+
+    assert st["flagged"] == 1 and st["frames"] == 2
+    cvat_files = {p.name for p in (out / "sess" / cfg["CVAT_READY_SUBDIR"]).iterdir()}
+    flagged_files = {p.name for p in (out / "sess" / cfg["FLAGGED_RGB_SUBDIR"]).iterdir()}
+    assert cvat_files == {"good.png"}
+    assert flagged_files == {"bad.png"}
+
+    coco = json.loads((out / "sess" / "instances_default.json").read_text())
+    coco_names = {im["file_name"] for im in coco["images"]}
+    assert coco_names == cvat_files == {"good.png"}          # exact match, no drift
+
+    assert (out / "sess" / "flagged_for_manual.txt").read_text().strip() == "bad.png"
+
+
 def test_prelabel_session_produces_valid_coco(extracted_root, tmp_path):
     sid = "vid_20250304_142804"
     sess = extracted_root / "sessions" / sid
