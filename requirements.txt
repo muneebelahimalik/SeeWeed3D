@@ -1,16 +1,19 @@
 # Core data pipeline (extraction, selection, prelabeling logic)
-numpy
+# numpy is pinned <2 because Meta's sam3 package requires it. Installing numpy
+# 2.x will break SAM 3 inference, so do not loosen this while sam3 is in use.
+numpy>=1.26,<2
 opencv-python
-# ffmpeg / ffprobe are system tools and must be on PATH (not pip-installable).
-
-# Onion prelabeling with SAM 3 / 3.1 (annotation/prelabel_onions_sam3.py) only.
-# Uses Meta's official sam3 package (pulls in torch); install it directly:
-#   pip install "git+https://github.com/facebookresearch/sam3.git"
 pillow
-
-# ZED field capture (capture/zed_capture.py) only.
-# pyzed is NOT on PyPI - install it via the Stereolabs ZED SDK installer.
-# pyzed
+# ffmpeg / ffprobe are system tools and must be on PATH (not pip-installable).
 
 # Tests
 pytest
+
+# -- Optional, per stage. Install only what you need. -------------------------
+# Onion / weed prelabeling with SAM 3 or 3.1 (annotation/prelabel_*_sam3.py).
+# Meta's official package; pulls in torch. Needs a CUDA torch build >= 2.3 and,
+# on Windows, a matching triton-windows (torch 2.5 -> "triton-windows>=3.1,<3.2"):
+#   pip install "git+https://github.com/facebookresearch/sam3.git"
+#
+# ZED field capture (capture/zed_capture.py).
+# pyzed is NOT on PyPI - install it via the Stereolabs ZED SDK installer.
