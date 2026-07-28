@@ -32,38 +32,56 @@ def _blade(h=200, w=200):
     return m.astype(bool)
 
 
-def test_shape_features_and_morphology_separate_rosette_from_grass():
+def test_grass_separated_by_elongation():
     rose_f = wd.shape_features(_rosette())
     blade_f = wd.shape_features(_blade())
     assert rose_f and blade_f
     # A blade is far more elongated than a rosette - the key separating signal.
     assert blade_f["aspect_ratio"] > rose_f["aspect_ratio"]
-    assert wd.classify_morphology(blade_f, wd.CONFIG)[0] == "weed grass"
-    # Rosette must never be called grass; broadleaf or unknown are both fine
-    # (the heuristic is deliberately conservative).
-    assert wd.classify_morphology(rose_f, wd.CONFIG)[0] != "weed grass"
+    assert wd.classify_morphology(blade_f, wd.CONFIG)[0] == "grass"
+    assert wd.classify_morphology(rose_f, wd.CONFIG)[0] != "grass"
 
 
-def test_classify_is_conservative_in_the_ambiguous_band():
-    """Aspect between BROADLEAF_MAX_ASPECT and GRASS_MIN_ASPECT is the
-    deliberately undecided band: neither class is claimed, so the annotator is
-    never nudged toward a confident wrong label."""
-    m = np.zeros((160, 160), np.uint8)
-    cv2.ellipse(m, (80, 80), (65, 25), 0, 0, 360, 1, -1)      # aspect ~2.6
-    f = wd.shape_features(m.astype(bool))
-    assert wd.CONFIG["BROADLEAF_MAX_ASPECT"] < f["aspect_ratio"] < wd.CONFIG["GRASS_MIN_ASPECT"]
-    cls, conf = wd.classify_morphology(f, wd.CONFIG)
-    assert cls == "weed unknown" and conf == 0.0
+def test_species_are_never_auto_assigned():
+    """brassica vs primrose is an appearance question shape cannot answer, so a
+    rosette must fall back to the default class with zero confidence rather than
+    nudging the annotator toward a confident wrong species."""
+    cls, conf = wd.classify_morphology(wd.shape_features(_rosette()), wd.CONFIG)
+    assert cls == wd.CONFIG["DEFAULT_SPECIES_CLASS"] == "other weed"
+    assert conf == 0.0
+    assert cls not in ("brassica", "primrose")
+    # Only shape-supported classes are ever proposed.
+    assert wd.AUTO_CLASSES == {"grass", "weed cluster", "other weed"}
 
-    # A thin cross: compact overall (aspect ~1) but far too sparse to be a
-    # rosette, so the solidity gate keeps it out of "broadleaf".
-    cross = np.zeros((120, 120), np.uint8)
-    cross[58:63, 15:105] = 1
-    cross[15:105, 58:63] = 1
-    fc = wd.shape_features(cross.astype(bool))
-    assert fc["aspect_ratio"] < wd.CONFIG["BROADLEAF_MAX_ASPECT"]
-    assert fc["solidity"] < wd.CONFIG["BROADLEAF_MIN_SOLIDITY"]
-    assert wd.classify_morphology(fc, wd.CONFIG)[0] == "weed unknown"
+
+def test_growth_peaks_one_per_plant():
+    """One rosette -> one growth point; several intermingled -> several."""
+    single = _rosette(cx=100, cy=100, r=40)
+    assert len(wd.growth_peaks(single, wd.CONFIG)) == 1
+
+    merged = np.zeros((300, 300), bool)
+    for cx, cy in ((90, 90), (200, 100), (140, 210)):
+        merged |= _rosette(300, 300, cx, cy, 45)
+    assert len(wd.growth_peaks(merged, wd.CONFIG)) >= 3
+
+
+def test_cluster_only_declared_for_large_multi_peak_blobs():
+    """The cluster threshold is deliberately high: a single plant, however big,
+    must never be called a cluster."""
+    single = _rosette(cx=100, cy=100, r=40)
+    f_single = wd.shape_features(single)
+    peaks_single = wd.growth_peaks(single, wd.CONFIG)
+    assert wd.classify_morphology(f_single, wd.CONFIG, peaks_single)[0] != "weed cluster"
+
+    merged = np.zeros((400, 400), bool)
+    for cx, cy in ((110, 110), (250, 130), (170, 260), (290, 280)):
+        merged |= _rosette(400, 400, cx, cy, 60)
+    f_m = wd.shape_features(merged)
+    peaks_m = wd.growth_peaks(merged, wd.CONFIG)
+    cfg = dict(wd.CONFIG)
+    cfg["CLUSTER_MIN_AREA_PX"] = min(cfg["CLUSTER_MIN_AREA_PX"], f_m["area_px"])
+    cls, conf = wd.classify_morphology(f_m, cfg, peaks_m)
+    assert cls == "weed cluster" and conf > 0
 
 
 def test_treatment_points_lep_at_rosette_centre():
@@ -101,6 +119,8 @@ def test_analyze_frame_and_coco_export(tmp_path):
     inst = instances[0]
     assert inst["cls"] in wd.WEED_CLASSES
     assert inst["growth_stage"] in ("cotyledon", "2-leaf", "3-5-leaf")
+    # A non-cluster instance carries a usable single LEP.
+    assert inst["lep_valid"] is True and inst["peaks"]
 
     coco = wd.WeedCoco()
     img_id = coco.add_image("f_000001.png", 200, 200)

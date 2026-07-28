@@ -14,7 +14,7 @@ scenes.**
 |---|---|---|
 | Goal | one high-recall **semantic** safety mask | every **individual** plant separated |
 | Priority | coverage over separation | separation + class + treatment point |
-| Classes | one (`onion plant`) | morphology: broadleaf / grass / sedge / unknown |
+| Classes | one (`onion plant`) | `brassica`, `primrose`, `grass`, `weed cluster`, `other weed` |
 | Growth point | not needed | **LEP/AMT proposed per instance** |
 
 ## Pipeline
@@ -48,26 +48,40 @@ human LEP labels exist, with no re-processing.
 are recorded too — large centroid distance flags asymmetric or occluded plants
 where the LEP proposal is less reliable, which is useful active-learning signal.
 
-## The morphology heuristic is a time-saver, not a claim
+## What the prelabeler can and cannot decide
 
-It exists to **pre-fill CVAT so annotators correct rather than classify from
-scratch**. Thresholds are priors to calibrate against the first verified round.
+| Class | Auto-assigned? | Why |
+|---|---|---|
+| `grass` | **yes**, by elongation | Measured: a blade has aspect ratio ~20, a rosette ~1. |
+| `weed cluster` | **yes**, high threshold | Several distinct growth-point peaks inside one large mask, i.e. individual LEPs genuinely cannot be assigned. |
+| `other weed` | fallback | Everything else, with **zero confidence**. |
+| `brassica`, `primrose` | **never** | Species is an *appearance* question. Shape cannot answer it. |
+
+**This is the key limitation to understand:** no threshold tuning will make the
+prelabeler tell brassica from primrose — aspect ratio and solidity describe
+*form*, not species. Two things resolve it: you assigning species in CVAT, and
+(much faster) the DINOv2 cluster-then-label stage below.
 
 What the shape data actually showed (measured, not assumed):
 
-- **Elongation is the discriminator** — a grass blade has aspect ratio ~20, a
-  rosette ~1.
+- **Elongation is the only reliable shape discriminator** — grass ~20 vs rosette ~1.
 - **Circularity is useless here** — a rosette's radiating leaves give it a long,
   spiky perimeter, so its circularity (~0.15) is as low as a blade's (~0.13).
 - **Solidity cannot flag grass** — a straight blade is nearly its own convex
-  hull (solidity ~0.9). Solidity is only used to confirm a *compact* shape is a
-  real rosette rather than a sparse fragment.
+  hull (solidity ~0.9).
 
-So: `aspect >= GRASS_MIN_ASPECT` → grass; `aspect <= BROADLEAF_MAX_ASPECT` and
-solid enough → broadleaf; **everything in between stays `weed unknown`** on
-purpose, so the annotator is never nudged toward a confident wrong label.
-`sedge` is never auto-assigned — it is not reliably separable from shape at this
-growth stage.
+### Cluster detection
+
+`weed cluster` fires only when a mask has at least `CLUSTER_MIN_PEAKS` distinct
+growth-point peaks **and** exceeds `CLUSTER_MIN_AREA_PX`. Raise either to make it
+rarer. A cluster gets **no single LEP** (`lep_valid=0` in `instances.csv`); the
+preview marks each detected growth point with a cross instead of one dot.
+
+### Controlling over-detection
+
+`MIN_INSTANCE_AREA_PX` (default 700, tuned for ~2208x1242 frames) is the main
+noise control. Too low and every green speck becomes its own instance with its
+own LEP for the annotator to delete; too high and real seedlings are missed.
 
 ## Run
 
