@@ -20,6 +20,7 @@ seeweed3d/
   annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
                 prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
+  perception/   lep.py                     multi-evidence Leaf Emergence Point estimator
   common/       vegetation.py              shared ExG vegetation prior + white balance
                 depth_utils.py             canonical depth reader + robust 3D point sampling
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream
