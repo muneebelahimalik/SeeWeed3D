@@ -43,6 +43,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.progress import Progress  # noqa: E402
+
 # #############################################################################
 # ##                                                                         ##
 # ##   1)  INPUT DIRECTORIES  -  where your recorded sessions live           ##
@@ -515,6 +518,9 @@ def extract_session(sess, out_root, cfg):
     png_opt = [cv2.IMWRITE_PNG_COMPRESSION, cfg["PNG_COMPRESSION"]]
     cap = cfg["MAX_POOL_PER_SESSION"]
 
+    est_total = rgb_info.get("nb_frames_header") or (
+        int(rgb_info["duration_s"] * fps) if rgb_info.get("duration_s") else 0)
+    prog = Progress(est_total, f"  [{sid}]", unit="frames")
     for i, bgr in enumerate(decs["rgb"]):
         got = {k: next(v, None) for k, v in its.items()}
         met = frame_metrics(bgr, got.get("depth"), got.get("conf"), cfg)
@@ -548,7 +554,9 @@ def extract_session(sess, out_root, cfg):
                               "scene_hint": rc["scene_hint"],
                               "capture_format": fmt})
         index_rows.append(row)
+        prog.update(note=f"{n_written} pooled")
 
+    prog.close(note=f"{n_written} pooled")
     for d in decs.values():
         d.close()
 
