@@ -38,8 +38,8 @@ def test_grass_separated_by_elongation():
     assert rose_f and blade_f
     # A blade is far more elongated than a rosette - the key separating signal.
     assert blade_f["aspect_ratio"] > rose_f["aspect_ratio"]
-    assert wd.classify_morphology(blade_f, wd.CONFIG)[0] == "grass"
-    assert wd.classify_morphology(rose_f, wd.CONFIG)[0] != "grass"
+    assert wd.classify_morphology(blade_f, wd.CONFIG)[0] == "grass_weed"
+    assert wd.classify_morphology(rose_f, wd.CONFIG)[0] != "grass_weed"
 
 
 def test_species_are_never_auto_assigned():
@@ -47,11 +47,11 @@ def test_species_are_never_auto_assigned():
     rosette must fall back to the default class with zero confidence rather than
     nudging the annotator toward a confident wrong species."""
     cls, conf = wd.classify_morphology(wd.shape_features(_rosette()), wd.CONFIG)
-    assert cls == wd.CONFIG["DEFAULT_SPECIES_CLASS"] == "other weed"
+    assert cls == wd.CONFIG["DEFAULT_SPECIES_CLASS"] == "other_weed"
     assert conf == 0.0
-    assert cls not in ("brassica", "primrose")
+    assert cls not in ("cutleaf_evening_primrose", "wild_radish")
     # Only shape-supported classes are ever proposed.
-    assert wd.AUTO_CLASSES == {"grass", "weed cluster", "other weed"}
+    assert wd.AUTO_CLASSES == {"grass_weed", "weed_cluster", "other_weed"}
 
 
 def test_growth_peaks_one_per_plant():
@@ -71,7 +71,7 @@ def test_cluster_only_declared_for_large_multi_peak_blobs():
     single = _rosette(cx=100, cy=100, r=40)
     f_single = wd.shape_features(single)
     peaks_single = wd.growth_peaks(single, wd.CONFIG)
-    assert wd.classify_morphology(f_single, wd.CONFIG, peaks_single)[0] != "weed cluster"
+    assert wd.classify_morphology(f_single, wd.CONFIG, peaks_single)[0] != "weed_cluster"
 
     merged = np.zeros((400, 400), bool)
     for cx, cy in ((110, 110), (250, 130), (170, 260), (290, 280)):
@@ -81,7 +81,7 @@ def test_cluster_only_declared_for_large_multi_peak_blobs():
     cfg = dict(wd.CONFIG)
     cfg["CLUSTER_MIN_AREA_PX"] = min(cfg["CLUSTER_MIN_AREA_PX"], f_m["area_px"])
     cls, conf = wd.classify_morphology(f_m, cfg, peaks_m)
-    assert cls == "weed cluster" and conf > 0
+    assert cls == "weed_cluster" and conf > 0
 
 
 def test_treatment_points_lep_at_rosette_centre():
@@ -175,7 +175,7 @@ def test_cluster_gets_no_fused_lep():
     cfg = dict(wd.CONFIG)
     cfg["CLUSTER_MIN_AREA_PX"] = 1000
     instances, _ = wd.analyze_frame(bgr, [merged], cfg)
-    clusters = [i for i in instances if i["cls"] == "weed cluster"]
+    clusters = [i for i in instances if i["cls"] == "weed_cluster"]
     assert clusters, "setup should produce a cluster"
     assert clusters[0].get("lep") is None and clusters[0]["lep_valid"] is False
 
@@ -184,6 +184,6 @@ def test_cvat_label_schema_covers_classes_and_lep():
     names = [l["name"] for l in wd.weed_cvat_labels()]
     for c in wd.WEED_CLASSES:
         assert c in names
-    assert "weed LEP" in names
-    lep = next(l for l in wd.weed_cvat_labels() if l["name"] == "weed LEP")
+    assert wd.LEP_LABEL in names
+    lep = next(l for l in wd.weed_cvat_labels() if l["name"] == wd.LEP_LABEL)
     assert lep["type"] == "points"

@@ -49,7 +49,7 @@ def make_depth(mask, size, cx, cy, crown_r=16, soil_mm=900.0, crown_mm=22.0):
 def test_symmetric_rosette_lep_at_centre():
     mask, bgr = make_rosette()
     r = lep.LEPEstimator().estimate(
-        lep.PlantContext(mask=mask, bgr=bgr, class_name="brassica"))
+        lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish"))
     assert r is not None
     x, y = r.uv
     assert abs(x - 110) < 10 and abs(y - 110) < 10
@@ -73,15 +73,15 @@ def test_asymmetric_rosette_beats_centroid():
     assert centroid_err > 8, "test setup should actually displace the centroid"
 
     r = lep.LEPEstimator().estimate(
-        lep.PlantContext(mask=mask, bgr=bgr, class_name="brassica"))
+        lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish"))
     lep_err = float(np.linalg.norm(np.array(r.uv) - truth))
     assert lep_err < centroid_err, f"LEP {lep_err:.1f}px worse than centroid {centroid_err:.1f}px"
 
 
 def test_depth_channel_used_only_when_available():
     mask, bgr = make_rosette()
-    ctx_nodepth = lep.PlantContext(mask=mask, bgr=bgr, class_name="brassica")
-    ctx_depth = lep.PlantContext(mask=mask, bgr=bgr, class_name="brassica",
+    ctx_nodepth = lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish")
+    ctx_depth = lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish",
                                  depth_mm=make_depth(mask, 220, 110, 110))
     est = lep.LEPEstimator()
     assert "canopy_height" not in est.estimate(ctx_nodepth).channels
@@ -97,7 +97,7 @@ def test_channels_are_independent_and_agree_on_a_clean_plant():
     on an unambiguous plant they should converge on the same point."""
     mask, bgr = make_rosette()
     r = lep.LEPEstimator().estimate(
-        lep.PlantContext(mask=mask, bgr=bgr, class_name="brassica",
+        lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish",
                          depth_mm=make_depth(mask, 220, 110, 110)))
     radius = float(np.sqrt(mask.sum() / np.pi))
     assert r.agreement_px < 0.35 * radius
@@ -136,7 +136,7 @@ def test_abstains_on_shapeless_blob():
     mask[30:90, 30:90] = True                   # featureless square
     bgr = np.full((120, 120, 3), (60, 100, 60), np.uint8)
     r = lep.LEPEstimator().estimate(
-        lep.PlantContext(mask=mask, bgr=bgr, class_name="other weed"))
+        lep.PlantContext(mask=mask, bgr=bgr, class_name="other_weed"))
     assert r is not None
     assert r.confidence < 0.95
 

@@ -67,6 +67,12 @@ from typing import Optional
 import cv2
 import numpy as np
 
+import sys
+from pathlib import Path as _Path
+
+sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from common.ontology import ROSETTE_CLASSES  # noqa: E402
+
 LEP_METHOD_VERSION = "seeweed3d/lep/1.0"
 
 
@@ -87,7 +93,7 @@ class PlantContext:
     bgr: np.ndarray
     depth_mm: Optional[np.ndarray] = None
     origin: tuple = (0, 0)
-    class_name: str = "other weed"
+    class_name: str = "other_weed"
 
     @property
     def has_depth(self) -> bool:
@@ -376,7 +382,6 @@ DEFAULT_WEIGHTS = {
               "young_tissue": 0.8, "canopy_height": 0.5, "medial_axis": 0.5},
 }
 
-ROSETTE_CLASSES = {"brassica", "primrose", "other weed", "weed broadleaf"}
 
 
 class LEPEstimator:
@@ -492,7 +497,7 @@ class LEPEstimator:
 
 
 def crop_context(mask_full, bgr_full, bbox, depth_full=None, pad=8,
-                 class_name="other weed"):
+                 class_name="other_weed"):
     """Build a PlantContext for one instance from full-frame inputs."""
     x, y, w, h = bbox
     H, W = mask_full.shape[:2]
