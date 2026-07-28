@@ -1,6 +1,7 @@
 """Checks for the weed instance prelabeler's non-GPU logic: instance filtering
 and NMS, shape descriptors, morphology proposal, LEP/treatment points, and the
 multi-class COCO export. SAM 3 is stubbed (needs a GPU + gated weights)."""
+import csv
 import json
 
 import cv2
@@ -198,6 +199,49 @@ def test_cluster_gets_no_fused_lep():
     clusters = [i for i in instances if i["cls"] == "weed_cluster"]
     assert clusters, "setup should produce a cluster"
     assert clusters[0].get("lep") is None and clusters[0]["lep_valid"] is False
+
+
+def test_instances_csv_survives_mixed_rows(tmp_path):
+    """Regression guard for a real crash: rows do NOT all share a key set - a
+    weed_cluster instance carries no lep_* columns, and canopy_height only
+    appears when the frame has valid depth. Taking the CSV header from row 0
+    raised 'dict contains fields not in fieldnames' as soon as the first
+    instance was a cluster."""
+    sess = tmp_path / "sess"
+    (sess / "rgb").mkdir(parents=True)
+    (sess / "meta").mkdir(parents=True)
+
+    # One frame containing a big multi-peak clump (-> cluster, no LEP) AND a
+    # single rosette (-> has LEP), so both row shapes occur in one session.
+    size = 500
+    bgr = np.full((size, size, 3), (70, 45, 60), np.uint8)
+    clump = np.zeros((size, size), bool)
+    for cx, cy in ((110, 110), (200, 130), (150, 220), (240, 240)):
+        clump |= _rosette(size, size, cx, cy, 55)
+    single = _rosette(size, size, 400, 400, 45)
+    bgr[clump | single] = (35, 110, 40)
+    cv2.imwrite(str(sess / "rgb" / "f1.png"), bgr)
+    with open(sess / "meta" / "pool.csv", "w", newline="") as f:
+        f.write("filename\nf1.png\n")
+
+    def stub(pred, image, cfg, exemplars=None):
+        return [clump, single]
+
+    cfg = dict(wd.CONFIG)
+    cfg["CLUSTER_MIN_AREA_PX"] = 5000        # make the clump register as a cluster
+    out = tmp_path / "out"
+    st = wd.prelabel_session("sess", sess, out, cfg, predictor="STUB", sam_fn=stub)
+    assert st["instances"] == 2
+
+    rows = list(csv.DictReader(open(out / "sess" / "instances.csv", encoding="utf-8")))
+    assert len(rows) == 2
+    classes = {r["class"] for r in rows}
+    assert "weed_cluster" in classes           # the row with no LEP
+    # Every row shares one schema; the cluster's LEP cells are simply blank.
+    assert all(set(r.keys()) == set(rows[0].keys()) for r in rows)
+    assert "lep_x" in rows[0]
+    cluster_row = next(r for r in rows if r["class"] == "weed_cluster")
+    assert cluster_row["lep_x"] == ""
 
 
 def test_cvat_label_schema_covers_classes_and_lep():
