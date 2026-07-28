@@ -135,7 +135,7 @@ def test_prelabel_session_produces_valid_coco(extracted_root, tmp_path):
     assert st["frames"] == 5 and st["polys"] > 0
 
     coco = json.loads((tmp_path / sid / "instances_default.json").read_text())
-    assert coco["categories"][0]["name"] == "onion plant"
+    assert coco["categories"][0]["name"] == "onion_plant"
     assert len(coco["images"]) == 5 and coco["annotations"]
     by_id = {im["id"]: im for im in coco["images"]}
     for a in coco["annotations"]:

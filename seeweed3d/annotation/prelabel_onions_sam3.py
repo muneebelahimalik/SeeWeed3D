@@ -52,6 +52,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.ontology import CROP_CLASS  # noqa: E402
 from common.vegetation import component_boxes, remove_small  # noqa: E402
 from common.vegetation import vegetation_mask as _vegetation_mask  # noqa: E402
 from common.vegetation import white_balance as _white_balance  # noqa: E402
@@ -160,7 +161,7 @@ CONFIG = {
     "PREVIEW_SCALE": 0.5,
 }
 
-ONION_LABEL = "onion plant"     # must match cvat_labels.json / project ontology
+ONION_LABEL = CROP_CLASS     # from common/ontology.py (single source of truth)
 
 # =============================================================================
 

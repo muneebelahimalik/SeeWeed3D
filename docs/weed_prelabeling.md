@@ -14,7 +14,7 @@ scenes.**
 |---|---|---|
 | Goal | one high-recall **semantic** safety mask | every **individual** plant separated |
 | Priority | coverage over separation | separation + class + treatment point |
-| Classes | one (`onion plant`) | `brassica`, `primrose`, `grass`, `weed cluster`, `other weed` |
+| Classes | one (`onion_plant`) | `cutleaf_evening_primrose`, `wild_radish`, `grass_weed`, `weed_cluster`, `other_weed` |
 | Growth point | not needed | **LEP/AMT proposed per instance** |
 
 ## Pipeline
@@ -52,13 +52,19 @@ where the LEP proposal is less reliable, which is useful active-learning signal.
 
 | Class | Auto-assigned? | Why |
 |---|---|---|
-| `grass` | **yes**, by elongation | Measured: a blade has aspect ratio ~20, a rosette ~1. |
-| `weed cluster` | **yes**, high threshold | Several distinct growth-point peaks inside one large mask, i.e. individual LEPs genuinely cannot be assigned. |
-| `other weed` | fallback | Everything else, with **zero confidence**. |
-| `brassica`, `primrose` | **never** | Species is an *appearance* question. Shape cannot answer it. |
+| `grass_weed` | **yes**, by elongation | Measured: a blade has aspect ratio ~20, a rosette ~1. |
+| `weed_cluster` | **yes**, high threshold | Several distinct growth-point peaks inside one large mask, i.e. individual LEPs genuinely cannot be assigned. |
+| `other_weed` | fallback | Everything else, with **zero confidence**. |
+| `cutleaf_evening_primrose`, `wild_radish` | **never** | Both are rosette-forming, so shape cannot separate them. Species is an *appearance* question. |
+| `onion_plant` | **never** | The crop. Present in the CVAT schema only so that an onion appearing in a weed scene can be labelled correctly instead of being forced into a weed class - a crop-safety protection. |
+
+Class names and COCO category IDs come from `common/ontology.py`, the single
+source of truth, so a class can never be spelled two ways and the weed, onion
+and future mixed datasets merge without remapping annotations.
 
 **This is the key limitation to understand:** no threshold tuning will make the
-prelabeler tell brassica from primrose — aspect ratio and solidity describe
+prelabeler tell cutleaf evening primrose from wild radish — both are
+rosettes, and aspect ratio and solidity describe
 *form*, not species. Two things resolve it: you assigning species in CVAT, and
 (much faster) the DINOv2 cluster-then-label stage below.
 
@@ -72,7 +78,7 @@ What the shape data actually showed (measured, not assumed):
 
 ### Cluster detection
 
-`weed cluster` fires only when a mask has at least `CLUSTER_MIN_PEAKS` distinct
+`weed_cluster` fires only when a mask has at least `CLUSTER_MIN_PEAKS` distinct
 growth-point peaks **and** exceeds `CLUSTER_MIN_AREA_PX`. Raise either to make it
 rarer. A cluster gets **no single LEP** (`lep_valid=0` in `instances.csv`); the
 preview marks each detected growth point with a cross instead of one dot.
@@ -102,7 +108,7 @@ Output under `DATASET_ROOT/auto_labels_weeds/<session_id>/`:
 |---|---|
 | `cvat_ready/` | **upload this folder to CVAT** — matches `instances_default.json` exactly |
 | `instances_default.json` | COCO instance segmentation, one category per morphology class |
-| `weed_cvat_labels.json` | label schema (4 weed classes + `weed LEP` points + ignore/ambiguous) |
+| `weed_cvat_labels.json` | label schema (all ontology classes + `weed_LEP` points + `ignore_region`) |
 | `instances.csv` | per-instance class, confidence, growth stage, **all three treatment points**, and shape descriptors |
 | `crops/` | per-instance image crops — the input for DINO cluster-then-label |
 | `flagged_rgb/` + `flagged_for_manual.txt` | colour-cast/glare frames, no auto-labels, separate manual task |
@@ -113,9 +119,9 @@ Output under `DATASET_ROOT/auto_labels_weeds/<session_id>/`:
 1. Task from `auto_labels_weeds/<sid>/cvat_ready/`.
 2. Paste `weed_cvat_labels.json` into the **Raw** label editor.
 3. Import `instances_default.json` as **COCO 1.0**.
-4. Correct the **class** of each instance and place/drag the **`weed LEP`**
-   point at the centre of the youngest emerging tissue. Set `lep_visibility` and
-   `targetable`; use `ambiguous cluster` where individual weeds cannot be
+4. Correct the **class** of each instance and place/drag the **`weed_LEP`**
+   point (`weed_LEP`) at the centre of the youngest emerging tissue. Set `lep_visibility` and
+   `targetable`; use `weed_cluster` where individual weeds cannot be
    separated, and do **not** place an LEP where it is not visually identifiable.
 5. Export as **COCO 1.0**.
 

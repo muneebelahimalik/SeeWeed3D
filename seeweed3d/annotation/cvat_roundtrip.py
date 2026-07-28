@@ -51,18 +51,21 @@ CONFIG = {
     "VERIFIED_ROOT": VERIFIED_ROOT,
     "AUTO_LABELS_SUBDIR": "auto_labels_onion",   # prelabeler output
     "OUTPUT_SUBDIR":      "training_onion",       # written under DATASET_ROOT/
-    "ONION_CATEGORY":     "onion plant",
+    # Category name in your CVAT export. The project ontology now uses
+    # "onion_plant"; set this to "onion plant" if you are ingesting an older
+    # export made before the rename.
+    "ONION_CATEGORY":     "onion_plant",
     "ONLY_SESSIONS":      [],       # empty = every session found in VERIFIED_ROOT
     "IOU_ACCEPT":         0.90,     # frames at/above this counted as "clean"
 }
 
 # CVAT label schema for onion verification (paste into the Raw label editor).
 ONION_CVAT_LABELS = [
-    {"name": "onion plant", "type": "mask", "color": "#33ddff", "attributes": [
+    {"name": "onion_plant", "type": "mask", "color": "#33ddff", "attributes": [
         {"name": "difficulty", "input_type": "select", "mutable": True,
          "values": ["normal", "overlapping", "blurred", "shadowed", "wet", "truncated"],
          "default_value": "normal"}]},
-    {"name": "ignore region", "type": "mask", "color": "#000000", "attributes": [
+    {"name": "ignore_region", "type": "mask", "color": "#000000", "attributes": [
         {"name": "reason", "input_type": "select", "mutable": False,
          "values": ["severe_blur", "ambiguity", "labeling_uncertainty", "out_of_range"],
          "default_value": "ambiguity"}]},

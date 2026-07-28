@@ -62,6 +62,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                vegetation_mask, white_balance)
+from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
+                             WEED_CLASSES, coco_categories, cvat_labels)
 from perception.lep import LEPEstimator, crop_context  # noqa: E402
 
 # #############################################################################
@@ -131,12 +133,13 @@ CONFIG = {
     #          blade's ~0.13. Solidity cannot flag grass: a straight blade is
     #          nearly its own convex hull, ~0.9.)
     #   CAN  - an intermingled cluster, via multiple growth-point peaks.
-    #   CANNOT - SPECIES. brassica vs primrose is an appearance question, not a
-    #          shape one, so those are NEVER auto-assigned. Non-grass, non-cluster
+    #   CANNOT - SPECIES. cutleaf_evening_primrose vs wild_radish is an
+    #          appearance question, not a shape one (both are rosettes), so
+    #          those are NEVER auto-assigned. Non-grass, non-cluster
     #          instances go to DEFAULT_SPECIES_CLASS for you (or the DINO
     #          cluster-then-label stage) to resolve.
     "GRASS_MIN_ASPECT": 3.0,          # >= this -> grass
-    "DEFAULT_SPECIES_CLASS": "other weed",
+    "DEFAULT_SPECIES_CLASS": "other_weed",
 
     # -- Intermingled cluster detection (deliberately HIGH threshold) ----------
     # A cluster is only declared when several distinct growth points sit inside
@@ -172,49 +175,22 @@ CONFIG = {
     "PREVIEW_SCALE": 0.5,
 }
 
-# Weed classes. Species names (brassica, primrose) are NEVER auto-assigned -
-# they are not separable from shape - so they exist for annotation and for the
-# trained model, while the prelabeler only ever proposes grass, weed cluster, or
-# the DEFAULT_SPECIES_CLASS fallback.
-WEED_CLASSES = ["brassica", "primrose", "grass", "weed cluster", "other weed"]
-
-# Auto-assignable subset, i.e. what shape genuinely supports.
-AUTO_CLASSES = {"grass", "weed cluster", "other weed"}
+# Class names come from common/ontology.py so they cannot drift between stages.
+# Species (cutleaf_evening_primrose, wild_radish) are NEVER auto-assigned: both
+# are rosette-forming, so shape cannot tell them apart. The prelabeler only
+# proposes grass_weed, weed_cluster, or the DEFAULT_SPECIES_CLASS fallback.
+AUTO_CLASSES = {"grass_weed", "weed_cluster", "other_weed"}
 
 # =============================================================================
 
 
 def weed_cvat_labels():
-    """CVAT label schema for weed verification (paste into the Raw editor)."""
-    attrs = [
-        {"name": "growth_stage", "input_type": "select", "mutable": True,
-         "values": ["cotyledon", "2-leaf", "3-5-leaf", "later", "unknown"],
-         "default_value": "unknown"},
-        {"name": "lep_visibility", "input_type": "select", "mutable": True,
-         "values": ["visible", "partially_occluded_inferable", "not_visible"],
-         "default_value": "visible"},
-        {"name": "targetable", "input_type": "select", "mutable": True,
-         "values": ["yes", "no", "uncertain"], "default_value": "yes"},
-        {"name": "difficulty", "input_type": "select", "mutable": True,
-         "values": ["normal", "overlapping", "blurred", "shadowed", "wet", "truncated"],
-         "default_value": "normal"},
-        {"name": "species", "input_type": "text", "mutable": True, "default_value": ""},
-    ]
-    colors = {"brassica": "#ff6037", "primrose": "#ff8c00", "grass": "#ffcc00",
-              "weed cluster": "#8a2be2", "other weed": "#aaaaaa"}
-    labels = [{"name": c, "type": "polygon", "color": colors[c],
-               "attributes": list(attrs)} for c in WEED_CLASSES]
-    labels += [
-        {"name": "weed LEP", "type": "points", "color": "#fffc00", "attributes": [
-            {"name": "lep_visibility", "input_type": "select", "mutable": True,
-             "values": ["visible", "partially_occluded_inferable"],
-             "default_value": "visible"}]},
-        {"name": "ambiguous cluster", "type": "polygon", "color": "#8a2be2",
-         "attributes": []},
-        {"name": "ignore region", "type": "polygon", "color": "#000000",
-         "attributes": []},
-    ]
-    return labels
+    """CVAT label schema for weed verification (paste into the Raw editor).
+
+    Includes onion_plant even though a weed-only scene should not contain the
+    crop: if one does appear, the annotator can label it correctly instead of
+    being forced to call it a weed. That is a crop-safety protection."""
+    return cvat_labels()
 
 
 # --------------------------------------------------------------------------- #
@@ -392,11 +368,11 @@ def classify_morphology(f, cfg, peaks=None):
                    perimeter spiky, so circularity is as low as a blade's - and
                    solidity cannot flag grass, since a straight blade is nearly
                    its own convex hull.)
-    weed cluster - several distinct growth-point peaks inside one large mask,
+    weed_cluster - several distinct growth-point peaks inside one large mask,
                    i.e. intermingled plants whose LEPs cannot be separated.
                    Deliberately high thresholds so this is rare.
-    SPECIES      - never auto-assigned. brassica vs primrose is an appearance
-                   question that shape cannot answer, so everything else becomes
+    SPECIES      - never auto-assigned. Both named species are rosette-forming,
+                   so shape cannot tell them apart; everything else becomes
                    DEFAULT_SPECIES_CLASS with zero confidence, for the annotator
                    or the DINO cluster-then-label stage to resolve.
     """
@@ -406,10 +382,10 @@ def classify_morphology(f, cfg, peaks=None):
     if peaks is not None and len(peaks) >= cfg["CLUSTER_MIN_PEAKS"] \
             and f["area_px"] >= cfg["CLUSTER_MIN_AREA_PX"]:
         over = len(peaks) / max(1, cfg["CLUSTER_MIN_PEAKS"]) - 1.0
-        return "weed cluster", round(min(1.0, 0.5 + 0.5 * over), 3)
+        return "weed_cluster", round(min(1.0, 0.5 + 0.5 * over), 3)
     if ar >= cfg["GRASS_MIN_ASPECT"]:
         margin = min(1.0, (ar / max(1e-6, cfg["GRASS_MIN_ASPECT"]) - 1.0))
-        return "grass", round(0.5 + 0.5 * margin, 3)
+        return "grass_weed", round(0.5 + 0.5 * margin, 3)
     return cfg["DEFAULT_SPECIES_CLASS"], 0.0
 
 
@@ -469,13 +445,15 @@ def mask_polygon(mask, eps):
 # COCO export
 # --------------------------------------------------------------------------- #
 class WeedCoco:
-    """COCO instance segmentation with one category per morphology class."""
+    """COCO instance segmentation using the project ontology's stable category
+    IDs, so weed, onion and future mixed datasets can be merged without
+    remapping any annotation."""
 
-    def __init__(self):
+    def __init__(self, classes=None):
         self.images, self.anns = [], []
-        self.categories = [{"id": i + 1, "name": n, "supercategory": "weed"}
-                           for i, n in enumerate(WEED_CLASSES)]
-        self._cat = {n: i + 1 for i, n in enumerate(WEED_CLASSES)}
+        names = classes if classes is not None else WEED_CLASSES
+        self.categories = coco_categories(names)
+        self._cat = {c["name"]: c["id"] for c in self.categories}
         self._img = self._ann = 0
 
     def add_image(self, file_name, h, w):
@@ -505,9 +483,7 @@ def overlay(bgr, instances, scale):
 
     Text is kept small and only drawn on instances big enough to read, because a
     dense frame otherwise disappears under overlapping labels."""
-    colors = {"brassica": (60, 90, 255), "primrose": (255, 140, 0),
-              "grass": (0, 210, 255), "weed cluster": (200, 60, 200),
-              "other weed": (170, 170, 170)}
+    colors = CLASS_COLORS_BGR
     vis = bgr.copy()
     fs = max(0.35, min(0.6, bgr.shape[1] / 3000.0))     # scale text to the frame
     for inst in instances:
@@ -515,7 +491,7 @@ def overlay(bgr, instances, scale):
         cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(vis, cnts, -1, col, 2)
-        if inst["cls"] == "weed cluster":
+        if inst["cls"] == "weed_cluster":
             # No single LEP for a cluster - mark every growth point instead.
             for (px, py), _ in inst.get("peaks", []):
                 cv2.drawMarker(vis, (int(px), int(py)), (200, 60, 200),
@@ -582,7 +558,7 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
             continue
         peaks = growth_peaks(m, cfg)
         cls, conf = classify_morphology(f, cfg, peaks)
-        is_cluster = cls == "weed cluster"
+        is_cluster = cls == "weed_cluster"
         inst = {
             "mask": m, "cls": cls, "cls_confidence": conf,
             "features": f, "points": treatment_points(m), "peaks": peaks,
