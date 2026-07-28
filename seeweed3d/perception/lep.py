@@ -75,6 +75,14 @@ from common.ontology import ROSETTE_CLASSES  # noqa: E402
 
 LEP_METHOD_VERSION = "seeweed3d/lep/1.0"
 
+# Every evidence channel this module can produce, in a fixed order. as_row()
+# emits a column pair for each of them whether or not the channel contributed,
+# so the CSV schema is identical for every instance - a channel can legitimately
+# be absent (canopy_height needs valid depth), and a schema that changed row to
+# row would break both the CSV writer and any downstream analysis.
+ALL_CHANNEL_NAMES = ("petiole_convergence", "radial_isotropy", "young_tissue",
+                     "canopy_height", "medial_axis")
+
 
 # --------------------------------------------------------------------------- #
 # Inputs and outputs
@@ -117,17 +125,34 @@ class LEPResult:
     method_version: str = LEP_METHOD_VERSION
 
     def as_row(self, prefix="lep"):
-        """Flat dict for CSV export."""
+        """Flat dict for CSV export, with a FIXED set of keys.
+
+        Every channel gets a column pair even when it did not contribute (blank),
+        so all rows share one schema. Channels are legitimately optional -
+        canopy_height needs valid depth - and a per-row schema would break the
+        CSV writer and any downstream analysis."""
         row = {f"{prefix}_x": round(self.uv[0], 2), f"{prefix}_y": round(self.uv[1], 2),
                f"{prefix}_confidence": round(self.confidence, 4),
                f"{prefix}_visibility": self.visibility,
                f"{prefix}_agreement_px": round(self.agreement_px, 2),
                f"{prefix}_sigma_px": round(self.sigma_px, 2),
                f"{prefix}_method": self.method_version}
-        for name, c in self.channels.items():
-            row[f"{prefix}_{name}_x"] = round(c["uv"][0], 1)
-            row[f"{prefix}_{name}_y"] = round(c["uv"][1], 1)
+        for name in ALL_CHANNEL_NAMES:
+            c = self.channels.get(name)
+            row[f"{prefix}_{name}_x"] = round(c["uv"][0], 1) if c else ""
+            row[f"{prefix}_{name}_y"] = round(c["uv"][1], 1) if c else ""
         return row
+
+    @staticmethod
+    def row_fields(prefix="lep"):
+        """The exact column names as_row() produces, for a stable CSV header
+        even when no instance in a session had a usable LEP."""
+        cols = [f"{prefix}_x", f"{prefix}_y", f"{prefix}_confidence",
+                f"{prefix}_visibility", f"{prefix}_agreement_px",
+                f"{prefix}_sigma_px", f"{prefix}_method"]
+        for name in ALL_CHANNEL_NAMES:
+            cols += [f"{prefix}_{name}_x", f"{prefix}_{name}_y"]
+        return cols
 
 
 # --------------------------------------------------------------------------- #

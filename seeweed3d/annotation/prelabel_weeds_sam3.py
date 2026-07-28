@@ -64,7 +64,7 @@ from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                vegetation_mask, white_balance)
 from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
                              WEED_CLASSES, coco_categories, cvat_labels)
-from perception.lep import LEPEstimator, crop_context  # noqa: E402
+from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
 
 # #############################################################################
 # ##   DATASET_ROOT   -  the OUTPUT_ROOT you gave extract_sessions.py        ##
@@ -689,8 +689,22 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     if flagged:
         (out / "flagged_for_manual.txt").write_text("\n".join(flagged))
     if rows:
+        # Header must be the UNION of every row's keys, not the first row's:
+        # a weed_cluster instance carries no lep_* columns at all, so taking the
+        # header from row 0 crashes as soon as the first instance is a cluster.
+        # restval fills the blanks for rows that legitimately lack a column.
+        fields, seen = [], set()
+        for r in rows:
+            for k in r:
+                if k not in seen:
+                    seen.add(k)
+                    fields.append(k)
+        for k in LEPResult.row_fields("lep"):        # keep LEP columns present
+            if k not in seen:
+                seen.add(k)
+                fields.append(k)
         with open(out / "instances.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(f, fieldnames=fields, restval="")
             w.writeheader()
             w.writerows(rows)
 
