@@ -62,6 +62,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                vegetation_mask, white_balance)
+from perception.lep import LEPEstimator, crop_context  # noqa: E402
 
 # #############################################################################
 # ##   DATASET_ROOT   -  the OUTPUT_ROOT you gave extract_sessions.py        ##
@@ -145,6 +146,15 @@ CONFIG = {
     "CLUSTER_MIN_AREA_PX": 20000,     # and it must be large
     "PEAK_REL_THRESHOLD": 0.5,        # peak counts if >= this fraction of max radius
     "PEAK_MIN_SEPARATION_PX": 15,
+
+    # -- LEP estimation --------------------------------------------------------
+    # Multi-evidence estimator (perception/lep.py): petiole convergence, radial
+    # isotropy, young-tissue chromatics, canopy height and medial-axis
+    # interiority. Set USE_FUSED_LEP False to fall back to the plain
+    # distance-transform peak.
+    "USE_FUSED_LEP": True,
+    "USE_DEPTH_FOR_LEP": True,    # enables the canopy-height channel when depth exists
+    "LEP_CROP_PAD_PX": 10,
 
     # -- Growth stage from instance area (px). Calibrate to your mount height. -
     "STAGE_COTYLEDON_MAX_PX": 1200,
@@ -511,9 +521,23 @@ def overlay(bgr, instances, scale):
                 cv2.drawMarker(vis, (int(px), int(py)), (200, 60, 200),
                                cv2.MARKER_TILTED_CROSS, 14, 2)
         else:
-            x, y = [int(round(v)) for v in inst["points"]["lep_dt"]]
-            cv2.circle(vis, (x, y), 5, (0, 255, 255), -1)
-            cv2.circle(vis, (x, y), 6, (0, 0, 0), 1)
+            r = inst.get("lep")
+            if r is not None:
+                x, y = [int(round(v)) for v in r.uv]
+                # Colour encodes visibility, so abstentions are obvious at a
+                # glance: green = confident, amber = inferable, red = abstained.
+                dot = {"visible": (0, 255, 0),
+                       "partially_occluded_inferable": (0, 200, 255)}.get(
+                           r.visibility, (0, 0, 255))
+                cv2.circle(vis, (x, y), 5, dot, -1)
+                cv2.circle(vis, (x, y), 6, (0, 0, 0), 1)
+                # 1-sigma uncertainty of the fused evidence.
+                if r.sigma_px > 1:
+                    cv2.circle(vis, (x, y), int(round(r.sigma_px)), dot, 1)
+            else:
+                x, y = [int(round(v)) for v in inst["points"]["lep_dt"]]
+                cv2.circle(vis, (x, y), 5, (0, 255, 255), -1)
+                cv2.circle(vis, (x, y), 6, (0, 0, 0), 1)
         if inst["features"]["area_px"] >= 2500:          # label only if readable
             bx, by = inst["features"]["bbox"][:2]
             cv2.putText(vis, inst["cls"], (bx, max(12, by - 4)),
@@ -543,12 +567,14 @@ def pool_frames(session_dir):
             if r.get("filename")]
 
 
-def analyze_frame(bgr, sam_masks, cfg):
+def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     """Vegetation prior + instance filtering + per-instance analysis.
     Returns (instances, veg_mask). Pure CPU - the SAM call happens outside."""
     veg = vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
                           cfg["VEG_MORPH_KERNEL"], cfg["VEG_MIN_COMPONENT_PX"])
     masks = filter_instances(sam_masks, veg, cfg)
+    if estimator is None and cfg.get("USE_FUSED_LEP", True):
+        estimator = LEPEstimator()
     instances = []
     for m in masks:
         f = shape_features(m)
@@ -556,12 +582,21 @@ def analyze_frame(bgr, sam_masks, cfg):
             continue
         peaks = growth_peaks(m, cfg)
         cls, conf = classify_morphology(f, cfg, peaks)
-        instances.append({
+        is_cluster = cls == "weed cluster"
+        inst = {
             "mask": m, "cls": cls, "cls_confidence": conf,
             "features": f, "points": treatment_points(m), "peaks": peaks,
             # A cluster has several growth points, so no single LEP applies.
-            "lep_valid": cls != "weed cluster",
-            "growth_stage": growth_stage(f["area_px"], cfg)})
+            "lep_valid": not is_cluster,
+            "growth_stage": growth_stage(f["area_px"], cfg)}
+        # Multi-evidence LEP: the defensible estimate. The three geometric
+        # baselines in inst["points"] are kept alongside it for the plan's
+        # LEP-method comparison.
+        if estimator is not None and not is_cluster:
+            ctx = crop_context(m, bgr, f["bbox"], depth_full=depth_mm,
+                               pad=cfg.get("LEP_CROP_PAD_PX", 10), class_name=cls)
+            inst["lep"] = estimator.estimate(ctx)
+        instances.append(inst)
     return instances, veg
 
 
@@ -583,6 +618,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         (out / "crops").mkdir(parents=True, exist_ok=True)
 
     coco, rows, flagged = WeedCoco(), [], []
+    estimator = LEPEstimator() if cfg.get("USE_FUSED_LEP", True) else None
     manual_boxes = cfg["EXEMPLARS"].get(sid)
     stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0}
     per_class = {c: 0 for c in WEED_CLASSES}
@@ -614,7 +650,17 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             exemplars = None
 
         sam_masks = sam_fn(predictor, proc, cfg, exemplars) if predictor is not None else []
-        instances, _ = analyze_frame(proc, sam_masks, cfg)
+        # Depth, when the session has it, activates the canopy-height evidence
+        # channel: the crown sits above the surrounding soil and leaves.
+        depth_mm = None
+        if cfg.get("USE_DEPTH_FOR_LEP", True):
+            dpath = session_dir / "depth" / fn
+            if dpath.exists():
+                raw = cv2.imread(str(dpath), cv2.IMREAD_UNCHANGED)
+                if raw is not None and raw.dtype == np.uint16:
+                    depth_mm = raw.astype(np.float32)
+                    depth_mm[raw == 0] = np.nan          # 0 is the invalid sentinel
+        instances, _ = analyze_frame(proc, sam_masks, cfg, depth_mm, estimator)
 
         link_or_copy(rgb_path, cvat_dir / fn)
         img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])
@@ -627,7 +673,9 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             union |= inst["mask"]
             per_class[inst["cls"]] += 1
             p, f = inst["points"], inst["features"]
+            lep_row = inst["lep"].as_row("lep") if inst.get("lep") else {}
             rows.append({
+                **lep_row,
                 "session_id": sid, "filename": fn, "instance_idx": k,
                 "class": inst["cls"], "class_confidence": inst["cls_confidence"],
                 "growth_stage": inst["growth_stage"],
@@ -667,10 +715,25 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             w.writeheader()
             w.writerows(rows)
 
+    # Method provenance travels with the data, so any result can be traced back
+    # to exactly which LEP evidence model produced it.
+    if estimator is not None:
+        (out / "lep_method.json").write_text(json.dumps(estimator.describe(), indent=2))
+
     dist = " ".join(f"{c.split()[-1]}={n}" for c, n in per_class.items() if n)
     print(f"  [{sid}] {stats['frames']} frames | {stats['instances']} weed instances "
           f"| {stats['flagged']} flagged | {stats['empty']} with no instances")
     print(f"      provisional classes: {dist or 'none'}")
+    vis_rows = [r for r in rows if r.get("lep_visibility")]
+    if vis_rows:
+        conf = [float(r["lep_confidence"]) for r in vis_rows]
+        agree = [float(r["lep_agreement_px"]) for r in vis_rows]
+        counts = {}
+        for r in vis_rows:
+            counts[r["lep_visibility"]] = counts.get(r["lep_visibility"], 0) + 1
+        print(f"      LEP: median confidence {np.median(conf):.2f} | median "
+              f"channel agreement {np.median(agree):.1f}px | "
+              + " ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     print(f"      -> {out}")
     return stats
 

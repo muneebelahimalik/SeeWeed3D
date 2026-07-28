@@ -138,6 +138,48 @@ def test_analyze_frame_and_coco_export(tmp_path):
     assert 0 <= min(seg[0::2]) and max(seg[0::2]) <= 200
 
 
+def test_fused_lep_is_attached_to_instances():
+    """The multi-evidence LEP must reach each instance, carry a visibility
+    verdict and uncertainty, and keep the geometric baselines alongside it for
+    the plan's LEP-method comparison."""
+    bgr = np.full((240, 240, 3), (70, 45, 60), np.uint8)
+    m = _rosette(240, 240, 120, 120, 55)
+    bgr[m] = (35, 110, 40)
+    core = np.zeros((240, 240), np.uint8)
+    cv2.circle(core, (120, 120), 14, 1, -1)
+    bgr[core.astype(bool) & m] = (70, 190, 120)     # pale young tissue
+
+    instances, _ = wd.analyze_frame(bgr, [m], wd.CONFIG)
+    inst = instances[0]
+    r = inst["lep"]
+    assert r is not None
+    assert abs(r.uv[0] - 120) < 20 and abs(r.uv[1] - 120) < 20
+    assert r.visibility in ("visible", "partially_occluded_inferable", "not_visible")
+    assert 0.0 <= r.confidence <= 1.0 and r.sigma_px >= 0
+    # Baselines preserved for the comparison study.
+    for key in ("lep_dt", "centroid", "bbox_ctr"):
+        assert key in inst["points"]
+    row = r.as_row("lep")
+    for k in ("lep_x", "lep_y", "lep_confidence", "lep_visibility", "lep_method"):
+        assert k in row
+
+
+def test_cluster_gets_no_fused_lep():
+    """A cluster has several growth points, so a single LEP must not be
+    emitted for it."""
+    merged = np.zeros((400, 400), bool)
+    for cx, cy in ((110, 110), (250, 130), (170, 260), (290, 280)):
+        merged |= _rosette(400, 400, cx, cy, 60)
+    bgr = np.full((400, 400, 3), (70, 45, 60), np.uint8)
+    bgr[merged] = (35, 110, 40)
+    cfg = dict(wd.CONFIG)
+    cfg["CLUSTER_MIN_AREA_PX"] = 1000
+    instances, _ = wd.analyze_frame(bgr, [merged], cfg)
+    clusters = [i for i in instances if i["cls"] == "weed cluster"]
+    assert clusters, "setup should produce a cluster"
+    assert clusters[0].get("lep") is None and clusters[0]["lep_valid"] is False
+
+
 def test_cvat_label_schema_covers_classes_and_lep():
     names = [l["name"] for l in wd.weed_cvat_labels()]
     for c in wd.WEED_CLASSES:
