@@ -395,11 +395,17 @@ class LEPEstimator:
 
     def __init__(self, channels=None, top_frac=0.25,
                  agreement_good_frac=0.10, agreement_bad_frac=0.30,
-                 min_confidence=0.35):
+                 min_confidence=0.35, max_work_px=160):
         self.channels = channels if channels is not None else [
             PetioleConvergenceEvidence(), RadialIsotropyEvidence(),
             YoungTissueEvidence(), CanopyHeightEvidence(), MedialAxisEvidence()]
         self.top_frac = top_frac
+        # Skeleton thinning and the radial-isotropy grid search both scale with
+        # crop area, so a large rosette costs ~100x a seedling. The LEP is a
+        # coarse location on a broad evidence peak, so evidence is computed on a
+        # crop capped at max_work_px and the result is mapped back. This bounds
+        # per-instance cost regardless of plant size; set None to disable.
+        self.max_work_px = max_work_px
         # Agreement thresholds are expressed as a fraction of plant radius, so
         # they are scale free: a 5 px spread means something very different on a
         # cotyledon than on a mature rosette.
@@ -419,9 +425,36 @@ class LEPEstimator:
                 "channels": [c.describe() for c in self.channels],
                 "class_weights": DEFAULT_WEIGHTS}
 
+    def _downscaled(self, ctx):
+        """Return (working_context, scale) where scale maps working pixels back
+        to input pixels. Bounds the cost of the area-scaling channels."""
+        if not self.max_work_px:
+            return ctx, 1.0
+        h, w = ctx.mask.shape[:2]
+        longest = max(h, w)
+        if longest <= self.max_work_px:
+            return ctx, 1.0
+        f = self.max_work_px / float(longest)
+        nw, nh = max(8, int(round(w * f))), max(8, int(round(h * f)))
+        m = cv2.resize(ctx.mask.astype(np.uint8), (nw, nh),
+                       interpolation=cv2.INTER_NEAREST).astype(bool)
+        if not m.any():                       # too thin to survive downscaling
+            return ctx, 1.0
+        bgr = cv2.resize(ctx.bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        d = None
+        if ctx.depth_mm is not None:
+            d = cv2.resize(ctx.depth_mm, (nw, nh), interpolation=cv2.INTER_NEAREST)
+        scale = w / float(nw)
+        return PlantContext(mask=m, bgr=bgr, depth_mm=d, origin=(0, 0),
+                            class_name=ctx.class_name), scale
+
     def estimate(self, ctx: PlantContext) -> Optional[LEPResult]:
+        if ctx.mask is None or not ctx.mask.any():
+            return None
+        full_ctx = ctx
+        ctx, scale = self._downscaled(ctx)
         mask = ctx.mask
-        if mask is None or not mask.any():
+        if not mask.any():
             return None
         weights = self.weights_for(ctx.class_name)
         radius = float(np.sqrt(mask.sum() / np.pi))       # equivalent-disc radius
@@ -489,7 +522,17 @@ class LEPEstimator:
         else:
             visibility = "not_visible"
 
-        ox, oy = ctx.origin
+        # Map everything back to input-crop pixels if evidence was computed on a
+        # downscaled copy. Lengths scale linearly, second moments quadratically.
+        if scale != 1.0:
+            cx, cy = cx * scale, cy * scale
+            sigma *= scale
+            agreement *= scale
+            cov = [[v * scale * scale for v in row] for row in cov]
+            for c in used.values():
+                c["uv"] = (c["uv"][0] * scale, c["uv"][1] * scale)
+
+        ox, oy = full_ctx.origin
         return LEPResult(uv=(cx + ox, cy + oy), uv_local=(cx, cy),
                          confidence=confidence, visibility=visibility,
                          agreement_px=agreement, covariance=cov, sigma_px=sigma,

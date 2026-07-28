@@ -141,6 +141,30 @@ def test_abstains_on_shapeless_blob():
     assert r.confidence < 0.95
 
 
+def test_work_resolution_cap_keeps_accuracy_and_bounds_cost():
+    """Evidence is computed on a crop capped at max_work_px so per-instance cost
+    does not blow up on large rosettes. The mapped-back estimate must still land
+    on the growth point, and lengths/covariance must be rescaled with it."""
+    size = cx = cy = None
+    size, cx, cy = 340, 170, 170
+    leaves = tuple((a, 130) for a in range(0, 360, 45))
+    mask, bgr = make_rosette(size=size, cx=cx, cy=cy, leaves=leaves,
+                             core_r=22, leaf_w=20)
+    ctx = lep.PlantContext(mask=mask, bgr=bgr, class_name="wild_radish")
+
+    capped = lep.LEPEstimator(max_work_px=160).estimate(ctx)
+    full = lep.LEPEstimator(max_work_px=None).estimate(ctx)
+
+    # Both land on the meristem; capping costs a little precision, not the answer.
+    for r in (capped, full):
+        assert abs(r.uv[0] - cx) < 12 and abs(r.uv[1] - cy) < 12
+    # Scaled quantities come back in input-crop pixels, not working pixels.
+    assert capped.sigma_px > 1.0
+    assert np.isfinite(capped.covariance[0][0]) and capped.covariance[0][0] > 0
+    for c in capped.channels.values():
+        assert 0 <= c["uv"][0] <= size and 0 <= c["uv"][1] <= size
+
+
 def test_crop_context_maps_back_to_full_frame():
     full_mask = np.zeros((300, 300), bool)
     sub, bgr_sub = make_rosette(size=120, cx=60, cy=60,

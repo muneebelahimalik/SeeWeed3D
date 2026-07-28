@@ -97,6 +97,26 @@ def test_treatment_points_lep_at_rosette_centre():
     assert p["dt_radius_px"] > 0
 
 
+def test_small_seedlings_are_not_filtered_out():
+    """Regression guard. MIN_INSTANCE_AREA_PX was once raised to 700 on the
+    assumption that small detections were noise; in the field imagery they are
+    real cotyledon/2-leaf weeds, and 700 deleted every plant under ~29 px
+    diameter. For a laser weeder a missed small weed is worse than an extra
+    instance the annotator deletes, so the default must keep them."""
+    assert wd.CONFIG["MIN_INSTANCE_AREA_PX"] <= 300
+
+    veg = np.zeros((300, 300), bool)
+    masks = []
+    for i, d in enumerate((18, 22, 30, 60)):        # cotyledon -> rosette
+        m = np.zeros((300, 300), np.uint8)
+        cv2.circle(m, (40 + i * 70, 150), d // 2, 1, -1)
+        mb = m.astype(bool)
+        veg |= mb
+        masks.append(mb)
+    kept = wd.filter_instances(masks, veg, wd.CONFIG)
+    assert len(kept) == 4, "small real seedlings must survive the size gate"
+
+
 def test_filter_instances_rejects_and_dedupes():
     veg = np.zeros((200, 200), bool)
     veg[50:150, 50:150] = True

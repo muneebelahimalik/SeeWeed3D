@@ -85,9 +85,16 @@ preview marks each detected growth point with a cross instead of one dot.
 
 ### Controlling over-detection
 
-`MIN_INSTANCE_AREA_PX` (default 700, tuned for ~2208x1242 frames) is the main
-noise control. Too low and every green speck becomes its own instance with its
-own LEP for the annotator to delete; too high and real seedlings are missed.
+`MIN_INSTANCE_AREA_PX` (default **250**, ~16x16 px at 2208x1242) sets how small a
+detection may be.
+
+It was briefly raised to 700 on the assumption that the many small detections in
+dense frames were noise. Checking the imagery showed they are **real
+cotyledon-stage weeds**: at 700 every plant under ~29 px diameter was silently
+dropped, which removed the entire cotyledon and 2-leaf population. For a laser
+weeder a missed small weed is a worse failure than an extra instance the
+annotator deletes in one click, so the default keeps them. Raise it only if
+previews show detections sitting on bare soil rather than on real seedlings.
 
 ## Run
 
