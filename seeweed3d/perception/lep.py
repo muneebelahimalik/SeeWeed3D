@@ -206,19 +206,26 @@ class MedialAxisEvidence(LEPEvidence):
 
 def zhang_suen_thin(mask, max_iter=60):
     """Zhang-Suen thinning to a 1-px skeleton. Implemented here so the module has
-    no opencv-contrib dependency, and stays deterministic across machines."""
+    no opencv-contrib dependency, and stays deterministic across machines.
+
+    Neighbours are read by slicing a zero-padded copy rather than np.roll:
+    identical values (the pad supplies the zeros that roll's wraparound would
+    wrongly supply from the opposite edge) but without roll's extra allocation
+    and modular indexing."""
     img = (mask > 0).astype(np.uint8)
     for _ in range(max_iter):
         changed = False
         for step in (0, 1):
-            P2 = np.roll(img, 1, 0)
-            P6 = np.roll(img, -1, 0)
-            P4 = np.roll(img, -1, 1)
-            P8 = np.roll(img, 1, 1)
-            P3 = np.roll(P2, -1, 1)
-            P9 = np.roll(P2, 1, 1)
-            P5 = np.roll(P6, -1, 1)
-            P7 = np.roll(P6, 1, 1)
+            q = np.zeros((img.shape[0] + 2, img.shape[1] + 2), np.uint8)
+            q[1:-1, 1:-1] = img
+            P2 = q[0:-2, 1:-1]   # N
+            P3 = q[0:-2, 2:]     # NE
+            P4 = q[1:-1, 2:]     # E
+            P5 = q[2:, 2:]       # SE
+            P6 = q[2:, 1:-1]     # S
+            P7 = q[2:, 0:-2]     # SW
+            P8 = q[1:-1, 0:-2]   # W
+            P9 = q[0:-2, 0:-2]   # NW
             seq = [P2, P3, P4, P5, P6, P7, P8, P9]
             B = sum(seq)
             A = sum(((a == 0) & (b == 1)).astype(np.uint8)
@@ -303,19 +310,34 @@ class RadialIsotropyEvidence(LEPEvidence):
         cy_idx, cx_idx = np.nonzero(cand[::st, ::st])
         if cy_idx.size == 0:
             return np.zeros(mask.shape, np.float32)
+        # Vectorised over candidates: the per-candidate arctan2 + np.histogram
+        # loop dominated runtime. Binning by integer arithmetic and accumulating
+        # all candidates in one bincount is the same computation - identical bin
+        # edges to np.histogram(range=(-pi, pi)) since arctan2 is bounded by
+        # +/-pi - but without the Python-level loop. Chunked so peak memory
+        # stays at chunk x samples regardless of plant size.
+        nb = self.n_bins
+        py_all = (cy_idx * st).astype(np.float32)
+        px_all = (cx_idx * st).astype(np.float32)
         best = np.zeros(cy_idx.size, np.float32)
-        for i, (gy, gx) in enumerate(zip(cy_idx, cx_idx)):
-            py, px = gy * st, gx * st
-            ang = np.arctan2(sy - py, sx - px)
-            hist, _ = np.histogram(ang, bins=self.n_bins, range=(-np.pi, np.pi))
-            p = hist.astype(np.float32)
-            tot = p.sum()
-            if tot <= 0:
-                continue
-            p /= tot
-            nz = p > 0
+        sxf, syf = sx.astype(np.float32), sy.astype(np.float32)
+        chunk = max(1, int(2_000_000 // max(1, sxf.size)))
+        for lo in range(0, py_all.size, chunk):
+            hi = min(py_all.size, lo + chunk)
+            ang = np.arctan2(syf[None, :] - py_all[lo:hi, None],
+                             sxf[None, :] - px_all[lo:hi, None])
+            b = ((ang + np.pi) * (nb / (2.0 * np.pi))).astype(np.int32)
+            np.clip(b, 0, nb - 1, out=b)
+            c = hi - lo
+            flat = b + (np.arange(c, dtype=np.int32)[:, None] * nb)
+            counts = np.bincount(flat.ravel(), minlength=c * nb).reshape(c, nb)
+            p = counts.astype(np.float32)
+            tot = p.sum(axis=1, keepdims=True)
+            np.divide(p, np.where(tot > 0, tot, 1.0), out=p)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lp = np.where(p > 0, np.log(p), 0.0)
             # Normalised angular entropy: 1.0 = perfectly isotropic surroundings.
-            best[i] = float(-(p[nz] * np.log(p[nz])).sum() / np.log(self.n_bins))
+            best[lo:hi] = (-(p * lp).sum(axis=1) / np.log(nb)).astype(np.float32)
         out[cy_idx * st, cx_idx * st] = best
         if st > 1:
             out = cv2.dilate(out, np.ones((st * 2 + 1,) * 2, np.uint8))

@@ -62,6 +62,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                vegetation_mask, white_balance)
+from common.progress import Progress  # noqa: E402
 from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
                              WEED_CLASSES, coco_categories, cvat_labels)
 from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
@@ -602,11 +603,12 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0}
     per_class = {c: 0 for c in WEED_CLASSES}
 
+    prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
         rgb_path = session_dir / "rgb" / fn
         bgr = cv2.imread(str(rgb_path))
         if bgr is None:
-            print(f"      ! missing {rgb_path}")
+            prog.update(note="missing frame")
             continue
         proc = white_balance(bgr, cfg["WB_CAST_RATIO"]) if cfg["WHITE_BALANCE"] else bgr
 
@@ -618,6 +620,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             link_or_copy(rgb_path, flag_dir / fn)
             stats["frames"] += 1
             stats["flagged"] += 1
+            prog.update(note=f"{stats['instances']} instances, "
+                             f"{stats['flagged']} flagged")
             continue
 
         if manual_boxes:
@@ -683,7 +687,10 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["frames"] += 1
         stats["instances"] += len(instances)
         stats["empty"] += int(not instances)
+        prog.update(note=f"{stats['instances']} instances, "
+                         f"{stats['flagged']} flagged")
 
+    prog.close(note=f"{stats['instances']} instances, {stats['flagged']} flagged")
     coco.dump(out / "instances_default.json")
     (out / "weed_cvat_labels.json").write_text(json.dumps(weed_cvat_labels(), indent=2))
     if flagged:

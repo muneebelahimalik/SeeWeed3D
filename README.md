@@ -22,6 +22,7 @@ seeweed3d/
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
   perception/   lep.py                     multi-evidence Leaf Emergence Point estimator
   common/       ontology.py                class names + stable COCO ids (single source of truth)
+                progress.py                dependency-free progress lines with rate + ETA
                 vegetation.py              shared ExG vegetation prior + white balance
                 depth_utils.py             canonical depth reader + robust 3D point sampling
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream

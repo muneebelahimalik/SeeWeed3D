@@ -109,6 +109,15 @@ CONFIG["LIMIT_PER_SESSION"] = 20                              # trial first
 python seeweed3d/annotation/prelabel_weeds_sam3.py
 ```
 
+While running, each session shows a live progress line with rate and ETA:
+
+```
+  [weed1_20260108_143022] 128/400 frames  32.0% | 3.49 frames/s | elapsed 00:37 | ETA 01:18 | 1794 instances, 2 flagged
+```
+
+When output is redirected to a file it switches to occasional whole lines
+instead of a self-updating one, so logs stay readable.
+
 Output under `DATASET_ROOT/auto_labels_weeds/<session_id>/`:
 
 | Item | Purpose |

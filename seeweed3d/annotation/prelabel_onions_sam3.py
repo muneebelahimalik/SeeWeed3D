@@ -53,6 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CROP_CLASS  # noqa: E402
+from common.progress import Progress  # noqa: E402
 from common.vegetation import component_boxes, remove_small  # noqa: E402
 from common.vegetation import vegetation_mask as _vegetation_mask  # noqa: E402
 from common.vegetation import white_balance as _white_balance  # noqa: E402
@@ -451,11 +452,12 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0, "flagged": 0}
     flagged = []
 
+    prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
         rgb_path = session_dir / "rgb" / fn
         bgr = cv2.imread(str(rgb_path))
         if bgr is None:
-            print(f"      ! missing {rgb_path}"); continue
+            prog.update(note="missing frame"); continue
         proc = white_balance(bgr, cfg)             # neutralise colour-cast frames
         veg = vegetation_mask(proc, cfg)
 
@@ -495,7 +497,9 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["empty"] += int(not final.any())
         stats["flagged"] += int(is_flagged)
         stats["polys"] += len(polys)
+        prog.update(note=f"{stats['polys']} polygons, {stats['flagged']} flagged")
 
+    prog.close(note=f"{stats['polys']} polygons, {stats['flagged']} flagged")
     coco.dump(out / "instances_default.json")
     if flagged:
         (out / "flagged_for_manual.txt").write_text("\n".join(flagged))
