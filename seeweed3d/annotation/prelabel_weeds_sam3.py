@@ -116,11 +116,14 @@ CONFIG = {
     "DEVICE": "cuda",
 
     # -- Instance filtering ----------------------------------------------------
-    # MIN_INSTANCE_AREA_PX is the main noise control: too low and every green
-    # speck becomes its own instance with its own LEP, which the annotator then
-    # has to delete. Raise it if previews look cluttered, lower it if real
-    # seedlings are being missed. Tuned for ~2208x1242 frames.
-    "MIN_INSTANCE_AREA_PX": 700,     # below this is noise / unlabelable speck
+    # MIN_INSTANCE_AREA_PX controls how small a detection may be. It was briefly
+    # raised to 700 on the assumption that the many small detections in dense
+    # field frames were noise; checking the imagery showed they are real
+    # cotyledon-stage weeds, so 700 silently deleted genuine plants. Kept at 250:
+    # for a laser weeder a missed small weed is a worse failure than an extra
+    # instance the annotator deletes in one click. Raise only if previews show
+    # detections on bare soil rather than on real seedlings.
+    "MIN_INSTANCE_AREA_PX": 250,     # ~16x16 px at 2208x1242
     "MAX_INSTANCE_FRAC": 0.25,       # one weed covering >25% of frame = failure
     "INSTANCE_VEG_OVERLAP_MIN": 0.35,  # instance must sit on vegetation
     "NMS_IOU": 0.65,                 # de-duplicate overlapping SAM instances
