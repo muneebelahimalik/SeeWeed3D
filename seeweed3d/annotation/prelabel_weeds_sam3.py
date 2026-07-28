@@ -113,21 +113,38 @@ CONFIG = {
     "DEVICE": "cuda",
 
     # -- Instance filtering ----------------------------------------------------
-    "MIN_INSTANCE_AREA_PX": 250,     # below this is noise / unlabelable speck
+    # MIN_INSTANCE_AREA_PX is the main noise control: too low and every green
+    # speck becomes its own instance with its own LEP, which the annotator then
+    # has to delete. Raise it if previews look cluttered, lower it if real
+    # seedlings are being missed. Tuned for ~2208x1242 frames.
+    "MIN_INSTANCE_AREA_PX": 700,     # below this is noise / unlabelable speck
     "MAX_INSTANCE_FRAC": 0.25,       # one weed covering >25% of frame = failure
     "INSTANCE_VEG_OVERLAP_MIN": 0.35,  # instance must sit on vegetation
     "NMS_IOU": 0.65,                 # de-duplicate overlapping SAM instances
 
-    # -- Morphology heuristic (priors, calibrate after round 1) ----------------
-    # ELONGATION is the discriminator, measured on synthetic + field shapes:
-    # a grass blade has aspect ~20 and a rosette ~1. Circularity is NOT usable -
-    # a rosette's radiating leaves give it a long, spiky perimeter and therefore
-    # low circularity, much like a blade. Solidity is not usable for grass
-    # either: a straight blade is nearly its own convex hull (solidity ~0.9).
-    # Anything between the two aspect bands stays "unknown" on purpose.
-    "GRASS_MIN_ASPECT": 3.0,          # >= this -> grass-like
-    "BROADLEAF_MAX_ASPECT": 2.2,      # <= this (and solid enough) -> rosette
-    "BROADLEAF_MIN_SOLIDITY": 0.30,
+    # -- Morphology heuristic --------------------------------------------------
+    # WHAT SHAPE CAN AND CANNOT TELL YOU:
+    #   CAN  - grass vs rosette. Elongation separates them cleanly: a blade has
+    #          aspect ~20, a rosette ~1. (Circularity cannot: a rosette's
+    #          radiating leaves give it a spiky perimeter, ~0.15, as low as a
+    #          blade's ~0.13. Solidity cannot flag grass: a straight blade is
+    #          nearly its own convex hull, ~0.9.)
+    #   CAN  - an intermingled cluster, via multiple growth-point peaks.
+    #   CANNOT - SPECIES. brassica vs primrose is an appearance question, not a
+    #          shape one, so those are NEVER auto-assigned. Non-grass, non-cluster
+    #          instances go to DEFAULT_SPECIES_CLASS for you (or the DINO
+    #          cluster-then-label stage) to resolve.
+    "GRASS_MIN_ASPECT": 3.0,          # >= this -> grass
+    "DEFAULT_SPECIES_CLASS": "other weed",
+
+    # -- Intermingled cluster detection (deliberately HIGH threshold) ----------
+    # A cluster is only declared when several distinct growth points sit inside
+    # one connected mask, i.e. individual LEPs genuinely cannot be assigned.
+    # Raise CLUSTER_MIN_PEAKS / CLUSTER_MIN_AREA_PX to make it rarer still.
+    "CLUSTER_MIN_PEAKS": 3,           # distinct growth-point peaks in one mask
+    "CLUSTER_MIN_AREA_PX": 20000,     # and it must be large
+    "PEAK_REL_THRESHOLD": 0.5,        # peak counts if >= this fraction of max radius
+    "PEAK_MIN_SEPARATION_PX": 15,
 
     # -- Growth stage from instance area (px). Calibrate to your mount height. -
     "STAGE_COTYLEDON_MAX_PX": 1200,
@@ -145,10 +162,14 @@ CONFIG = {
     "PREVIEW_SCALE": 0.5,
 }
 
-# Morphology classes, per the project ontology (plan section 10). "sedge" is
-# never auto-assigned - it is not reliably separable from shape alone at this
-# growth stage, so it is left for the annotator.
-WEED_CLASSES = ["weed broadleaf", "weed grass", "weed sedge", "weed unknown"]
+# Weed classes. Species names (brassica, primrose) are NEVER auto-assigned -
+# they are not separable from shape - so they exist for annotation and for the
+# trained model, while the prelabeler only ever proposes grass, weed cluster, or
+# the DEFAULT_SPECIES_CLASS fallback.
+WEED_CLASSES = ["brassica", "primrose", "grass", "weed cluster", "other weed"]
+
+# Auto-assignable subset, i.e. what shape genuinely supports.
+AUTO_CLASSES = {"grass", "weed cluster", "other weed"}
 
 # =============================================================================
 
@@ -169,8 +190,8 @@ def weed_cvat_labels():
          "default_value": "normal"},
         {"name": "species", "input_type": "text", "mutable": True, "default_value": ""},
     ]
-    colors = {"weed broadleaf": "#ff6037", "weed grass": "#ffcc00",
-              "weed sedge": "#8a2be2", "weed unknown": "#aaaaaa"}
+    colors = {"brassica": "#ff6037", "primrose": "#ff8c00", "grass": "#ffcc00",
+              "weed cluster": "#8a2be2", "other weed": "#aaaaaa"}
     labels = [{"name": c, "type": "polygon", "color": colors[c],
                "attributes": list(attrs)} for c in WEED_CLASSES]
     labels += [
@@ -331,30 +352,55 @@ def shape_features(mask):
     }
 
 
-def classify_morphology(f, cfg):
-    """Provisional morphology class from shape, driven by ELONGATION.
+def growth_peaks(mask, cfg):
+    """Distinct growth-point peaks inside one mask, as [((x, y), radius), ...].
 
-    Measured on synthetic and field shapes: a grass blade has aspect ~20 while a
-    rosette has ~1. Circularity cannot separate them (a rosette's radiating
-    leaves make its perimeter long and spiky, so its circularity is as low as a
-    blade's), and solidity cannot flag grass (a straight blade is nearly its own
-    convex hull). So aspect ratio decides, with solidity only used to confirm a
-    compact plant is a real rosette rather than a scattered fragment.
+    Iteratively takes the distance-transform maximum and suppresses a disc around
+    it. A single rosette yields one peak; several intermingled plants sharing one
+    connected mask yield several - which is exactly the signal that individual
+    LEPs cannot be assigned to that blob."""
+    dt = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    gmax = float(dt.max())
+    if gmax <= 0:
+        return []
+    work, peaks = dt.copy(), []
+    while len(peaks) < 32:
+        _, v, _, loc = cv2.minMaxLoc(work)
+        if v <= 0 or v < cfg["PEAK_REL_THRESHOLD"] * gmax:
+            break
+        peaks.append((loc, float(v)))
+        cv2.circle(work, loc, int(max(cfg["PEAK_MIN_SEPARATION_PX"], v)), 0, -1)
+    return peaks
 
-    Deliberately conservative: anything in the ambiguous middle band stays
-    'weed unknown' so the annotator is never nudged toward a confident wrong
-    label. Confidence scales with distance past the threshold."""
+
+def classify_morphology(f, cfg, peaks=None):
+    """Provisional class from shape. Only ever proposes what shape can support.
+
+    grass        - by ELONGATION. Measured on synthetic and field shapes: a blade
+                   has aspect ~20 while a rosette has ~1. (Circularity cannot
+                   separate them - a rosette's radiating leaves make its
+                   perimeter spiky, so circularity is as low as a blade's - and
+                   solidity cannot flag grass, since a straight blade is nearly
+                   its own convex hull.)
+    weed cluster - several distinct growth-point peaks inside one large mask,
+                   i.e. intermingled plants whose LEPs cannot be separated.
+                   Deliberately high thresholds so this is rare.
+    SPECIES      - never auto-assigned. brassica vs primrose is an appearance
+                   question that shape cannot answer, so everything else becomes
+                   DEFAULT_SPECIES_CLASS with zero confidence, for the annotator
+                   or the DINO cluster-then-label stage to resolve.
+    """
     if f is None:
-        return "weed unknown", 0.0
-    ar, sol = f["aspect_ratio"], f["solidity"]
+        return cfg["DEFAULT_SPECIES_CLASS"], 0.0
+    ar = f["aspect_ratio"]
+    if peaks is not None and len(peaks) >= cfg["CLUSTER_MIN_PEAKS"] \
+            and f["area_px"] >= cfg["CLUSTER_MIN_AREA_PX"]:
+        over = len(peaks) / max(1, cfg["CLUSTER_MIN_PEAKS"]) - 1.0
+        return "weed cluster", round(min(1.0, 0.5 + 0.5 * over), 3)
     if ar >= cfg["GRASS_MIN_ASPECT"]:
         margin = min(1.0, (ar / max(1e-6, cfg["GRASS_MIN_ASPECT"]) - 1.0))
-        return "weed grass", round(0.5 + 0.5 * margin, 3)
-    if ar <= cfg["BROADLEAF_MAX_ASPECT"] and sol >= cfg["BROADLEAF_MIN_SOLIDITY"]:
-        margin = min(1.0, (cfg["BROADLEAF_MAX_ASPECT"] - ar) /
-                     max(1e-6, cfg["BROADLEAF_MAX_ASPECT"]))
-        return "weed broadleaf", round(0.5 + 0.5 * margin, 3)
-    return "weed unknown", 0.0
+        return "grass", round(0.5 + 0.5 * margin, 3)
+    return cfg["DEFAULT_SPECIES_CLASS"], 0.0
 
 
 def growth_stage(area_px, cfg):
@@ -445,20 +491,33 @@ class WeedCoco:
 
 
 def overlay(bgr, instances, scale):
-    """Preview: instance outline + class + proposed LEP dot."""
-    colors = {"weed broadleaf": (60, 90, 255), "weed grass": (0, 210, 255),
-              "weed sedge": (200, 60, 200), "weed unknown": (170, 170, 170)}
+    """Preview: instance outline, a small class tag, and the proposed LEP dot.
+
+    Text is kept small and only drawn on instances big enough to read, because a
+    dense frame otherwise disappears under overlapping labels."""
+    colors = {"brassica": (60, 90, 255), "primrose": (255, 140, 0),
+              "grass": (0, 210, 255), "weed cluster": (200, 60, 200),
+              "other weed": (170, 170, 170)}
     vis = bgr.copy()
+    fs = max(0.35, min(0.6, bgr.shape[1] / 3000.0))     # scale text to the frame
     for inst in instances:
         col = colors.get(inst["cls"], (170, 170, 170))
         cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(vis, cnts, -1, col, 2)
-        x, y = [int(round(v)) for v in inst["points"]["lep_dt"]]
-        cv2.circle(vis, (x, y), 6, (0, 255, 255), -1)
-        cv2.circle(vis, (x, y), 7, (0, 0, 0), 1)
-        cv2.putText(vis, inst["cls"].replace("weed ", ""), (x + 9, y - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2, cv2.LINE_AA)
+        if inst["cls"] == "weed cluster":
+            # No single LEP for a cluster - mark every growth point instead.
+            for (px, py), _ in inst.get("peaks", []):
+                cv2.drawMarker(vis, (int(px), int(py)), (200, 60, 200),
+                               cv2.MARKER_TILTED_CROSS, 14, 2)
+        else:
+            x, y = [int(round(v)) for v in inst["points"]["lep_dt"]]
+            cv2.circle(vis, (x, y), 5, (0, 255, 255), -1)
+            cv2.circle(vis, (x, y), 6, (0, 0, 0), 1)
+        if inst["features"]["area_px"] >= 2500:          # label only if readable
+            bx, by = inst["features"]["bbox"][:2]
+            cv2.putText(vis, inst["cls"], (bx, max(12, by - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs, col, 1, cv2.LINE_AA)
     return cv2.resize(vis, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) \
         if scale != 1.0 else vis
 
@@ -495,10 +554,13 @@ def analyze_frame(bgr, sam_masks, cfg):
         f = shape_features(m)
         if f is None:
             continue
-        cls, conf = classify_morphology(f, cfg)
+        peaks = growth_peaks(m, cfg)
+        cls, conf = classify_morphology(f, cfg, peaks)
         instances.append({
             "mask": m, "cls": cls, "cls_confidence": conf,
-            "features": f, "points": treatment_points(m),
+            "features": f, "points": treatment_points(m), "peaks": peaks,
+            # A cluster has several growth points, so no single LEP applies.
+            "lep_valid": cls != "weed cluster",
             "growth_stage": growth_stage(f["area_px"], cfg)})
     return instances, veg
 
@@ -569,6 +631,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                 "session_id": sid, "filename": fn, "instance_idx": k,
                 "class": inst["cls"], "class_confidence": inst["cls_confidence"],
                 "growth_stage": inst["growth_stage"],
+                "n_growth_peaks": len(inst.get("peaks", [])),
+                "lep_valid": int(inst.get("lep_valid", True)),
                 "lep_dt_x": p["lep_dt"][0], "lep_dt_y": p["lep_dt"][1],
                 "dt_radius_px": p["dt_radius_px"],
                 "centroid_x": p["centroid"][0], "centroid_y": p["centroid"][1],
