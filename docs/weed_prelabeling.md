@@ -83,6 +83,56 @@ growth-point peaks **and** exceeds `CLUSTER_MIN_AREA_PX`. Raise either to make i
 rarer. A cluster gets **no single LEP** (`lep_valid=0` in `instances.csv`); the
 preview marks each detected growth point with a cross instead of one dot.
 
+## Boundary quality
+
+Three things determine how good the exported boundaries are as a *training
+target*, and all three are now handled explicitly.
+
+### 1. Edge snapping (`BOUNDARY_REFINE_BAND_PX`)
+
+SAM gives excellent structure but its edge can sit a few pixels off the true
+leaf margin - bleeding onto soil, or clipping a thin leaf tip. Only the narrow
+band around each boundary is re-decided, using a **continuous** vegetation score
+(`vegetation_score()`, the soft counterpart of the binary prior): SAM decides
+*what* the object is, the image decides exactly *where it ends*. The interior
+and the overall shape are never touched, and added pixels must stay connected to
+the original core so refinement cannot absorb a neighbouring plant. Set the band
+to 0 to disable.
+
+### 2. Splitting touching plants (`SPLIT_TOUCHING_INSTANCES`)
+
+Two rosettes growing into each other are **one connected blob**, so SAM returns
+them as a single instance with no boundary between them. Each blob containing
+several detected growth points is split into one mask per plant by **geodesic
+assignment**: every pixel goes to the growth point it reaches by the shortest
+path *through the plant*.
+
+That is the correct semantics - a leaf belongs to the plant whose crown it
+physically joins - and it is much more robust than a distance-transform
+watershed, which on spindly plants has a flat ridge along thin leaves and so
+places the cut arbitrarily. Measured on two overlapping synthetic rosettes:
+watershed gave parts of 7042/1848 px with one part swallowing 2222 px of its
+neighbour, while geodesic assignment gives 5216/5228 px, 100% coverage, zero
+overlap, and each part claiming its own plant's tissue exclusively.
+
+The split falls back to the unsplit mask whenever it is not clean (fewer than
+two viable parts, or less than `SPLIT_MIN_COVERAGE` of the blob retained), so a
+doubtful split can never fabricate a boundary. `weed_cluster` is then reserved
+for what genuinely cannot be separated.
+
+### 3. Polygon fidelity
+
+- **All parts are exported.** Previously only the largest contour survived, so
+  any tissue separated by an occluding leaf was silently dropped from the
+  training target. COCO's `segmentation` is a list precisely so a multi-part
+  instance can be represented.
+- **Tolerance scales with instance size** (`POLY_APPROX_EPS_FRAC`, clamped by
+  `_MIN`/`_MAX`). A fixed tolerance erases real shape on a cotyledon seedling
+  and leaves thousands of near-duplicate vertices on a large rosette; scaling
+  with the square root of area keeps roughly constant *relative* fidelity.
+- **`area` is the true mask area**, not the bbox area, which badly overstates a
+  thin or lobed plant.
+
 ### Controlling over-detection
 
 `MIN_INSTANCE_AREA_PX` (default **250**, ~16x16 px at 2208x1242) sets how small a

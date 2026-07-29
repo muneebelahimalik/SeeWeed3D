@@ -65,6 +65,26 @@ def vegetation_mask(bgr, exg_threshold=0.05, min_saturation=40, morph_kernel=3,
     return remove_small(veg.astype(bool), min_component_px)
 
 
+def vegetation_score(bgr, exg_threshold=0.05, min_saturation=40, softness=0.04):
+    """Soft plant likelihood in [0, 1], the continuous counterpart of
+    vegetation_mask().
+
+    The binary mask is the right tool for deciding what is a plant; for deciding
+    exactly WHERE a plant boundary falls, a hard threshold throws away the very
+    gradient that locates the edge. This keeps that gradient: a smooth ramp
+    across the ExG threshold, gated the same way by green dominance and
+    saturation so a colour-cast soil cannot score as plant."""
+    exg = excess_green(bgr)
+    # Logistic ramp centred on the threshold: 0.5 at the threshold, saturating
+    # within a few hundredths of ExG either side.
+    score = 1.0 / (1.0 + np.exp(-(exg - exg_threshold) / max(1e-6, softness)))
+    b, g, r = [bgr[:, :, i].astype(np.float32) for i in range(3)]
+    score *= ((g >= r) & (g >= b)).astype(np.float32)
+    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1].astype(np.float32)
+    score *= np.clip(sat / max(1.0, float(min_saturation)), 0.0, 1.0)
+    return score.astype(np.float32)
+
+
 def component_boxes(mask, min_area_px, pad_px=0, max_boxes=None):
     """Bounding boxes [x1,y1,x2,y2] of mask components >= min_area_px, largest
     first. Used to prompt SAM 3 with real plant exemplars."""

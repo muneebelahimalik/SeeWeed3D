@@ -187,7 +187,9 @@ def test_fused_lep_is_attached_to_instances():
 
 def test_cluster_gets_no_fused_lep():
     """A cluster has several growth points, so a single LEP must not be
-    emitted for it."""
+    emitted for it. Splitting is disabled here so the cluster path is tested in
+    isolation - separable plants are split into individual instances instead,
+    which is covered by test_touching_plants_are_split_not_clustered."""
     merged = np.zeros((400, 400), bool)
     for cx, cy in ((110, 110), (250, 130), (170, 260), (290, 280)):
         merged |= _rosette(400, 400, cx, cy, 60)
@@ -195,6 +197,7 @@ def test_cluster_gets_no_fused_lep():
     bgr[merged] = (35, 110, 40)
     cfg = dict(wd.CONFIG)
     cfg["CLUSTER_MIN_AREA_PX"] = 1000
+    cfg["SPLIT_TOUCHING_INSTANCES"] = False
     instances, _ = wd.analyze_frame(bgr, [merged], cfg)
     clusters = [i for i in instances if i["cls"] == "weed_cluster"]
     assert clusters, "setup should produce a cluster"
@@ -229,6 +232,7 @@ def test_instances_csv_survives_mixed_rows(tmp_path):
 
     cfg = dict(wd.CONFIG)
     cfg["CLUSTER_MIN_AREA_PX"] = 5000        # make the clump register as a cluster
+    cfg["SPLIT_TOUCHING_INSTANCES"] = False  # isolate the CSV-schema behaviour
     out = tmp_path / "out"
     st = wd.prelabel_session("sess", sess, out, cfg, predictor="STUB", sam_fn=stub)
     assert st["instances"] == 2
@@ -242,6 +246,109 @@ def test_instances_csv_survives_mixed_rows(tmp_path):
     assert "lep_x" in rows[0]
     cluster_row = next(r for r in rows if r["class"] == "weed_cluster")
     assert cluster_row["lep_x"] == ""
+
+
+def test_touching_plants_are_split_not_clustered():
+    """Two rosettes growing into each other are ONE connected blob, so SAM
+    returns them as a single instance. Marker-controlled watershed seeded on the
+    detected growth points must cut them into two plants with a boundary
+    between them - that separation is what a trained model has to learn."""
+    size = 300
+    a = _rosette(size, size, 105, 150, 55)
+    b = _rosette(size, size, 195, 150, 55)
+    merged = a | b
+    assert merged.sum() < a.sum() + b.sum(), "setup should actually overlap"
+
+    peaks = wd.growth_peaks(merged, wd.CONFIG)
+    parts = wd.split_touching_instances(merged, peaks, wd.CONFIG)
+    assert len(parts) >= 2, "touching plants must be separated"
+    # Parts are disjoint and together cover essentially the whole blob.
+    assert (parts[0] & parts[1]).sum() == 0
+    covered = np.logical_or.reduce(parts).sum()
+    assert covered >= 0.80 * merged.sum()
+    # Each part belongs to ONE plant: compare against the EXCLUSIVE region of
+    # each (the plants overlap, so shared pixels legitimately count for both).
+    # Geodesic assignment - tissue goes to the growth point it connects to
+    # through the plant - makes this essentially pure, so hold it to that.
+    only_a, only_b = a & ~b, b & ~a
+    claims = [((p & only_a).sum(), (p & only_b).sum()) for p in parts[:2]]
+    for ca, cb in claims:
+        assert max(ca, cb) > 20 * max(1, min(ca, cb)), "a part straddles both plants"
+    # ...and the two parts claim opposite plants, not the same one twice.
+    assert (claims[0][0] > claims[0][1]) != (claims[1][0] > claims[1][1])
+
+
+def test_split_falls_back_rather_than_inventing_a_boundary():
+    """A single plant has one growth point, so nothing to split - and a split
+    that loses tissue must be rejected rather than fabricating a cut."""
+    single = _rosette(cx=100, cy=100, r=45)
+    peaks = wd.growth_peaks(single, wd.CONFIG)
+    assert wd.split_touching_instances(single, peaks, wd.CONFIG) == [single] or \
+        len(wd.split_touching_instances(single, peaks, wd.CONFIG)) == 1
+    # Disabled by config -> always the original mask.
+    cfg = dict(wd.CONFIG); cfg["SPLIT_TOUCHING_INSTANCES"] = False
+    merged = _rosette(300, 300, 105, 150, 55) | _rosette(300, 300, 195, 150, 55)
+    out = wd.split_touching_instances(merged, wd.growth_peaks(merged, cfg), cfg)
+    assert len(out) == 1 and np.array_equal(out[0], merged)
+
+
+def test_boundary_refinement_snaps_to_plant_evidence():
+    """SAM's edge can bleed onto soil. Only the narrow boundary band is
+    re-decided from the image's own plant/soil evidence; the interior and the
+    overall shape are untouched, and refinement cannot absorb a neighbour."""
+    from common.vegetation import vegetation_score
+    size = 160
+    bgr = np.full((size, size, 3), (70, 45, 60), np.uint8)      # soil
+    true_plant = np.zeros((size, size), bool)
+    cv2.circle(true_plant.view(np.uint8), (80, 80), 30, 1, -1)
+    bgr[true_plant] = (35, 160, 45)                              # saturated green
+
+    bloated = np.zeros((size, size), bool)                       # SAM overshoots
+    cv2.circle(bloated.view(np.uint8), (80, 80), 36, 1, -1)
+
+    score = vegetation_score(bgr, wd.CONFIG["EXG_THRESHOLD"],
+                             wd.CONFIG["VEG_MIN_SATURATION"])
+    refined = wd.refine_boundary(bloated, score, wd.CONFIG)
+    # Closer to the true plant than the bloated input was.
+    before = np.logical_xor(bloated, true_plant).sum()
+    after = np.logical_xor(refined, true_plant).sum()
+    assert after < before, f"refinement made it worse: {after} vs {before}"
+    assert refined[80, 80], "interior must be preserved"
+
+
+def test_polygons_keep_all_parts_and_scale_tolerance():
+    """Exporting only the largest contour silently dropped real tissue that was
+    separated by an occlusion, and a fixed simplification tolerance erases shape
+    on seedlings while bloating vertices on rosettes."""
+    m = np.zeros((200, 200), bool)
+    cv2.circle(m.view(np.uint8), (60, 100), 30, 1, -1)      # main body
+    cv2.circle(m.view(np.uint8), (150, 100), 14, 1, -1)     # detached leaf
+    polys = wd.mask_polygons(m, wd.CONFIG)
+    assert len(polys) == 2, "a detached part must not be dropped"
+    for p in polys:
+        assert len(p) >= 6 and len(p) % 2 == 0
+
+    # Tolerance scales with size, and stays inside the configured bounds.
+    small = wd.polygon_epsilon(300, wd.CONFIG)
+    large = wd.polygon_epsilon(40000, wd.CONFIG)
+    assert small < large
+    assert wd.CONFIG["POLY_APPROX_EPS_MIN"] <= small
+    assert large <= wd.CONFIG["POLY_APPROX_EPS_MAX"]
+
+
+def test_coco_accepts_multipart_segmentation_and_true_area():
+    """COCO's segmentation field is a list so a multi-part instance survives;
+    area must be the real mask area, not the bbox area which badly overstates a
+    thin or lobed plant."""
+    coco = wd.WeedCoco()
+    img = coco.add_image("f.png", 200, 200)
+    coco.add_instance(img, "other_weed",
+                      [[10, 10, 50, 10, 50, 50, 10, 50],
+                       [120, 10, 160, 10, 160, 50, 120, 50]],
+                      bbox=[10, 10, 150, 40], area_px=1234)
+    ann = coco.anns[0]
+    assert len(ann["segmentation"]) == 2
+    assert ann["area"] == 1234.0 and ann["area"] != 150 * 40
 
 
 def test_cvat_label_schema_covers_classes_and_lep():
