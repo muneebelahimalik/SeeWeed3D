@@ -59,6 +59,21 @@ def test_cvat_schema_covers_every_class_plus_lep():
     assert {"growth_stage", "lep_visibility", "targetable", "difficulty"} <= attr_names
 
 
+def test_every_attribute_has_a_nonempty_values_array():
+    """CVAT's Raw label editor rejects the WHOLE schema on paste if any
+    attribute - including 'text' ones, where CVAT still expects the default
+    wrapped in a single-element list - is missing 'values' or has it empty.
+    Regression guard: species_note shipped without 'values' and broke every
+    weed_cvat_labels.json paste until this was caught."""
+    for label in onto.cvat_labels():
+        for attr in label["attributes"]:
+            assert "values" in attr, (
+                f"{label['name']}.{attr['name']} has no 'values' key - "
+                f"CVAT will reject the entire schema")
+            assert isinstance(attr["values"], list) and len(attr["values"]) > 0, (
+                f"{label['name']}.{attr['name']} has an empty 'values' array")
+
+
 def test_coco_categories_can_be_restricted_but_keep_global_ids():
     """A weed-only export omits the crop, but the ids it does emit must match
     the global ontology so datasets merge without remapping."""

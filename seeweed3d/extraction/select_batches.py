@@ -103,7 +103,12 @@ CVAT_LABELS = [
         {"name": "difficulty", "input_type": "select", "mutable": True,
          "values": ["normal", "overlapping", "blurred", "shadowed", "wet", "truncated"],
          "default_value": "normal"},
-        {"name": "species", "input_type": "text", "mutable": True, "default_value": ""}]},
+        # "values" is required by CVAT even for text attributes - it holds the
+        # default wrapped in a single-element list. Omitting it makes CVAT
+        # reject the whole schema on paste ("attribute values must be a
+        # non-empty array").
+        {"name": "species", "input_type": "text", "mutable": True,
+         "default_value": "", "values": [""]}]},
     {"name": "weed LEP", "type": "points", "color": "#fffc00", "attributes": [
         {"name": "lep_visibility", "input_type": "select", "mutable": True,
          "values": ["visible", "partially_occluded_inferable"], "default_value": "visible"},

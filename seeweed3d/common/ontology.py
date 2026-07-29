@@ -77,8 +77,13 @@ INSTANCE_ATTRIBUTES = [
     {"name": "difficulty", "input_type": "select", "mutable": True,
      "values": ["normal", "overlapping", "blurred", "shadowed", "wet", "truncated"],
      "default_value": "normal"},
+    # CVAT's Raw label editor requires "values" as a non-empty array for EVERY
+    # attribute, including "text" ones - it holds the default, wrapped in a
+    # single-element list. Omitting it (as an earlier version of this file did)
+    # makes CVAT reject the whole label schema with "attribute values must be a
+    # non-empty array" as soon as it is pasted in.
     {"name": "species_note", "input_type": "text", "mutable": True,
-     "default_value": ""},
+     "default_value": "", "values": [""]},
 ]
 
 

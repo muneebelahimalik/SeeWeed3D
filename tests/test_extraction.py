@@ -14,6 +14,20 @@ def _rows(path):
     return list(csv.DictReader(open(path, encoding="utf-8")))
 
 
+def test_cvat_labels_every_attribute_has_nonempty_values():
+    """CVAT's Raw label editor rejects the whole schema on paste if any
+    attribute - including 'text' ones, where CVAT still expects the default
+    wrapped in a single-element list - is missing 'values' or has it empty.
+    Regression guard for the same bug class that broke weed_cvat_labels.json."""
+    s2 = load_script("extraction/select_batches.py")
+    for label in s2.CVAT_LABELS:
+        for attr in label["attributes"]:
+            assert "values" in attr, (
+                f"{label['name']}.{attr['name']} has no 'values' key")
+            assert isinstance(attr["values"], list) and len(attr["values"]) > 0, (
+                f"{label['name']}.{attr['name']} has an empty 'values' array")
+
+
 def test_registry_detects_both_formats(extracted_root):
     reg = {r["session_id"]: r for r in _rows(extracted_root / "registry.csv")}
     assert len(reg) == 3
