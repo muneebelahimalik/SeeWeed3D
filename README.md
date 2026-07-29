@@ -20,6 +20,7 @@ seeweed3d/
   annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
                 prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
+                regen_cvat_labels.py       refresh label schema files without re-running SAM 3
   perception/   lep.py                     multi-evidence Leaf Emergence Point estimator
   common/       ontology.py                class names + stable COCO ids (single source of truth)
                 progress.py                dependency-free progress lines with rate + ETA

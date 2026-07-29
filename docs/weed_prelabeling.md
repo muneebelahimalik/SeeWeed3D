@@ -141,6 +141,23 @@ Output under `DATASET_ROOT/auto_labels_weeds/<session_id>/`:
    separated, and do **not** place an LEP where it is not visually identifiable.
 5. Export as **COCO 1.0**.
 
+## Refreshing labels without re-running SAM 3
+
+The label schema (`weed_cvat_labels.json`) is pure data derived from
+`common/ontology.py` - it never depends on per-frame inference. If the
+ontology changes after you've already run a full (multi-hour) prelabeling
+pass, don't re-run it just to get a fresh label file:
+
+```bash
+python seeweed3d/annotation/regen_cvat_labels.py
+```
+
+Rewrites `weed_cvat_labels.json` (and `onion_cvat_labels.json`, if that tree
+exists) inside every **already-processed** session folder, in seconds.
+`instances_default.json`, `masks/`, `preview/` and `cvat_ready/` are never
+touched, and folders with no `instances_default.json` (never prelabeled) are
+skipped rather than created.
+
 ## Scaling: cluster-then-label (next stage)
 
 Correcting the class of thousands of instances one by one is the bottleneck.
