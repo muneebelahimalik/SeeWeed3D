@@ -142,8 +142,8 @@ Set `RECOVER_MISSED_PLANTS: False` to turn it off (for a pure SAM ablation).
 
 ## Boundary quality
 
-Three things determine how good the exported boundaries are as a *training
-target*, and all three are now handled explicitly.
+Four things determine how good the exported boundaries are as a *training
+target*, and all four are now handled explicitly.
 
 ### 1. Edge snapping (`BOUNDARY_REFINE_BAND_PX`)
 
@@ -156,7 +156,33 @@ and the overall shape are never touched, and added pixels must stay connected to
 the original core so refinement cannot absorb a neighbouring plant. Set the band
 to 0 to disable.
 
-### 2. Splitting touching plants (`SPLIT_TOUCHING_INSTANCES`)
+### 2. Anti-aliasing (`BOUNDARY_SMOOTH_SIGMA_PX`)
+
+Edge snapping still makes a hard, independent per-pixel decision, so the
+resulting boundary keeps single-pixel staircase noise that no real leaf margin
+has. `smooth_boundary()` blurs the mask and re-thresholds at 0.5 - the standard
+way to anti-alias a binary mask - immediately after edge snapping, before
+anything downstream sees the boundary.
+
+This isn't just cosmetic. The skeleton-based `PetioleConvergence` LEP evidence
+(`perception/lep.py`) finds the growth point at skeleton **junctions** where
+petiole axes meet; every boundary jag fabricates a short spurious branch and a
+spurious junction, i.e. noise injected directly into the growth-point estimate.
+Measured on a synthetic noisy disc: smoothing cuts the perimeter **11%** (the
+staircase noise) while area moves by **0.09%** (7 px of 7708), and it reduces
+skeleton junction count on the same shape. On a grass blade, aspect ratio and
+area are unchanged to the pixel - sigma is deliberately sub-pixel (default
+`0.7`), far smaller than any real leaf structure, so elongation survives
+exactly.
+
+The one failure mode - blurring through a genuinely thin neck between two
+lobes - is guarded the same way `split_touching_instances()` guards its own
+split: the smoothed result is kept only if it retained
+`BOUNDARY_SMOOTH_MIN_RETAINED_FRAC` (default 85%) of the original area *and*
+stayed a single connected blob; otherwise the unsmoothed mask is returned
+rather than tissue silently disappearing. Set sigma to 0 to disable.
+
+### 3. Splitting touching plants (`SPLIT_TOUCHING_INSTANCES`)
 
 Two rosettes growing into each other are **one connected blob**, so SAM returns
 them as a single instance with no boundary between them. Each blob containing
@@ -177,7 +203,7 @@ two viable parts, or less than `SPLIT_MIN_COVERAGE` of the blob retained), so a
 doubtful split can never fabricate a boundary. `weed_cluster` is then reserved
 for what genuinely cannot be separated.
 
-### 3. Polygon fidelity
+### 4. Polygon fidelity
 
 - **All parts are exported.** Previously only the largest contour survived, so
   any tissue separated by an occluding leaf was silently dropped from the
