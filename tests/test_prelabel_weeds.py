@@ -460,3 +460,85 @@ def test_session_summary_reports_vegetation_coverage(tmp_path):
     rows = list(csv.DictReader(
         open(tmp_path / "out" / "sess" / "instances.csv", encoding="utf-8")))
     assert sorted(r["source"] for r in rows) == ["sam", "vegetation"]
+
+
+# --------------------------------------------------------------------------- #
+# Boundary anti-aliasing (smooth_boundary)
+# --------------------------------------------------------------------------- #
+def _jagged_disc(h=200, w=200, cx=100, cy=100, r=50, seed=0):
+    """A disc with single-pixel staircase noise stitched onto its boundary -
+    the kind of noise a per-pixel threshold decision (refine_boundary) leaves
+    behind, as opposed to a genuinely lobed leaf margin."""
+    m = np.zeros((h, w), np.uint8)
+    cv2.circle(m, (cx, cy), r, 1, -1)
+    rng = np.random.default_rng(seed)
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    for (x, y) in cnts[0][:, 0, :]:
+        if rng.random() < 0.5:
+            cv2.circle(m, (int(x), int(y)), 1, int(rng.random() < 0.5), -1)
+    return m.astype(bool)
+
+
+def test_smooth_boundary_reduces_perimeter_without_losing_area():
+    """Blur-and-rethreshold should erase the staircase noise (shorter, cleaner
+    perimeter) while the disc's actual footprint survives almost intact."""
+    noisy = _jagged_disc()
+    smooth = wd.smooth_boundary(noisy, wd.CONFIG)
+
+    p_noisy = cv2.arcLength(
+        max(cv2.findContours(noisy.astype(np.uint8), cv2.RETR_EXTERNAL,
+                             cv2.CHAIN_APPROX_SIMPLE)[0], key=cv2.contourArea), True)
+    p_smooth = cv2.arcLength(
+        max(cv2.findContours(smooth.astype(np.uint8), cv2.RETR_EXTERNAL,
+                             cv2.CHAIN_APPROX_SIMPLE)[0], key=cv2.contourArea), True)
+    assert p_smooth < p_noisy
+    assert abs(int(smooth.sum()) - int(noisy.sum())) < 0.05 * noisy.sum()
+
+
+def test_smooth_boundary_preserves_grass_elongation():
+    """Sigma is sub-pixel so it must not blur away the elongation signal that
+    classify_morphology relies on to separate grass from a rosette."""
+    blade = wd.smooth_boundary(_blade(), wd.CONFIG)
+    f = wd.shape_features(blade)
+    assert f is not None and f["aspect_ratio"] >= wd.CONFIG["GRASS_MIN_ASPECT"]
+
+
+def test_smooth_boundary_falls_back_rather_than_sever_a_thin_neck():
+    """A blur that would cut a genuinely thin connection into two pieces must
+    not silently discard one of them - the unsmoothed mask is safer, exactly
+    like split_touching_instances()'s own fallback."""
+    m = np.zeros((100, 100), np.uint8)
+    cv2.circle(m, (25, 50), 15, 1, -1)
+    cv2.circle(m, (75, 50), 15, 1, -1)
+    cv2.line(m, (40, 50), (60, 50), 1, 1)          # 1px isthmus
+    m = m.astype(bool)
+    cfg = dict(wd.CONFIG, BOUNDARY_SMOOTH_SIGMA_PX=3.0)   # aggressive on purpose
+    out = wd.smooth_boundary(m, cfg)
+    assert np.array_equal(out, m)                  # fallback returned as-is
+
+
+def test_smooth_boundary_disabled_by_zero_sigma():
+    m = _rosette()
+    cfg = dict(wd.CONFIG, BOUNDARY_SMOOTH_SIGMA_PX=0)
+    assert np.array_equal(wd.smooth_boundary(m, cfg), m)
+
+
+def test_smooth_boundary_reduces_spurious_skeleton_junctions():
+    """The reason this step exists: PetioleConvergenceEvidence
+    (perception/lep.py) finds the LEP by locating skeleton junctions. Boundary
+    staircase noise fabricates short spurious skeleton branches - noise
+    injected directly into the growth-point estimate. Smoothing the mask
+    before skeletonising must reduce that, not just tidy the outline."""
+    lp = load_script("perception/lep.py")
+    noisy = _jagged_disc(r=40)
+    smooth = wd.smooth_boundary(noisy, wd.CONFIG)
+
+    def junction_count(mask):
+        skel = lp.zhang_suen_thin(mask).astype(np.uint8)
+        if not skel.any():
+            return 0
+        deg = cv2.filter2D(skel, -1, np.ones((3, 3), np.uint8),
+                           borderType=cv2.BORDER_CONSTANT) - skel
+        return int(((deg >= 3) & (skel > 0)).sum())
+
+    assert junction_count(smooth) < junction_count(noisy)

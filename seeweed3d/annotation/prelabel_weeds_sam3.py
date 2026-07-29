@@ -194,6 +194,19 @@ CONFIG = {
     "BOUNDARY_REFINE_VEG_MIN": 0.5,   # plant likelihood needed to keep a band pixel
     "VEG_SCORE_SOFTNESS": 0.04,       # ExG ramp width for the soft score
 
+    # Blur-and-rethreshold anti-aliasing, applied after refine_boundary. The
+    # pixel-grid threshold decision above still leaves single-pixel staircase
+    # jaggies that a real leaf margin does not have - and those jaggies feed
+    # straight into the skeleton-based LEP evidence (perception/lep.py), where
+    # every notch creates a short spurious branch and a spurious junction.
+    # Sigma is sub-pixel deliberately: large enough to remove 1px noise, far
+    # too small to erode a grass blade's elongation or a cotyledon's outline.
+    # A part of the plant that would be severed by smoothing is protected by
+    # smooth_boundary()'s own area-retention check, which falls back to the
+    # unsmoothed mask rather than lose tissue. Set to 0 to disable.
+    "BOUNDARY_SMOOTH_SIGMA_PX": 0.7,
+    "BOUNDARY_SMOOTH_MIN_RETAINED_FRAC": 0.85,
+
     # -- Splitting touching plants ---------------------------------------------
     # Two rosettes growing into each other form one connected blob, so SAM
     # returns them as a single instance. Marker-controlled watershed seeded on
@@ -667,6 +680,48 @@ def refine_boundary(mask, veg_score, cfg):
     return out
 
 
+def smooth_boundary(mask, cfg):
+    """Anti-alias an instance boundary: blur the mask and rethreshold at 0.5.
+
+    refine_boundary() decides each edge pixel independently, so the result is
+    correct but still has single-pixel staircase noise that a real leaf margin
+    does not have. That noise is not cosmetic - it is the direct input to the
+    skeleton-based PetioleConvergence LEP evidence (perception/lep.py), where
+    every boundary jag creates a short spurious skeleton branch and a spurious
+    junction. Smoothing the source is more principled than filtering the
+    junctions it produces after the fact.
+
+    A blur-and-rethreshold is the standard way to anti-alias a binary mask: it
+    rounds sub-pixel noise while leaving the underlying shape - including a
+    grass blade's elongation - untouched, because sigma is far smaller than any
+    real leaf structure. The one failure mode is a genuinely thin neck getting
+    severed, so the result is kept only if it stayed within
+    BOUNDARY_SMOOTH_MIN_RETAINED_FRAC of the original area; otherwise the
+    unsmoothed mask is returned, exactly as split_touching_instances() falls
+    back rather than fabricate a boundary."""
+    sigma = cfg.get("BOUNDARY_SMOOTH_SIGMA_PX", 0.0)
+    if sigma <= 0 or not mask.any():
+        return mask
+    pad = int(np.ceil(sigma * 3)) + 2
+    win = _bbox_window(mask, pad)
+    if win is None:
+        return mask
+    full, m = mask, mask[win]
+    soft = cv2.GaussianBlur(m.astype(np.float32), (0, 0), sigma)
+    out = soft >= 0.5
+    if not out.any():
+        return mask
+    n, lbl = cv2.connectedComponents(out.astype(np.uint8), 8)
+    if n > 2:
+        sizes = [int((lbl == i).sum()) for i in range(1, n)]
+        out = lbl == (int(np.argmax(sizes)) + 1)
+    if out.sum() < cfg["BOUNDARY_SMOOTH_MIN_RETAINED_FRAC"] * m.sum():
+        return mask
+    result = np.zeros_like(full)
+    result[win] = out
+    return result
+
+
 def polygon_epsilon(area_px, cfg):
     """Douglas-Peucker tolerance scaled to instance size.
 
@@ -847,6 +902,10 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     refined = []
     for m, src in zip(list(masks) + recovered, sources):
         m = refine_boundary(m, score, cfg)
+        # Anti-alias BEFORE the peaks that seed the split, so a jagged boundary
+        # cannot manufacture a spurious extra growth point, and before the LEP
+        # estimator, whose skeleton evidence is sensitive to boundary noise.
+        m = smooth_boundary(m, cfg)
         if m.sum() < cfg["MIN_INSTANCE_AREA_PX"]:
             continue
         for part in split_touching_instances(m, growth_peaks(m, cfg), cfg):
