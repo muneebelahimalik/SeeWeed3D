@@ -61,7 +61,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.vegetation import (component_boxes, remove_small,  # noqa: E402
-                               vegetation_mask, white_balance)
+                               vegetation_mask, vegetation_score,
+                               white_balance)
 from common.progress import Progress  # noqa: E402
 from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
                              WEED_CLASSES, coco_categories, cvat_labels)
@@ -170,8 +171,33 @@ CONFIG = {
     # -- Frame-level safety ----------------------------------------------------
     "MAX_MASK_FRACTION": 0.5,        # total veg > this = colour-cast/glare failure
 
+    # -- Boundary quality ------------------------------------------------------
+    # Snap each instance edge onto the image's own plant/soil evidence. SAM
+    # gives the structure; the vegetation score decides exactly where the leaf
+    # margin falls, within a narrow band. Set BAND to 0 to disable.
+    "BOUNDARY_REFINE_BAND_PX": 3,
+    "BOUNDARY_REFINE_VEG_MIN": 0.5,   # plant likelihood needed to keep a band pixel
+    "VEG_SCORE_SOFTNESS": 0.04,       # ExG ramp width for the soft score
+
+    # -- Splitting touching plants ---------------------------------------------
+    # Two rosettes growing into each other form one connected blob, so SAM
+    # returns them as a single instance. Marker-controlled watershed seeded on
+    # the detected GROWTH POINTS cuts along the neck between the canopies.
+    # Falls back to the unsplit mask whenever the split is not clean.
+    "SPLIT_TOUCHING_INSTANCES": True,
+    "SPLIT_MIN_PEAKS": 2,             # need at least this many growth points
+    "SPLIT_SEED_RADIUS_FRAC": 0.55,   # seed disc as a fraction of inscribed radius
+    "SPLIT_MIN_PART_AREA_PX": 250,    # a part below this is not a plant
+    "SPLIT_MIN_COVERAGE": 0.80,       # split must retain this much of the blob
+
     # -- Polygon export --------------------------------------------------------
-    "POLY_APPROX_EPS": 1.5,
+    # Tolerance scales with instance size for roughly constant relative fidelity
+    # (a fixed value erases shape on seedlings and bloats vertices on rosettes).
+    "POLY_APPROX_EPS_FRAC": 0.010,
+    "POLY_APPROX_EPS_MIN": 0.5,
+    "POLY_APPROX_EPS_MAX": 1.5,
+    "POLY_MIN_PART_AREA_PX": 60,      # keep detached tissue above this
+    "POLY_APPROX_EPS": 1.5,           # legacy, used only by mask_polygon()
 
     # -- Run control -----------------------------------------------------------
     "LIMIT_PER_SESSION": 20,         # start small; set None for the full pool
@@ -435,14 +461,181 @@ def treatment_points(mask):
     }
 
 
-def mask_polygon(mask, eps):
-    """Largest external contour as a flat COCO polygon [x1,y1,x2,y2,...]."""
+def _bbox_window(mask, pad):
+    """Slice covering the mask's content plus pad, or None if empty.
+
+    Per-instance morphology on a full 2208x1242 frame is almost entirely spent
+    on empty pixels: a plant occupies a tiny fraction of it. Working inside this
+    window gives identical results for far less work."""
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return None
+    h, w = mask.shape
+    y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
+    x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
+    return (slice(y0, y1), slice(x0, x1))
+
+
+def split_touching_instances(mask, peaks, cfg):
+    """Split one connected mask covering several touching plants into one mask
+    per plant, using marker-controlled watershed on the distance transform.
+
+    Two rosettes growing into each other are a single connected vegetation blob,
+    so SAM often returns them as ONE instance with no boundary between them.
+    Watershed on the distance transform is the standard split for touching
+    convex-ish objects, and here the markers are not arbitrary local maxima but
+    the GROWTH POINTS already detected by growth_peaks() - i.e. the split is
+    seeded on plant biology, and the cut falls along the narrow neck where the
+    two canopies meet.
+
+    Returns a list of masks. Falls back to [mask] whenever the split is not
+    clean, so a doubtful split can never fabricate a boundary."""
+    if not cfg.get("SPLIT_TOUCHING_INSTANCES", True):
+        return [mask]
+    if len(peaks) < cfg["SPLIT_MIN_PEAKS"]:
+        return [mask]
+
+    win = _bbox_window(mask, 2)
+    if win is None:
+        return [mask]
+    full = mask
+    y0, x0 = win[0].start, win[1].start
+    mask = mask[win]
+    peaks = [((px - x0, py - y0), r) for (px, py), r in peaks]
+    dt = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    # Seed each growth point with a disc scaled to its own inscribed radius, so
+    # a big plant gets a big seed and a seedling a small one.
+    # uint8 because cv2.dilate has no int32 path; growth_peaks caps at 32 peaks
+    # so the label space is never exhausted.
+    labels = np.zeros(mask.shape, np.uint8)
+    for i, ((px, py), radius) in enumerate(peaks[:250], start=1):
+        rr = max(1, int(radius * cfg["SPLIT_SEED_RADIUS_FRAC"]))
+        cv2.circle(labels, (int(px), int(py)), rr, i, -1)
+    labels[~mask] = 0
+    if not (labels > 0).any():
+        return [full]
+
+    # GEODESIC assignment, not a distance-transform watershed: each pixel goes
+    # to the growth point it is connected to by the shortest path THROUGH the
+    # plant. That is the correct semantics - a leaf belongs to the plant whose
+    # crown it physically joins - and it is far more robust on spindly plants,
+    # where the distance transform is flat along a thin leaf so a watershed
+    # basin boundary lands arbitrarily and can swallow a neighbour's leaves.
+    # Implemented as simultaneous multi-label propagation inside the mask.
+    k = np.ones((3, 3), np.uint8)
+    guard = int(2 * np.hypot(*mask.shape)) + 8       # cannot loop forever
+    for _ in range(guard):
+        grown = cv2.dilate(labels, k)
+        new = (labels == 0) & mask & (grown > 0)
+        if not new.any():
+            break
+        labels[new] = grown[new]
+
+    parts = []
+    for i in range(1, len(peaks) + 1):
+        part = (labels == i) & mask
+        if part.sum() >= cfg["SPLIT_MIN_PART_AREA_PX"]:
+            parts.append(part)
+    # Require the split to account for most of the plant and to actually produce
+    # more than one part; otherwise keep the original rather than lose tissue.
+    if len(parts) < 2:
+        return [full]
+    covered = int(np.logical_or.reduce(parts).sum())
+    if covered < cfg["SPLIT_MIN_COVERAGE"] * int(mask.sum()):
+        return [full]
+    # Paste each part back into full-frame coordinates.
+    out = []
+    for part in parts:
+        f = np.zeros_like(full)
+        f[win] = part
+        out.append(f)
+    return out
+
+
+def refine_boundary(mask, veg_score, cfg):
+    """Snap an instance boundary onto the image's own plant/soil evidence.
+
+    SAM gives excellent structure but its edge can sit a few pixels off the true
+    leaf margin - bleeding onto soil, or clipping a thin leaf tip. Only the
+    narrow band around the boundary is re-decided, using the continuous
+    vegetation score: SAM decides WHAT the object is, the image decides exactly
+    where it ends. The interior and the overall shape are never touched.
+
+    Added pixels must stay connected to the original core, so refinement cannot
+    absorb a neighbouring plant."""
+    band = cfg.get("BOUNDARY_REFINE_BAND_PX", 0)
+    if band <= 0 or not mask.any():
+        return mask
+    win = _bbox_window(mask, band + 2)
+    if win is None:
+        return mask
+    full, mask, veg_score = mask, mask[win], veg_score[win]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1,) * 2)
+    m8 = mask.astype(np.uint8)
+    outer = cv2.dilate(m8, k).astype(bool)
+    core = cv2.erode(m8, k).astype(bool)
+    if not core.any():
+        return mask                     # too thin to refine safely
+    ring = outer & ~core
+
+    refined = mask.copy()
+    refined[ring] = veg_score[ring] >= cfg["BOUNDARY_REFINE_VEG_MIN"]
+    refined |= core                     # never eat into the interior
+
+    # Keep only tissue connected to the original core: a refinement must not
+    # bridge to a neighbouring plant that happens to be within the band.
+    n, lbl = cv2.connectedComponents(refined.astype(np.uint8), 8)
+    keep = np.zeros_like(refined)
+    for i in range(1, n):
+        comp = lbl == i
+        if (comp & core).any():
+            keep |= comp
+    if not keep.any():
+        return full
+    out = np.zeros_like(full)
+    out[win] = keep
+    return out
+
+
+def polygon_epsilon(area_px, cfg):
+    """Douglas-Peucker tolerance scaled to instance size.
+
+    A fixed tolerance is wrong at both ends: on a cotyledon seedling it erases
+    real shape, and on a large rosette it leaves thousands of near-duplicate
+    vertices. Scaling with the square root of area keeps roughly constant
+    RELATIVE fidelity, which is what a training target needs."""
+    eps = cfg["POLY_APPROX_EPS_FRAC"] * float(np.sqrt(max(1.0, area_px)))
+    return float(np.clip(eps, cfg["POLY_APPROX_EPS_MIN"], cfg["POLY_APPROX_EPS_MAX"]))
+
+
+def mask_polygons(mask, cfg):
+    """ALL external contours of an instance as COCO polygons.
+
+    Exporting only the largest contour silently discarded any part of a plant
+    separated by an occluding leaf or a gap in the mask - real tissue, dropped
+    from the training target. COCO's segmentation field is a list precisely so a
+    multi-part instance can be represented, so every part above a small area
+    floor is kept."""
     cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
                                cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
-        return None
-    c = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), eps, True)
-    return c.reshape(-1).astype(float).tolist() if len(c) >= 3 else None
+        return []
+    eps = polygon_epsilon(int(mask.sum()), cfg)
+    polys = []
+    for c in cnts:
+        if cv2.contourArea(c) < cfg["POLY_MIN_PART_AREA_PX"]:
+            continue
+        a = cv2.approxPolyDP(c, eps, True)
+        if len(a) >= 3:
+            polys.append(a.reshape(-1).astype(float).tolist())
+    return polys
+
+
+def mask_polygon(mask, eps=None, cfg=None):
+    """Backwards-compatible single-polygon helper (largest part only)."""
+    cfg = cfg or CONFIG
+    polys = mask_polygons(mask, cfg)
+    return max(polys, key=len) if polys else None
 
 
 # --------------------------------------------------------------------------- #
@@ -466,12 +659,18 @@ class WeedCoco:
                             "height": h, "width": w})
         return self._img
 
-    def add_instance(self, image_id, cls, polygon, bbox):
+    def add_instance(self, image_id, cls, polygon, bbox, area_px=None):
+        """polygon may be one flat [x,y,...] list or a list of them, so an
+        instance split across an occlusion keeps all of its parts. area is the
+        true mask area when given, not the bbox area, since a bbox badly
+        overstates a thin or lobed plant."""
+        segm = polygon if (polygon and isinstance(polygon[0], list)) else [polygon]
         self._ann += 1
         self.anns.append({"id": self._ann, "image_id": image_id,
-                          "category_id": self._cat[cls], "segmentation": [polygon],
-                          "area": float(bbox[2] * bbox[3]), "bbox": [float(v) for v in bbox],
-                          "iscrowd": 0})
+                          "category_id": self._cat[cls], "segmentation": segm,
+                          "area": float(area_px if area_px is not None
+                                        else bbox[2] * bbox[3]),
+                          "bbox": [float(v) for v in bbox], "iscrowd": 0})
         return self._ann
 
     def dump(self, path):
@@ -555,8 +754,23 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     masks = filter_instances(sam_masks, veg, cfg)
     if estimator is None and cfg.get("USE_FUSED_LEP", True):
         estimator = LEPEstimator()
-    instances = []
+
+    # Boundary quality, before anything is measured or exported:
+    #  1. snap each edge onto the image's plant/soil evidence,
+    #  2. split blobs that contain several growth points into one plant each.
+    # Both run here so shape descriptors, the LEP and the polygons are all
+    # computed from the corrected instance rather than the raw SAM output.
+    score = vegetation_score(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                             cfg.get("VEG_SCORE_SOFTNESS", 0.04))
+    refined = []
     for m in masks:
+        m = refine_boundary(m, score, cfg)
+        if m.sum() < cfg["MIN_INSTANCE_AREA_PX"]:
+            continue
+        refined.extend(split_touching_instances(m, growth_peaks(m, cfg), cfg))
+
+    instances = []
+    for m in refined:
         f = shape_features(m)
         if f is None:
             continue
@@ -649,10 +863,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])
         union = np.zeros(bgr.shape[:2], bool)
         for k, inst in enumerate(instances):
-            poly = mask_polygon(inst["mask"], cfg["POLY_APPROX_EPS"])
-            if poly is None:
+            polys = mask_polygons(inst["mask"], cfg)
+            if not polys:
                 continue
-            coco.add_instance(img_id, inst["cls"], poly, inst["features"]["bbox"])
+            coco.add_instance(img_id, inst["cls"], polys, inst["features"]["bbox"],
+                              area_px=inst["features"]["area_px"])
             union |= inst["mask"]
             per_class[inst["cls"]] += 1
             p, f = inst["points"], inst["features"]
