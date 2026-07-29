@@ -27,9 +27,11 @@ scenes.**
    exemplars are the default, as established for onions.)
 3. Instances are validated against the vegetation prior and de-duplicated by
    **mask NMS**; too-small and whole-frame masks are rejected.
-4. Per instance: shape descriptors → provisional morphology class, growth-stage
+4. **Recall backstop**: vegetation no instance claimed is recovered as extra
+   instances, so a plant SAM missed still reaches the annotator (see below).
+5. Per instance: shape descriptors → provisional morphology class, growth-stage
    estimate, and **three candidate treatment points**.
-5. Export COCO (categories = morphology classes) + per-instance CSV + instance
+6. Export COCO (categories = morphology classes) + per-instance CSV + instance
    crops + previews.
 
 ## The three treatment points (why all three)
@@ -82,6 +84,61 @@ What the shape data actually showed (measured, not assumed):
 growth-point peaks **and** exceeds `CLUSTER_MIN_AREA_PX`. Raise either to make it
 rarer. A cluster gets **no single LEP** (`lep_valid=0` in `instances.csv`); the
 preview marks each detected growth point with a cross instead of one dot.
+
+## Recall: never silently drop a weed
+
+**A weed the prelabeler misses is worse than a weed it labels badly.** A bad
+label gets corrected in CVAT in seconds. A missing one is invisible — it enters
+the training target as *background*, actively teaching the model that such
+plants are not weeds. That error then survives every later stage.
+
+SAM only reports what it detects, so anything it does not return was previously
+dropped without trace. Two changes close that gap.
+
+### 1. Prompt SAM on more plants
+
+Exemplar boxes are all submitted in **one forward pass**, so prompting with more
+of them costs almost nothing. The old caps (`EXEMPLAR_MAX_BOXES` 30,
+`EXEMPLAR_MIN_AREA_PX` 300) meant that in a dense frame only the largest ~30
+blobs ever became exemplars; a small plant unlike any of them had no reason to
+be returned. Now **60 boxes down to 200 px**.
+
+### 2. The backstop (`RECOVER_MISSED_PLANTS`)
+
+In a weed-only scene `vegetation == weed` — the same prior the onion path
+already relies on. So any substantial connected vegetation component that **no
+instance claims** is recovered and becomes an instance in its own right.
+
+The recovered mask is then put through *exactly the same* boundary refinement
+and touching-plant splitting as a detected one, so it is indistinguishable in
+the output except for its recorded `source`.
+
+The one thing this must not do is fabricate duplicates. A leaf tip poking past
+the edge of an otherwise-good detection is also unclaimed vegetation, and is
+easily larger than `MIN_INSTANCE_AREA_PX`. The guard is therefore not the size
+of the residual but **how much of the whole vegetation blob it belongs to is
+already claimed** (`RECOVER_MAX_CLAIMED_FRAC`, default 0.30). A clipped leaf tip
+sits on a blob that is ~85% claimed and is rejected; a plant SAM never saw sits
+on a blob that is 0% claimed and is recovered. `RECOVER_COVERED_DILATE_PX`
+absorbs the few pixels of disagreement between a SAM edge and the vegetation
+prior so a thin rim never registers as a plant.
+
+### Seeing it work
+
+Every session now prints a recall line:
+
+```
+      recall: 98.7% of vegetation inside an exported instance | 1642 from SAM + 152 recovered
+```
+
+Watch **that** number rather than the instance count — a run can look productive
+while missing half the plants. In the previews, a recovered instance is drawn
+with a **white halo** around its class-coloured outline, so you can judge from
+the images alone whether the backstop is earning its keep. `instances.csv` has a
+`source` column (`sam` / `vegetation`) so the two populations stay separable
+when auditing or weighting the data.
+
+Set `RECOVER_MISSED_PLANTS: False` to turn it off (for a pure SAM ablation).
 
 ## Boundary quality
 
@@ -165,6 +222,15 @@ While running, each session shows a live progress line with rate and ETA:
   [weed1_20260108_143022] 128/400 frames  32.0% | 3.49 frames/s | elapsed 00:37 | ETA 01:18 | 1794 instances, 2 flagged
 ```
 
+and finishes with a recall readout:
+
+```
+  [weed1_20260108_143022] 400 frames | 5612 weed instances | 2 flagged | 0 with no instances
+      provisional classes: grass_weed=812 weed_cluster=61 other_weed=4739
+      recall: 98.7% of vegetation inside an exported instance | 5160 from SAM + 452 recovered
+      LEP: median confidence 0.74 | median channel agreement 3.1px | visible=5401 ...
+```
+
 When output is redirected to a file it switches to occasional whole lines
 instead of a self-updating one, so logs stay readable.
 
@@ -175,10 +241,10 @@ Output under `DATASET_ROOT/auto_labels_weeds/<session_id>/`:
 | `cvat_ready/` | **upload this folder to CVAT** — matches `instances_default.json` exactly |
 | `instances_default.json` | COCO instance segmentation, one category per morphology class |
 | `weed_cvat_labels.json` | label schema (all ontology classes + `weed_LEP` points + `ignore_region`) |
-| `instances.csv` | per-instance class, confidence, growth stage, **all three treatment points**, and shape descriptors |
+| `instances.csv` | per-instance class, confidence, `source` (`sam`/`vegetation`), growth stage, **all three treatment points**, and shape descriptors |
 | `crops/` | per-instance image crops — the input for DINO cluster-then-label |
 | `flagged_rgb/` + `flagged_for_manual.txt` | colour-cast/glare frames, no auto-labels, separate manual task |
-| `masks/`, `preview/` | union mask and overlay (instance outlines, class, LEP dot) |
+| `masks/`, `preview/` | union mask and overlay (instance outlines, class, LEP dot; white halo = recovered) |
 
 ## Into CVAT
 

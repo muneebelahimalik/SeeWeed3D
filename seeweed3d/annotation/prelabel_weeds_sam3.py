@@ -111,8 +111,13 @@ CONFIG = {
     "SAM_PROMPT_MODE": "auto_exemplar",     # auto_exemplar | text | manual
     "SAM_TEXT_PROMPTS": ["plant", "weed", "green plant"],
     "EXEMPLARS": {},                         # {session_id: [[x1,y1,x2,y2], ...]}
-    "EXEMPLAR_MIN_AREA_PX": 300,
-    "EXEMPLAR_MAX_BOXES": 30,
+    # Exemplars are all submitted in ONE forward pass, so prompting with more of
+    # them costs almost nothing while directly raising recall: a plant that never
+    # becomes an exemplar and is not similar to one that did is a plant SAM has
+    # no reason to return. Dense field frames hold far more than 30 plants, so
+    # the old cap silently prompted on only the largest few.
+    "EXEMPLAR_MIN_AREA_PX": 200,
+    "EXEMPLAR_MAX_BOXES": 60,
     "EXEMPLAR_PAD_PX": 8,
     "SAM_CONF": 0.25,
     "DEVICE": "cuda",
@@ -129,6 +134,16 @@ CONFIG = {
     "MAX_INSTANCE_FRAC": 0.25,       # one weed covering >25% of frame = failure
     "INSTANCE_VEG_OVERLAP_MIN": 0.35,  # instance must sit on vegetation
     "NMS_IOU": 0.65,                 # de-duplicate overlapping SAM instances
+
+    # -- Recall backstop -------------------------------------------------------
+    # A weed SAM misses is dropped silently and never reaches the annotator, so
+    # it never enters the training target - the worst failure mode in this
+    # pipeline. In a weed-only scene every vegetation blob IS a plant, so any
+    # substantial unclaimed vegetation component is recovered as an instance.
+    # See recover_missed_plants().
+    "RECOVER_MISSED_PLANTS": True,
+    "RECOVER_COVERED_DILATE_PX": 3,   # tolerance between SAM edge and veg prior
+    "RECOVER_MAX_CLAIMED_FRAC": 0.30,  # blob already this claimed -> not a new plant
 
     # -- Morphology heuristic --------------------------------------------------
     # WHAT SHAPE CAN AND CANNOT TELL YOU:
@@ -461,6 +476,61 @@ def treatment_points(mask):
     }
 
 
+def recover_missed_plants(veg, taken, cfg):
+    """Vegetation that no SAM instance claimed, returned as extra instances.
+
+    THIS IS THE RECALL BACKSTOP. SAM only reports what it detects, so a plant it
+    misses is otherwise dropped silently and never reaches the annotator - the
+    single worst failure mode here, because a weed absent from the training
+    target teaches the model that such plants do not exist. In a weed-only
+    scene every vegetation blob IS a plant, so any substantial connected
+    component of the vegetation prior that no instance covers is recovered.
+
+    A residual is recovered only when the WHOLE vegetation blob it belongs to is
+    mostly unclaimed. That distinction is what stops the backstop from
+    fabricating duplicates: a leaf tip poking out past the edge of an instance
+    that already covers its plant is a residual too, but its parent blob is
+    almost entirely claimed, so it is rejected."""
+    if not cfg.get("RECOVER_MISSED_PLANTS", True) or not veg.any():
+        return []
+    covered = np.zeros(veg.shape, bool)
+    for m in taken:
+        covered |= m
+
+    dilated = covered
+    if covered.any() and cfg["RECOVER_COVERED_DILATE_PX"] > 0:
+        # Tolerate a small boundary mismatch between the SAM mask and the
+        # vegetation prior, so a thin rim around a detected plant is not
+        # mistaken for an undetected one.
+        r = int(cfg["RECOVER_COVERED_DILATE_PX"])
+        dilated = cv2.dilate(covered.astype(np.uint8),
+                             np.ones((r * 2 + 1,) * 2, np.uint8)).astype(bool)
+
+    residual = remove_small(veg & ~dilated, cfg["MIN_INSTANCE_AREA_PX"])
+    if not residual.any():
+        return []
+
+    # How much of each vegetation blob the existing instances already claim.
+    # Labelling the vegetation once and counting with bincount is exact and
+    # costs one pass, where flooding each residual outwards would not be.
+    n_veg, veg_lbl = cv2.connectedComponents(veg.astype(np.uint8), 8)
+    blob_px = np.bincount(veg_lbl.ravel(), minlength=n_veg).astype(np.float64)
+    claimed_px = np.bincount(veg_lbl[covered & veg].ravel(),
+                             minlength=n_veg).astype(np.float64)
+    claimed_frac = claimed_px / np.maximum(blob_px, 1.0)
+
+    out = []
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(residual.astype(np.uint8), 8)
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < cfg["MIN_INSTANCE_AREA_PX"]:
+            continue
+        comp = lbl == i
+        parent = int(np.bincount(veg_lbl[comp].ravel(), minlength=n_veg)[1:].argmax()) + 1
+        if claimed_frac[parent] <= cfg["RECOVER_MAX_CLAIMED_FRAC"]:
+            out.append(comp)
+    return out
+
+
 def _bbox_window(mask, pad):
     """Slice covering the mask's content plus pad, or None if empty.
 
@@ -693,6 +763,11 @@ def overlay(bgr, instances, scale):
         col = colors.get(inst["cls"], (170, 170, 170))
         cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if inst.get("source") == "vegetation":
+            # White halo = recovered by the recall backstop, i.e. a plant SAM
+            # did not return. Visible at any instance size, so you can judge
+            # from the previews alone whether the backstop is earning its keep.
+            cv2.drawContours(vis, cnts, -1, (255, 255, 255), 4)
         cv2.drawContours(vis, cnts, -1, col, 2)
         if inst["cls"] == "weed_cluster":
             # No single LEP for a cluster - mark every growth point instead.
@@ -762,15 +837,23 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     # computed from the corrected instance rather than the raw SAM output.
     score = vegetation_score(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
                              cfg.get("VEG_SCORE_SOFTNESS", 0.04))
+
+    # Recall backstop BEFORE refinement, so a plant SAM missed goes through the
+    # same boundary treatment as a detected one and is indistinguishable in the
+    # output except for its recorded source.
+    recovered = recover_missed_plants(veg, masks, cfg)
+    sources = ["sam"] * len(masks) + ["vegetation"] * len(recovered)
+
     refined = []
-    for m in masks:
+    for m, src in zip(list(masks) + recovered, sources):
         m = refine_boundary(m, score, cfg)
         if m.sum() < cfg["MIN_INSTANCE_AREA_PX"]:
             continue
-        refined.extend(split_touching_instances(m, growth_peaks(m, cfg), cfg))
+        for part in split_touching_instances(m, growth_peaks(m, cfg), cfg):
+            refined.append((part, src))
 
     instances = []
-    for m in refined:
+    for m, src in refined:
         f = shape_features(m)
         if f is None:
             continue
@@ -778,7 +861,7 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
         cls, conf = classify_morphology(f, cfg, peaks)
         is_cluster = cls == "weed_cluster"
         inst = {
-            "mask": m, "cls": cls, "cls_confidence": conf,
+            "mask": m, "cls": cls, "cls_confidence": conf, "source": src,
             "features": f, "points": treatment_points(m), "peaks": peaks,
             # A cluster has several growth points, so no single LEP applies.
             "lep_valid": not is_cluster,
@@ -814,7 +897,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     coco, rows, flagged = WeedCoco(), [], []
     estimator = LEPEstimator() if cfg.get("USE_FUSED_LEP", True) else None
     manual_boxes = cfg["EXEMPLARS"].get(sid)
-    stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0}
+    stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0,
+             # Recall bookkeeping: how much of the vegetation prior actually
+             # ended up inside an exported instance, and how many instances
+             # only exist because the backstop recovered them.
+             "recovered": 0, "veg_px": 0, "veg_covered_px": 0}
     per_class = {c: 0 for c in WEED_CLASSES}
 
     prog = Progress(len(frames), f"[{sid}]", unit="frames")
@@ -857,7 +944,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                 if raw is not None and raw.dtype == np.uint16:
                     depth_mm = raw.astype(np.float32)
                     depth_mm[raw == 0] = np.nan          # 0 is the invalid sentinel
-        instances, _ = analyze_frame(proc, sam_masks, cfg, depth_mm, estimator)
+        instances, veg = analyze_frame(proc, sam_masks, cfg, depth_mm, estimator)
 
         link_or_copy(rgb_path, cvat_dir / fn)
         img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])
@@ -876,6 +963,9 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                 **lep_row,
                 "session_id": sid, "filename": fn, "instance_idx": k,
                 "class": inst["cls"], "class_confidence": inst["cls_confidence"],
+                # "sam" or "vegetation" (recall backstop) - keeps the two
+                # populations separable when auditing or weighting the data.
+                "source": inst.get("source", "sam"),
                 "growth_stage": inst["growth_stage"],
                 "n_growth_peaks": len(inst.get("peaks", [])),
                 "lep_valid": int(inst.get("lep_valid", True)),
@@ -902,6 +992,12 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["frames"] += 1
         stats["instances"] += len(instances)
         stats["empty"] += int(not instances)
+        stats["recovered"] += sum(1 for i in instances
+                                  if i.get("source") == "vegetation")
+        # Measured against the EXPORTED union, so this reports what an annotator
+        # will actually see, not what was computed and then dropped.
+        stats["veg_px"] += int(veg.sum())
+        stats["veg_covered_px"] += int((veg & union).sum())
         prog.update(note=f"{stats['instances']} instances, "
                          f"{stats['flagged']} flagged")
 
@@ -939,6 +1035,15 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     print(f"  [{sid}] {stats['frames']} frames | {stats['instances']} weed instances "
           f"| {stats['flagged']} flagged | {stats['empty']} with no instances")
     print(f"      provisional classes: {dist or 'none'}")
+    # Recall readout. In a weed-only scene vegetation IS plants, so vegetation
+    # left outside every exported instance is, to a first approximation, weeds
+    # the annotator will never be shown. Watch this number, not the instance
+    # count: a pipeline can look productive while quietly missing plants.
+    if stats["veg_px"]:
+        cov = 100.0 * stats["veg_covered_px"] / stats["veg_px"]
+        sam_n = stats["instances"] - stats["recovered"]
+        print(f"      recall: {cov:.1f}% of vegetation inside an exported "
+              f"instance | {sam_n} from SAM + {stats['recovered']} recovered")
     vis_rows = [r for r in rows if r.get("lep_visibility")]
     if vis_rows:
         conf = [float(r["lep_confidence"]) for r in vis_rows]

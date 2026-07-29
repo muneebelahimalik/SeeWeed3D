@@ -358,3 +358,105 @@ def test_cvat_label_schema_covers_classes_and_lep():
     assert wd.LEP_LABEL in names
     lep = next(l for l in wd.weed_cvat_labels() if l["name"] == wd.LEP_LABEL)
     assert lep["type"] == "points"
+
+
+# --------------------------------------------------------------------------- #
+# Recall backstop
+# --------------------------------------------------------------------------- #
+def _scene_with_two_rosettes(size=320):
+    """Soil frame with two well-separated green rosettes."""
+    bgr = np.full((size, size, 3), (70, 45, 60), np.uint8)
+    a = _rosette(size, size, 90, 90, 45)
+    b = _rosette(size, size, 230, 230, 45)
+    bgr[a | b] = (35, 110, 40)
+    return bgr, a, b
+
+
+def test_plant_missed_by_sam_is_recovered():
+    """The failure this guards against: SAM returns one of two plants, so the
+    other is silently absent from the export and the annotator never sees it -
+    teaching a model that such plants do not exist. In a weed-only scene every
+    vegetation blob IS a plant, so the unclaimed one must come back."""
+    bgr, a, b = _scene_with_two_rosettes()
+
+    instances, _ = wd.analyze_frame(bgr, [a], wd.CONFIG)      # SAM found only `a`
+    assert len(instances) == 2
+
+    sources = sorted(i["source"] for i in instances)
+    assert sources == ["sam", "vegetation"]
+
+    # The recovered instance is the plant SAM missed, not a fragment of the one
+    # it found.
+    rec = next(i for i in instances if i["source"] == "vegetation")
+    ys, xs = np.nonzero(rec["mask"])
+    assert abs(float(xs.mean()) - 230) < 20 and abs(float(ys.mean()) - 230) < 20
+    assert float((rec["mask"] & b).sum()) / rec["mask"].sum() > 0.9
+
+
+def test_recovery_is_a_no_op_when_sam_finds_everything():
+    bgr, a, b = _scene_with_two_rosettes()
+    instances, _ = wd.analyze_frame(bgr, [a, b], wd.CONFIG)
+    assert len(instances) == 2
+    assert all(i["source"] == "sam" for i in instances)
+
+
+def test_recovery_can_be_disabled():
+    bgr, a, _ = _scene_with_two_rosettes()
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=False)
+    instances, _ = wd.analyze_frame(bgr, [a], cfg)
+    assert len(instances) == 1 and instances[0]["source"] == "sam"
+
+
+def test_recovery_does_not_duplicate_an_already_detected_plant():
+    """The backstop must not turn a leaf tip poking past the edge of a good
+    detection into a second plant. That residual is large enough to pass the
+    area test, so the guard has to be the fraction of the WHOLE vegetation blob
+    that is already claimed - here ~85%, far above RECOVER_MAX_CLAIMED_FRAC."""
+    size = 260
+    plant = np.zeros((size, size), np.uint8)
+    cv2.circle(plant, (110, 120), 30, 1, -1)                 # crown
+    cv2.line(plant, (135, 120), (215, 120), 1, 13)           # one long leaf
+    plant = plant.astype(bool)
+
+    clipped = plant.copy()
+    clipped[:, 170:] = False                                  # SAM clipped the tip
+    residual_px = int((plant & ~clipped).sum())
+    assert residual_px > wd.CONFIG["MIN_INSTANCE_AREA_PX"]    # area alone would pass
+
+    assert wd.recover_missed_plants(plant, [clipped], wd.CONFIG) == []
+
+
+def test_recovery_returns_a_plant_no_instance_touches():
+    veg = np.zeros((260, 260), bool)
+    veg[30:90, 30:90] = True                                  # detected
+    veg[160:220, 160:220] = True                              # missed entirely
+    detected = np.zeros((260, 260), bool)
+    detected[30:90, 30:90] = True
+
+    out = wd.recover_missed_plants(veg, [detected], wd.CONFIG)
+    assert len(out) == 1
+    assert out[0][180, 180] and not out[0][50, 50]
+
+
+def test_session_summary_reports_vegetation_coverage(tmp_path):
+    """Recall has to be visible in the run output, because instance count alone
+    cannot distinguish a thorough pass from one that missed half the plants."""
+    sess = tmp_path / "sess"
+    (sess / "rgb").mkdir(parents=True)
+    (sess / "meta").mkdir(parents=True)
+    bgr, a, b = _scene_with_two_rosettes()
+    cv2.imwrite(str(sess / "rgb" / "f1.png"), bgr)
+    with open(sess / "meta" / "pool.csv", "w", newline="") as f:
+        f.write("filename\nf1.png\n")
+
+    st = wd.prelabel_session("sess", sess, tmp_path / "out", dict(wd.CONFIG),
+                             predictor="STUB",
+                             sam_fn=lambda p, im, cfg, ex=None: [a])
+    assert st["instances"] == 2 and st["recovered"] == 1
+    assert st["veg_px"] > 0
+    # With the backstop on, nearly all vegetation ends up inside an instance.
+    assert st["veg_covered_px"] / st["veg_px"] > 0.9
+
+    rows = list(csv.DictReader(
+        open(tmp_path / "out" / "sess" / "instances.csv", encoding="utf-8")))
+    assert sorted(r["source"] for r in rows) == ["sam", "vegetation"]
