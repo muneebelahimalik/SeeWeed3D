@@ -116,9 +116,30 @@ CONFIG = {
     # becomes an exemplar and is not similar to one that did is a plant SAM has
     # no reason to return. Dense field frames hold far more than 30 plants, so
     # the old cap silently prompted on only the largest few.
+    #
+    # But more exemplars is not a free lunch: SAM 3 is asked to find every
+    # instance of "the same concept" as the exemplars, across the WHOLE frame -
+    # so a single low-quality exemplar (gravel, lichen, a shadowed pit that
+    # only marginally passes the vegetation prior) does not just risk one bad
+    # box, it can teach SAM a bad concept and cause it to propose several more
+    # false positives elsewhere in the frame that resemble it. EXEMPLAR_MIN_AREA_PX
+    # alone cannot filter this - a faint real seedling and a same-sized fleck of
+    # noise can be the same size - so EXEMPLAR_MIN_VEG_SCORE additionally requires
+    # the component's mean vegetation_score() (continuous, not the binary cutoff)
+    # to be comfortably past the threshold, not just barely across it.
     "EXEMPLAR_MIN_AREA_PX": 200,
     "EXEMPLAR_MAX_BOXES": 60,
     "EXEMPLAR_PAD_PX": 8,
+    # Measured: real plant colour, even degraded (partial shade, pale young
+    # cotyledon, a grazing-angle leaf edge), scores >= 0.985. A synthetic
+    # adversarial gravel/lichen/shadow texture built to probe this had
+    # components scoring up to 0.971 - so no threshold cleanly separates the
+    # worst case, but 0.85 keeps a real safety margin below the real-plant
+    # floor while still cutting the adversarial case's exemplar candidates by
+    # ~40% (measured). SAM's own concept confirmation remains the primary
+    # defence on this path; this is a supplementary precaution, not the last
+    # line - that is RECOVER_MIN_VEG_SCORE below.
+    "EXEMPLAR_MIN_VEG_SCORE": 0.85,
     "SAM_CONF": 0.25,
     "DEVICE": "cuda",
 
@@ -141,9 +162,29 @@ CONFIG = {
     # pipeline. In a weed-only scene every vegetation blob IS a plant, so any
     # substantial unclaimed vegetation component is recovered as an instance.
     # See recover_missed_plants().
+    #
+    # This path has NO corroboration from SAM at all - unlike an exemplar,
+    # which SAM still gets to independently confirm or reject, a recovered
+    # instance is accepted purely on the vegetation prior's say-so. That prior
+    # is a plain colour index (ExG + saturation + green dominance), and colour
+    # indices are well known to false-positive on green-tinted mineral flecks,
+    # lichen, and shadow that reads cooler/greener than sunlit ground - measured
+    # on a synthetic pale gravel texture built specifically to probe this,
+    # dozens of components cleared the area floor with no plant present at all.
+    # RECOVER_MIN_VEG_SCORE requires a component's mean vegetation_score() to be
+    # confidently past the threshold, not merely across it, before it is trusted
+    # with no second opinion. Measured real plant colour (even degraded: partial
+    # shade, pale cotyledon, grazing angle) scores >= 0.985, so 0.9 keeps a real
+    # margin below that floor while cutting the adversarial texture's recovered
+    # count by 62% (measured). This reduces but does not eliminate the risk - a
+    # colour-only signal fundamentally cannot always tell "green organic matter"
+    # from "green-tinted mineral" - so RECOVER_MISSED_PLANTS remains a clean
+    # escape hatch to trade recall back for full precision on a substrate where
+    # this keeps firing even after tightening.
     "RECOVER_MISSED_PLANTS": True,
     "RECOVER_COVERED_DILATE_PX": 3,   # tolerance between SAM edge and veg prior
     "RECOVER_MAX_CLAIMED_FRAC": 0.30,  # blob already this claimed -> not a new plant
+    "RECOVER_MIN_VEG_SCORE": 0.9,
 
     # -- Morphology heuristic --------------------------------------------------
     # WHAT SHAPE CAN AND CANNOT TELL YOU:
@@ -489,7 +530,7 @@ def treatment_points(mask):
     }
 
 
-def recover_missed_plants(veg, taken, cfg):
+def recover_missed_plants(veg, taken, cfg, score=None):
     """Vegetation that no SAM instance claimed, returned as extra instances.
 
     THIS IS THE RECALL BACKSTOP. SAM only reports what it detects, so a plant it
@@ -503,7 +544,15 @@ def recover_missed_plants(veg, taken, cfg):
     mostly unclaimed. That distinction is what stops the backstop from
     fabricating duplicates: a leaf tip poking out past the edge of an instance
     that already covers its plant is a residual too, but its parent blob is
-    almost entirely claimed, so it is rejected."""
+    almost entirely claimed, so it is rejected.
+
+    This path has no SAM corroboration at all, so it is the most exposed to the
+    vegetation prior's own false positives - a plain colour index cannot always
+    tell real chlorophyll from a green-tinted mineral fleck, lichen, or a
+    shadowed pit reading cooler/greener than sunlit ground. When `score` (the
+    continuous vegetation_score(), not the binary prior) is given, a candidate
+    is recovered only if its mean score clears RECOVER_MIN_VEG_SCORE - solidly
+    past the threshold, not merely across it."""
     if not cfg.get("RECOVER_MISSED_PLANTS", True) or not veg.any():
         return []
     covered = np.zeros(veg.shape, bool)
@@ -538,6 +587,8 @@ def recover_missed_plants(veg, taken, cfg):
         if stats[i, cv2.CC_STAT_AREA] < cfg["MIN_INSTANCE_AREA_PX"]:
             continue
         comp = lbl == i
+        if score is not None and float(score[comp].mean()) < cfg["RECOVER_MIN_VEG_SCORE"]:
+            continue
         parent = int(np.bincount(veg_lbl[comp].ravel(), minlength=n_veg)[1:].argmax()) + 1
         if claimed_frac[parent] <= cfg["RECOVER_MAX_CLAIMED_FRAC"]:
             out.append(comp)
@@ -896,7 +947,7 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     # Recall backstop BEFORE refinement, so a plant SAM missed goes through the
     # same boundary treatment as a detected one and is indistinguishable in the
     # output except for its recorded source.
-    recovered = recover_missed_plants(veg, masks, cfg)
+    recovered = recover_missed_plants(veg, masks, cfg, score)
     sources = ["sam"] * len(masks) + ["vegetation"] * len(recovered)
 
     refined = []
@@ -987,8 +1038,18 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         if manual_boxes:
             exemplars = manual_boxes
         elif cfg["SAM_PROMPT_MODE"] == "auto_exemplar":
+            # min_confidence guards against seeding SAM's concept search with a
+            # marginal exemplar (gravel, lichen, shadow) that only barely passed
+            # the binary vegetation prior - a bad exemplar does not just risk
+            # one bad box, SAM will hunt the whole frame for more of "that
+            # concept". See EXEMPLAR_MIN_VEG_SCORE.
+            veg_score_pre = vegetation_score(proc, cfg["EXG_THRESHOLD"],
+                                             cfg["VEG_MIN_SATURATION"],
+                                             cfg.get("VEG_SCORE_SOFTNESS", 0.04))
             exemplars = component_boxes(veg_pre, cfg["EXEMPLAR_MIN_AREA_PX"],
-                                        cfg["EXEMPLAR_PAD_PX"], cfg["EXEMPLAR_MAX_BOXES"])
+                                        cfg["EXEMPLAR_PAD_PX"], cfg["EXEMPLAR_MAX_BOXES"],
+                                        confidence=veg_score_pre,
+                                        min_confidence=cfg["EXEMPLAR_MIN_VEG_SCORE"])
         else:
             exemplars = None
 

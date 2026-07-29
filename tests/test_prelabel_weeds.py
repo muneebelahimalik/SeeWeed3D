@@ -542,3 +542,89 @@ def test_smooth_boundary_reduces_spurious_skeleton_junctions():
         return int(((deg >= 3) & (skel > 0)).sum())
 
     assert junction_count(smooth) < junction_count(noisy)
+
+
+# --------------------------------------------------------------------------- #
+# Confidence gating (recover_missed_plants / component_boxes exemplar filter)
+# --------------------------------------------------------------------------- #
+def test_recover_missed_plants_rejects_low_confidence_residual():
+    """recover_missed_plants() has no SAM corroboration at all, so a residual
+    that only marginally passed the BINARY vegetation prior - the profile of a
+    gravel fleck, lichen, or a shadowed pit reading cooler/greener than sunlit
+    ground, not real chlorophyll - must not be trusted just because it cleared
+    the area floor. Measured on a synthetic pale-gravel texture built to probe
+    this: dozens of such components cleared the old area-only gate with no
+    plant present at all."""
+    size = 200
+    veg = np.zeros((size, size), bool)
+    veg[50:90, 50:90] = True                              # 1600px, clears the floor
+    marginal_score = np.full((size, size), 0.56, np.float32)   # barely past 0.5
+
+    legacy = wd.recover_missed_plants(veg, [], wd.CONFIG)              # score=None
+    gated = wd.recover_missed_plants(veg, [], wd.CONFIG, marginal_score)
+    assert len(legacy) == 1              # old area-only behaviour is unchanged...
+    assert len(gated) == 0               # ...but the confidence gate rejects it
+
+
+def test_recover_missed_plants_keeps_high_confidence_residual():
+    size = 200
+    veg = np.zeros((size, size), bool)
+    veg[50:90, 50:90] = True
+    confident_score = np.full((size, size), 0.97, np.float32)
+    out = wd.recover_missed_plants(veg, [], wd.CONFIG, confident_score)
+    assert len(out) == 1
+
+
+def test_component_boxes_confidence_filter():
+    """common/vegetation.py: min_confidence must reject a same-sized component
+    on weak colour evidence while leaving a confident one untouched, and stay
+    fully backward compatible (confidence=None) for the onion pipeline, which
+    shares this function."""
+    mask = np.zeros((200, 200), bool)
+    mask[10:40, 10:40] = True             # confident component
+    mask[100:130, 100:130] = True         # marginal component, same size
+    confidence = np.zeros((200, 200), np.float32)
+    confidence[10:40, 10:40] = 0.95
+    confidence[100:130, 100:130] = 0.4
+
+    assert len(wd.component_boxes(mask, 100)) == 2          # no filter: unchanged
+    kept = wd.component_boxes(mask, 100, confidence=confidence, min_confidence=0.6)
+    assert len(kept) == 1
+    x1, y1, x2, y2 = kept[0]
+    assert x1 < 50 and y1 < 50                               # the confident one
+
+
+def test_prelabel_session_filters_low_confidence_exemplars(tmp_path):
+    """Wiring check: prelabel_session must actually compute vegetation_score
+    and thread it into component_boxes via EXEMPLAR_MIN_VEG_SCORE, not just
+    have the config knob exist while doing nothing."""
+    sess = tmp_path / "sess"
+    (sess / "rgb").mkdir(parents=True)
+    (sess / "meta").mkdir(parents=True)
+
+    size = 200
+    bgr = np.full((size, size, 3), (70, 45, 60), np.uint8)
+    plant = _rosette(size, size, 60, 60, 30)
+    bgr[plant] = (35, 110, 40)                    # real, confidently green plant
+    bgr[140:170, 140:170] = (130, 154, 152)        # marginal patch: binary-pass, low score
+    cv2.imwrite(str(sess / "rgb" / "f1.png"), bgr)
+    with open(sess / "meta" / "pool.csv", "w", newline="") as f:
+        f.write("filename\nf1.png\n")
+
+    seen_exemplars = []
+
+    def stub(pred, image, cfg, exemplars=None):
+        seen_exemplars.append(exemplars or [])
+        return [plant]
+
+    # White balance is deliberately off: it gray-world-corrects the whole frame
+    # against the (imbalanced) soil colour, which would shift the carefully
+    # calibrated marginal patch away from the score this test relies on. That
+    # interaction is real but is not what this test is checking.
+    cfg = dict(wd.CONFIG, EXEMPLAR_MIN_AREA_PX=50, RECOVER_MISSED_PLANTS=False,
+              WHITE_BALANCE=False)
+    wd.prelabel_session("sess", sess, tmp_path / "out", cfg, "STUB", stub)
+
+    assert len(seen_exemplars) == 1 and seen_exemplars[0]
+    for x1, y1, x2, y2 in seen_exemplars[0]:
+        assert not (x1 >= 130 and y1 >= 130)      # none anchored on the marginal patch
