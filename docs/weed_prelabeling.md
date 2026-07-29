@@ -123,6 +123,47 @@ on a blob that is 0% claimed and is recovered. `RECOVER_COVERED_DILATE_PX`
 absorbs the few pixels of disagreement between a SAM edge and the vegetation
 prior so a thin rim never registers as a plant.
 
+### 3. Confidence, not just area (`EXEMPLAR_MIN_VEG_SCORE` / `RECOVER_MIN_VEG_SCORE`)
+
+Both mechanisms above only had an **area** floor, and area cannot tell a small
+real plant from a same-sized patch of noise. In the field this showed up as
+dozens of phantom point detections scattered across bare, pale, mottled
+ground - because the vegetation prior is a plain colour index (ExG +
+saturation + green dominance), and colour indices are a documented weak spot
+against green-tinted mineral flecks, lichen, and shadow that reads
+cooler/greener than sunlit ground. That failure mode is invisible to an area
+check: the false-positive component clears `MIN_INSTANCE_AREA_PX` exactly
+like a real seedling would.
+
+The fix asks a different question - not "how big" but "how sure" - using
+`vegetation_score()`, the same continuous signal boundary refinement already
+uses, instead of the binary yes/no prior. A component must clear a **mean
+score**, not merely cross the threshold once:
+
+- `EXEMPLAR_MIN_VEG_SCORE` (default **0.85**) gates which vegetation
+  components become SAM exemplars. This matters beyond just that one box: SAM
+  3 concept segmentation is asked to find *every instance of the same concept*
+  across the whole frame, so a single noise exemplar can seed a search for
+  more false positives elsewhere, not just fail at its own location. SAM's own
+  confirmation is still the primary defence here - this only keeps the worst
+  candidates out of the prompt set.
+- `RECOVER_MIN_VEG_SCORE` (default **0.9**, stricter) gates
+  `recover_missed_plants()`, which has **no SAM corroboration at all** and is
+  therefore the most exposed path.
+
+Measured on real plant colour, even degraded (partial shade, a pale young
+cotyledon, a leaf edge at a grazing angle): mean score **≥ 0.985**, comfortably
+clear of both floors. Measured on a synthetic adversarial gravel/lichen/shadow
+texture built specifically to probe this: components scored up to 0.971 - so no
+threshold cleanly separates the worst case, color evidence alone is
+fundamentally ambiguous some of the time - but the defaults still cut that
+texture's exemplar candidates by ~40% and recovered instances by ~62%, at zero
+measured cost to a properly-sized real plant in the same tests.
+
+If phantom detections persist on a particular field's substrate even after
+this, `RECOVER_MISSED_PLANTS: False` remains the full escape hatch, trading
+recall back for precision.
+
 ### Seeing it work
 
 Every session now prints a recall line:
@@ -137,6 +178,14 @@ with a **white halo** around its class-coloured outline, so you can judge from
 the images alone whether the backstop is earning its keep. `instances.csv` has a
 `source` column (`sam` / `vegetation`) so the two populations stay separable
 when auditing or weighting the data.
+
+If this percentage drops on a noisy/textured session after upgrading, that is
+expected and is the metric becoming *more honest*, not new missed plants: it was
+previously possible for the backstop to recover a false-positive vegetation
+component and then get credited for "covering" the very noise it fabricated.
+With the confidence gate, that noise is excluded from both the numerator and
+the count of recovered instances - the percentage now reflects real plant
+coverage, not the pipeline grading its own hallucinations.
 
 Set `RECOVER_MISSED_PLANTS: False` to turn it off (for a pure SAM ablation).
 

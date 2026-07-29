@@ -85,17 +85,29 @@ def vegetation_score(bgr, exg_threshold=0.05, min_saturation=40, softness=0.04):
     return score.astype(np.float32)
 
 
-def component_boxes(mask, min_area_px, pad_px=0, max_boxes=None):
+def component_boxes(mask, min_area_px, pad_px=0, max_boxes=None,
+                    confidence=None, min_confidence=0.0):
     """Bounding boxes [x1,y1,x2,y2] of mask components >= min_area_px, largest
-    first. Used to prompt SAM 3 with real plant exemplars."""
+    first. Used to prompt SAM 3 with real plant exemplars.
+
+    confidence, when given, is a per-pixel score in [0, 1] (see
+    vegetation_score()): a component is kept only if its MEAN confidence over
+    the component reaches min_confidence. min_area_px alone cannot tell a
+    faint, small, but genuine seedling from a same-sized patch of gravel,
+    lichen or shadow that only marginally crosses the binary vegetation
+    threshold - confidence asks a different question, how sure the colour
+    evidence is, not how big the blob is. Backward compatible: omitted, this
+    behaves exactly as before."""
     if not mask.any():
         return []
     h, w = mask.shape
-    n, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)
     out = []
     for i in range(1, n):
         area = int(stats[i, cv2.CC_STAT_AREA])
         if area < min_area_px:
+            continue
+        if confidence is not None and float(confidence[lbl == i].mean()) < min_confidence:
             continue
         x, y = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
         bw, bh = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
