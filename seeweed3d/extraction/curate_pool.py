@@ -110,6 +110,10 @@ CONFIG = {
     "MANUAL_DROPS": {},
     "MANUAL_DROP_REASON": "manual",
 
+    # Print where the drops fall across each session. This is what tells you
+    # whether a threshold is right - see drop_histogram().
+    "SHOW_DROP_HISTOGRAM": True,
+
     # -- Undo -----------------------------------------------------------------
     # True clears every drop in the selected sessions and writes nothing else.
     # Use it to start over; no image files were ever touched.
@@ -203,19 +207,26 @@ def _work_gray(path, work_width):
     return img.astype(np.float32)
 
 
-def image_shift_frac(prev_gray, cur_gray):
-    """Dominant translation between two frames as a fraction of frame width.
+def image_shift_vec(prev_gray, cur_gray):
+    """Translation between two frames as a (dx, dy) fraction of frame width.
 
     Phase correlation, not feature matching: it is a global estimate that does
     not need texture to be locally distinctive, which suits repetitive ground
     cover where feature matching is unreliable. A Hann window suppresses the
-    edge discontinuity that would otherwise dominate the spectrum."""
+    edge discontinuity that would otherwise dominate the spectrum.
+
+    Returns the VECTOR, not its magnitude, because the caller sums consecutive
+    steps: summing magnitudes would treat camera jitter - and the strictly
+    positive noise floor of phase correlation on near-identical frames - as
+    forward progress, so a stationary camera would eventually "travel" far
+    enough to keep a frame that is an exact duplicate."""
     if prev_gray is None or cur_gray is None or prev_gray.shape != cur_gray.shape:
         return None
     win = cv2.createHanningWindow((prev_gray.shape[1], prev_gray.shape[0]),
                                   cv2.CV_32F)
     (dx, dy), _ = cv2.phaseCorrelate(prev_gray, cur_gray, win)
-    return float(np.hypot(dx, dy)) / max(1, prev_gray.shape[1])
+    w = max(1, prev_gray.shape[1])
+    return (float(dx) / w, float(dy) / w)
 
 
 def mark_redundant(rows, session_dir, cfg, progress=None):
@@ -239,7 +250,7 @@ def mark_redundant(rows, session_dir, cfg, progress=None):
     anchor = live[0]
     anchor_pose = pose_xyz(anchor, ok_states)
     anchor_gray = None                      # loaded lazily: pose may suffice
-    accum_frac = 0.0                        # image-shift accumulator
+    accum = np.zeros(2, np.float64)         # net image displacement from anchor
     prev_gray = None
     prev_is_anchor = True
 
@@ -264,12 +275,18 @@ def mark_redundant(rows, session_dir, cfg, progress=None):
             # anchor: once the view has moved substantially the two frames no
             # longer overlap, and phase correlation of non-overlapping images is
             # meaningless. Summing small reliable steps stays valid.
-            step = image_shift_frac(prev_gray if not prev_is_anchor else anchor_gray,
-                                    cur_gray)
+            #
+            # Summed as a VECTOR, then measured by the magnitude of the net
+            # displacement. Summing magnitudes instead would count jitter, and
+            # phase correlation's strictly positive noise floor on
+            # near-identical frames, as forward progress - so a stationary
+            # camera would drift past the threshold and keep exact duplicates.
+            step = image_shift_vec(prev_gray if not prev_is_anchor else anchor_gray,
+                                   cur_gray)
             if step is not None:
                 used_image = True
-                accum_frac += step
-                moved_enough = accum_frac >= cfg["MIN_SHIFT_FRAC"]
+                accum += step
+                moved_enough = float(np.hypot(*accum)) >= cfg["MIN_SHIFT_FRAC"]
             else:
                 moved_enough = True         # cannot measure -> never drop
             prev_gray, prev_is_anchor = cur_gray, False
@@ -277,7 +294,7 @@ def mark_redundant(rows, session_dir, cfg, progress=None):
         if moved_enough:
             anchor, anchor_pose = row, cur_pose
             anchor_gray, prev_gray, prev_is_anchor = None, None, True
-            accum_frac = 0.0
+            accum[:] = 0.0
         else:
             row[DROPPED_COL] = "1"
             row[REASON_COL] = "redundant"
@@ -289,6 +306,54 @@ def mark_redundant(rows, session_dir, cfg, progress=None):
     signal = ("mixed" if used_pose and used_image
               else "pose" if used_pose else "image" if used_image else "none")
     return n_dropped, signal
+
+
+def diagnose_pose(rows, ok_states):
+    """Why pose was or wasn't usable, as a one-line explanation.
+
+    A 'fell back to image shift' run is not self-explanatory - the cause could
+    be a v1 capture with no pose at all, or a v2 capture whose tracker was lost.
+    Those call for different responses, so the difference is reported."""
+    have_cols = sum(1 for r in rows
+                    if any(str(r.get(k, "")).strip() for k in ("tx_mm", "ty_mm", "tz_mm")))
+    if not have_cols:
+        return ("no pose recorded (v1 capture, or positional tracking was off) "
+                "- MIN_SHIFT_FRAC is what matters here, MIN_TRAVEL_MM is unused")
+    usable = sum(1 for r in rows if pose_xyz(r, ok_states) is not None)
+    if usable == 0:
+        states = sorted({str(r.get("pose_state", "")).strip() for r in rows
+                         if str(r.get("pose_state", "")).strip()})
+        return (f"pose columns present but no frame had a trusted pose_state "
+                f"(saw: {', '.join(states) or 'blank'}) - add to POSE_OK_STATES "
+                f"if one of those is in fact reliable")
+    if usable < len(rows):
+        return f"pose usable on {usable}/{len(rows)} frames - the rest fell back to image shift"
+    return f"pose usable on all {usable} frames"
+
+
+def drop_histogram(rows, buckets=10, width=44):
+    """Where the drops fall across the session, as a text bar chart.
+
+    This is the number that decides whether a threshold is right. Drops
+    concentrated at the start match the 'I was slow setting off' case and are
+    exactly what curation is for. Drops spread evenly across the whole session
+    mean the threshold is simply too aggressive and is thinning good, genuinely
+    new ground - which no amount of staring at the total percentage would tell
+    you."""
+    if not rows:
+        return []
+    n = len(rows)
+    size = max(1, -(-n // buckets))          # ceil, so the last bucket is short
+    out = []
+    for b in range(0, n, size):
+        chunk = rows[b:b + size]
+        d = sum(1 for r in chunk if is_dropped(r))
+        frac = d / len(chunk)
+        bar = "#" * int(round(frac * width))
+        lo, hi = b, b + len(chunk) - 1
+        out.append(f"      frames {lo:>5}-{hi:<5} {frac * 100:5.1f}% "
+                   f"|{bar:<{width}}| {d}/{len(chunk)}")
+    return out
 
 
 def parse_drop_tokens(tokens):
@@ -386,6 +451,15 @@ def curate_session(sid, session_dir, cfg):
     print(f"  [{sid}] {before} -> {after} usable frames "
           f"({before - after} dropped, {pct:.0f}%)"
           f" | redundant={n_redundant} (by {signal}) manual={n_manual}")
+
+    if cfg["DROP_REDUNDANT"]:
+        print(f"        pose: {diagnose_pose(rows, cfg['POSE_OK_STATES'])}")
+    if cfg.get("SHOW_DROP_HISTOGRAM", True) and (before - after):
+        print("        where the drops fall:")
+        for line in drop_histogram(rows):
+            print(line)
+        print("        (front-loaded = a slow start, working as intended. "
+              "Even across the session = threshold too aggressive.)")
 
     if cfg["DRY_RUN"]:
         print("        DRY RUN - pool.csv not modified. Set DRY_RUN = False to apply.")

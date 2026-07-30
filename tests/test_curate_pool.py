@@ -201,3 +201,73 @@ def test_uncurated_pool_behaves_exactly_as_before(tmp_path):
     assert "dropped" not in rows[0]
     assert len(wd.pool_frames(sdir)) == 6
     assert len(sb.load_pool(tmp_path)) == 6
+
+
+def test_shift_is_summed_as_a_vector_not_a_magnitude(tmp_path):
+    """A jittering but stationary camera must not accumulate its way past the
+    threshold. Summing |shift| would count every wobble - and phase
+    correlation's strictly positive noise floor on near-identical frames - as
+    forward progress, so exact duplicates would be kept. Summing the vector
+    cancels the wobble, which is what actually happened physically."""
+    sdir = tmp_path / "sessions" / "sess"
+    (sdir / "rgb").mkdir(parents=True)
+    (sdir / "meta").mkdir(parents=True)
+    rng = np.random.default_rng(1)
+    base = rng.integers(0, 255, (200, 400, 3), dtype=np.uint8)
+    rows = []
+    for i in range(12):
+        fn = f"sess_{i:06d}.png"
+        # Oscillate between two offsets: net displacement stays ~0 forever,
+        # while the sum of per-step magnitudes grows without bound.
+        cv2.imwrite(str(sdir / "rgb" / fn), np.roll(base, 6 * (i % 2), axis=1))
+        rows.append({"video_frame_idx": str(i), "filename": fn})
+    with open(sdir / "meta" / "pool.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["video_frame_idx", "filename"])
+        w.writeheader()
+        w.writerows(rows)
+
+    st = cp.curate_session("sess", sdir, _cfg(DROP_REDUNDANT=True,
+                                              MIN_SHIFT_FRAC=0.10))
+    # 12 jittering frames of the same ground: at most a couple survive.
+    assert st["after"] <= 2, f"jitter accumulated as travel: kept {st['after']}"
+
+
+def test_image_shift_vec_returns_signed_components():
+    """The vector must be signed and directional, not a magnitude."""
+    rng = np.random.default_rng(2)
+    base = rng.integers(0, 255, (128, 256), dtype=np.uint8).astype(np.float32)
+    right = np.roll(base, 8, axis=1).astype(np.float32)
+
+    fwd = cp.image_shift_vec(base, right)
+    back = cp.image_shift_vec(right, base)
+    assert fwd is not None and back is not None
+    # Opposite directions must have opposite sign, so they cancel when summed.
+    assert fwd[0] * back[0] < 0
+    assert abs(fwd[0] + back[0]) < 0.01
+
+
+def test_drop_histogram_localises_a_slow_start():
+    """The histogram is the diagnostic that decides whether a threshold is
+    right, so it must actually show WHERE drops fall, not just how many."""
+    rows = [{"dropped": "1" if i < 20 else "0"} for i in range(100)]
+    lines = cp.drop_histogram(rows, buckets=10)
+    assert len(lines) == 10
+    assert "100.0%" in lines[0] and "100.0%" in lines[1]   # slow start
+    assert "0.0%" in lines[5]                               # clean later on
+
+
+def test_diagnose_pose_distinguishes_missing_from_untrusted():
+    """'Fell back to image shift' has two very different causes and they need
+    different responses, so they must be reported differently."""
+    states = cp.CONFIG["POSE_OK_STATES"]
+    none = cp.diagnose_pose([{"filename": "a.png"}], states)
+    assert "no pose recorded" in none
+
+    lost = cp.diagnose_pose(
+        [{"tx_mm": "1", "ty_mm": "0", "tz_mm": "0", "pose_state": "SEARCHING"}],
+        states)
+    assert "no frame had a trusted pose_state" in lost and "SEARCHING" in lost
+
+    good = cp.diagnose_pose(
+        [{"tx_mm": "1", "ty_mm": "0", "tz_mm": "0", "pose_state": "OK"}], states)
+    assert "usable on all 1" in good
