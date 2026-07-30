@@ -114,6 +114,13 @@ CONFIG = {
     # whether a threshold is right - see drop_histogram().
     "SHOW_DROP_HISTOGRAM": True,
 
+    # Candidate thresholds to report alongside the chosen one. The measurement
+    # is already done by then, so each extra candidate is nearly free, and the
+    # table is the honest way to pick a value: it shows the actual trade-off on
+    # YOUR footage instead of asking you to guess. Set to [] to hide.
+    "SWEEP_SHIFT_FRAC": [0.05, 0.10, 0.15, 0.25, 0.40, 0.60, 0.80, 1.00],
+    "SWEEP_TRAVEL_MM": [25, 50, 100, 200, 400, 800],
+
     # -- Undo -----------------------------------------------------------------
     # True clears every drop in the selected sessions and writes nothing else.
     # Use it to start over; no image files were ever touched.
@@ -229,83 +236,123 @@ def image_shift_vec(prev_gray, cur_gray):
     return (float(dx) / w, float(dy) / w)
 
 
+def frame_positions(live, rgb_dir, cfg, progress=None):
+    """Cumulative camera position for each live frame, measured once.
+
+    Returns (positions, forced_keep, signal, unit). Distance between two
+    positions is the travel between those frames, so a selection at ANY
+    threshold is then a cheap arithmetic pass - which is what makes
+    sweep_thresholds() practically free after this has run.
+
+    Mode is decided per session, not per pair: pose when every frame has a
+    trusted one, image shift otherwise. Mixing millimetres and frame-widths
+    inside one session would mean the threshold silently changes meaning
+    partway through, which is not something you could reason about."""
+    ok_states = cfg["POSE_OK_STATES"]
+    poses = [pose_xyz(r, ok_states) for r in live]
+    if poses and all(p is not None for p in poses):
+        if progress:
+            for _ in live:
+                progress.update()
+        return ([np.asarray(p, float) for p in poses],
+                [False] * len(live), "pose", "mm")
+
+    # Image mode: cumulative sum of consecutive phase-correlation steps.
+    # Consecutive, not straight-to-anchor: once the view has moved
+    # substantially the two frames no longer overlap, and phase correlation of
+    # non-overlapping images is meaningless. Summing small reliable steps stays
+    # valid. Summed as a VECTOR - summing magnitudes would count jitter, and
+    # phase correlation's strictly positive noise floor on near-identical
+    # frames, as forward progress.
+    work_width = cfg["SHIFT_WORK_WIDTH"]
+    positions, forced = [np.zeros(2)], [False]
+    cum = np.zeros(2)
+    prev = _work_gray(rgb_dir / live[0].get("filename", ""), work_width)
+    if progress:
+        progress.update()
+    for row in live[1:]:
+        cur = _work_gray(rgb_dir / row.get("filename", ""), work_width)
+        step = image_shift_vec(prev, cur)
+        if step is None:
+            forced.append(True)             # unmeasurable -> never dropped
+        else:
+            cum = cum + np.asarray(step, float)
+            forced.append(False)
+        positions.append(cum.copy())
+        prev = cur
+        if progress:
+            progress.update()
+    return positions, forced, "image", "frac"
+
+
+def select_keeps(positions, forced, threshold):
+    """Indices to KEEP: greedy, measuring travel from the last KEPT frame.
+
+    Measuring from the last kept frame rather than the previous frame is the
+    whole point. Crawling at 5 mm/frame, every consecutive pair looks
+    "different enough" pairwise, so a pairwise rule with a 20 mm threshold
+    drops nothing at all."""
+    if not positions:
+        return []
+    keep, anchor = [0], 0
+    for i in range(1, len(positions)):
+        if forced[i] or float(np.linalg.norm(positions[i] - positions[anchor])) >= threshold:
+            keep.append(i)
+            anchor = i
+    return keep
+
+
+def sweep_thresholds(positions, forced, thresholds, unit):
+    """How many frames survive at each candidate threshold.
+
+    The single number a run reports ("53% dropped") cannot tell you whether a
+    threshold is right, and re-running the whole measurement per candidate is
+    slow. The measurement is already done, so every threshold is one cheap
+    pass over it - turning an unanswerable question into a table."""
+    n = len(positions)
+    out = []
+    for t in thresholds:
+        kept = len(select_keeps(positions, forced, t))
+        row = {"threshold": t, "kept": kept, "dropped": n - kept,
+               "kept_pct": 100.0 * kept / max(1, n)}
+        if unit == "frac":
+            # Fraction of frame width travelled between kept frames, so the
+            # part of the view they share is what is left over. This is the
+            # number worth choosing on: it is how much of each frame you would
+            # be annotating twice.
+            row["overlap_pct"] = max(0.0, 1.0 - t) * 100.0
+        out.append(row)
+    return out
+
+
 def mark_redundant(rows, session_dir, cfg, progress=None):
-    """Flag near-duplicate frames, keeping one per MIN_TRAVEL_MM of real travel.
+    """Flag near-duplicate frames, keeping one per threshold of real travel.
 
-    Greedy from the last KEPT frame, which is the whole point - see module
-    docstring. Already-dropped rows are left alone and are not eligible anchors,
-    so this composes with manual drops in either order.
+    Already-dropped rows are left alone and are not eligible anchors, so this
+    composes with manual drops in either order.
 
-    Returns (n_dropped, signal) where signal is 'pose', 'image' or 'mixed'."""
+    Returns (n_dropped, signal, sweep) - sweep is the threshold table, or []."""
     rgb_dir = Path(session_dir) / "rgb"
     live = [r for r in rows if not is_dropped(r)]
     if len(live) < 2:
-        return 0, "none"
+        return 0, "none", []
 
-    ok_states = cfg["POSE_OK_STATES"]
-    work_width = cfg["SHIFT_WORK_WIDTH"]
-    used_pose = used_image = False
+    positions, forced, signal, unit = frame_positions(live, rgb_dir, cfg, progress)
+    threshold = cfg["MIN_TRAVEL_MM"] if unit == "mm" else cfg["MIN_SHIFT_FRAC"]
+    keep = set(select_keeps(positions, forced, threshold))
+
     n_dropped = 0
+    for i, row in enumerate(live):
+        if i in keep:
+            continue
+        row[DROPPED_COL] = "1"
+        row[REASON_COL] = "redundant"
+        n_dropped += 1
 
-    anchor = live[0]
-    anchor_pose = pose_xyz(anchor, ok_states)
-    anchor_gray = None                      # loaded lazily: pose may suffice
-    accum = np.zeros(2, np.float64)         # net image displacement from anchor
-    prev_gray = None
-    prev_is_anchor = True
-
-    if progress:
-        progress.update()
-
-    for row in live[1:]:
-        cur_pose = pose_xyz(row, ok_states)
-        moved_enough = None
-
-        if anchor_pose is not None and cur_pose is not None:
-            used_pose = True
-            moved_enough = pose_travel_mm(anchor_pose, cur_pose) >= cfg["MIN_TRAVEL_MM"]
-
-        if moved_enough is None:
-            # No usable pose for this pair - measure the images instead.
-            cur_gray = _work_gray(rgb_dir / row.get("filename", ""), work_width)
-            if anchor_gray is None:
-                anchor_gray = _work_gray(rgb_dir / anchor.get("filename", ""),
-                                         work_width)
-            # Accumulate consecutive shifts rather than comparing straight to the
-            # anchor: once the view has moved substantially the two frames no
-            # longer overlap, and phase correlation of non-overlapping images is
-            # meaningless. Summing small reliable steps stays valid.
-            #
-            # Summed as a VECTOR, then measured by the magnitude of the net
-            # displacement. Summing magnitudes instead would count jitter, and
-            # phase correlation's strictly positive noise floor on
-            # near-identical frames, as forward progress - so a stationary
-            # camera would drift past the threshold and keep exact duplicates.
-            step = image_shift_vec(prev_gray if not prev_is_anchor else anchor_gray,
-                                   cur_gray)
-            if step is not None:
-                used_image = True
-                accum += step
-                moved_enough = float(np.hypot(*accum)) >= cfg["MIN_SHIFT_FRAC"]
-            else:
-                moved_enough = True         # cannot measure -> never drop
-            prev_gray, prev_is_anchor = cur_gray, False
-
-        if moved_enough:
-            anchor, anchor_pose = row, cur_pose
-            anchor_gray, prev_gray, prev_is_anchor = None, None, True
-            accum[:] = 0.0
-        else:
-            row[DROPPED_COL] = "1"
-            row[REASON_COL] = "redundant"
-            n_dropped += 1
-
-        if progress:
-            progress.update(note=f"{n_dropped} redundant")
-
-    signal = ("mixed" if used_pose and used_image
-              else "pose" if used_pose else "image" if used_image else "none")
-    return n_dropped, signal
+    candidates = (cfg.get("SWEEP_TRAVEL_MM") if unit == "mm"
+                  else cfg.get("SWEEP_SHIFT_FRAC")) or []
+    sweep = sweep_thresholds(positions, forced, candidates, unit) if candidates else []
+    return n_dropped, signal, sweep
 
 
 def diagnose_pose(rows, ok_states):
@@ -439,11 +486,11 @@ def curate_session(sid, session_dir, cfg):
         print(f"  [{sid}] [WARN] {n_unmatched} manually listed frame(s) are not "
               f"in this session's pool - check the ids")
 
-    n_redundant, signal = 0, "off"
+    n_redundant, signal, sweep = 0, "off", []
     if cfg["DROP_REDUNDANT"]:
         prog = Progress(sum(1 for r in rows if not is_dropped(r)),
                         f"  [{sid}]", unit="frames")
-        n_redundant, signal = mark_redundant(rows, session_dir, cfg, prog)
+        n_redundant, signal, sweep = mark_redundant(rows, session_dir, cfg, prog)
         prog.close(note=f"{n_redundant} redundant")
 
     after = sum(1 for r in rows if not is_dropped(r))
@@ -458,8 +505,24 @@ def curate_session(sid, session_dir, cfg):
         print("        where the drops fall:")
         for line in drop_histogram(rows):
             print(line)
-        print("        (front-loaded = a slow start, working as intended. "
-              "Even across the session = threshold too aggressive.)")
+        print("        (bunched = a slow patch, thinned as intended. Flat = you "
+              "moved at a steady speed, so the threshold alone sets the rate.)")
+
+    if sweep:
+        cur = cfg["MIN_TRAVEL_MM"] if signal == "pose" else cfg["MIN_SHIFT_FRAC"]
+        unit = "mm" if signal == "pose" else "frac"
+        print(f"        threshold sweep (current = {cur}):")
+        head = "          value    kept   dropped"
+        print(head + ("   overlap between kept frames" if unit == "frac" else ""))
+        for s in sweep:
+            mark = " <-- current" if abs(s["threshold"] - cur) < 1e-9 else ""
+            ov = (f"   {s['overlap_pct']:5.0f}% of each frame re-annotated"
+                  if "overlap_pct" in s else "")
+            print(f"          {s['threshold']:<7} {s['kept']:>5} {s['dropped']:>9}"
+                  f"{ov}{mark}")
+        if unit == "frac":
+            print("        Lower value = more frames, more overlap, more "
+                  "duplicated annotation work.")
 
     if cfg["DRY_RUN"]:
         print("        DRY RUN - pool.csv not modified. Set DRY_RUN = False to apply.")
@@ -468,7 +531,8 @@ def curate_session(sid, session_dir, cfg):
         print(f"        wrote {Path(session_dir) / 'meta' / 'pool.csv'}")
 
     return {"session": sid, "before": before, "after": after,
-            "redundant": n_redundant, "manual": n_manual, "signal": signal}
+            "redundant": n_redundant, "manual": n_manual, "signal": signal,
+            "sweep": sweep}
 
 
 def main():
