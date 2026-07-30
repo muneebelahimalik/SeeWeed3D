@@ -11,6 +11,11 @@ from conftest import load_script
 
 wd = load_script("annotation/prelabel_weeds_sam3.py")
 
+# Mask post-processing added after PR #12 is disabled by default (that build's
+# masks were judged better in the field). The code is still there and still
+# tested - these tests opt in explicitly rather than asserting the default.
+_SMOOTH_ON = dict(wd.CONFIG, BOUNDARY_SMOOTH_SIGMA_PX=0.7)
+
 
 def _rosette(h=200, w=200, cx=100, cy=100, r=40, arms=8):
     """Synthetic rosette: a disc with radiating leaves, like the Brassica
@@ -170,7 +175,9 @@ def test_fused_lep_is_attached_to_instances():
     cv2.circle(core, (120, 120), 14, 1, -1)
     bgr[core.astype(bool) & m] = (70, 190, 120)     # pale young tissue
 
-    instances, _ = wd.analyze_frame(bgr, [m], wd.CONFIG)
+    # USE_FUSED_LEP is off by default (PR #12 profile); this test is about the
+    # estimator itself, so it opts in.
+    instances, _ = wd.analyze_frame(bgr, [m], dict(wd.CONFIG, USE_FUSED_LEP=True))
     inst = instances[0]
     r = inst["lep"]
     assert r is not None
@@ -259,8 +266,11 @@ def test_touching_plants_are_split_not_clustered():
     merged = a | b
     assert merged.sum() < a.sum() + b.sum(), "setup should actually overlap"
 
-    peaks = wd.growth_peaks(merged, wd.CONFIG)
-    parts = wd.split_touching_instances(merged, peaks, wd.CONFIG)
+    # Splitting is off by default (it fragments single plants - see CONFIG);
+    # this test is about the split algorithm itself, so it opts in.
+    cfg_split = dict(wd.CONFIG, SPLIT_TOUCHING_INSTANCES=True)
+    peaks = wd.growth_peaks(merged, cfg_split)
+    parts = wd.split_touching_instances(merged, peaks, cfg_split)
     assert len(parts) >= 2, "touching plants must be separated"
     # Parts are disjoint and together cover essentially the whole blob.
     assert (parts[0] & parts[1]).sum() == 0
@@ -308,7 +318,9 @@ def test_boundary_refinement_snaps_to_plant_evidence():
 
     score = vegetation_score(bgr, wd.CONFIG["EXG_THRESHOLD"],
                              wd.CONFIG["VEG_MIN_SATURATION"])
-    refined = wd.refine_boundary(bloated, score, wd.CONFIG)
+    # Edge snapping is off by default (PR #12 profile); opt in to test it.
+    refined = wd.refine_boundary(bloated, score, dict(wd.CONFIG,
+                                                     BOUNDARY_REFINE_BAND_PX=3))
     # Closer to the true plant than the bloated input was.
     before = np.logical_xor(bloated, true_plant).sum()
     after = np.logical_xor(refined, true_plant).sum()
@@ -323,7 +335,9 @@ def test_polygons_keep_all_parts_and_scale_tolerance():
     m = np.zeros((200, 200), bool)
     cv2.circle(m.view(np.uint8), (60, 100), 30, 1, -1)      # main body
     cv2.circle(m.view(np.uint8), (150, 100), 14, 1, -1)     # detached leaf
-    polys = wd.mask_polygons(m, wd.CONFIG)
+    # POLY_ALL_PARTS is off by default (PR #12 exported the largest contour
+    # only); this test is about multi-part export, so it opts in.
+    polys = wd.mask_polygons(m, dict(wd.CONFIG, POLY_ALL_PARTS=True))
     assert len(polys) == 2, "a detached part must not be dropped"
     for p in polys:
         assert len(p) >= 6 and len(p) % 2 == 0
@@ -509,7 +523,7 @@ def test_smooth_boundary_reduces_perimeter_without_losing_area():
     """Blur-and-rethreshold should erase the staircase noise (shorter, cleaner
     perimeter) while the disc's actual footprint survives almost intact."""
     noisy = _jagged_disc()
-    smooth = wd.smooth_boundary(noisy, wd.CONFIG)
+    smooth = wd.smooth_boundary(noisy, _SMOOTH_ON)
 
     p_noisy = cv2.arcLength(
         max(cv2.findContours(noisy.astype(np.uint8), cv2.RETR_EXTERNAL,
@@ -524,7 +538,7 @@ def test_smooth_boundary_reduces_perimeter_without_losing_area():
 def test_smooth_boundary_preserves_grass_elongation():
     """Sigma is sub-pixel so it must not blur away the elongation signal that
     classify_morphology relies on to separate grass from a rosette."""
-    blade = wd.smooth_boundary(_blade(), wd.CONFIG)
+    blade = wd.smooth_boundary(_blade(), _SMOOTH_ON)
     f = wd.shape_features(blade)
     assert f is not None and f["aspect_ratio"] >= wd.CONFIG["GRASS_MIN_ASPECT"]
 
@@ -557,7 +571,7 @@ def test_smooth_boundary_reduces_spurious_skeleton_junctions():
     before skeletonising must reduce that, not just tidy the outline."""
     lp = load_script("perception/lep.py")
     noisy = _jagged_disc(r=40)
-    smooth = wd.smooth_boundary(noisy, wd.CONFIG)
+    smooth = wd.smooth_boundary(noisy, _SMOOTH_ON)
 
     def junction_count(mask):
         skel = lp.zhang_suen_thin(mask).astype(np.uint8)
@@ -656,3 +670,69 @@ def test_prelabel_session_filters_low_confidence_exemplars(tmp_path):
     assert len(seen_exemplars) == 1 and seen_exemplars[0]
     for x1, y1, x2, y2 in seen_exemplars[0]:
         assert not (x1 >= 130 and y1 >= 130)      # none anchored on the marginal patch
+
+
+# --------------------------------------------------------------------------- #
+# PR #12 mask profile: post-processing added later is OFF by default
+# --------------------------------------------------------------------------- #
+def test_post_pr12_mask_processing_is_off_by_default():
+    """Field comparison judged the PR #11/#12 masks best, so everything added
+    after it is disabled by default. Pinned here because each of these silently
+    changes the exported training target if it drifts back on."""
+    assert wd.CONFIG["SPLIT_TOUCHING_INSTANCES"] is False
+    assert wd.CONFIG["BOUNDARY_REFINE_BAND_PX"] == 0
+    assert wd.CONFIG["BOUNDARY_SMOOTH_SIGMA_PX"] == 0
+    assert wd.CONFIG["USE_FUSED_LEP"] is False
+    assert wd.CONFIG["POLY_ALL_PARTS"] is False
+
+
+def test_one_plant_stays_one_instance_by_default():
+    """THE regression this profile exists to prevent. A rosette whose leaves
+    reach away from the crown produces several distance-transform peaks, which
+    was enough to make the splitter cut one plant into several instances -
+    each with its own outline, class and LEP dot. An over-segmented plant
+    teaches the model that half a rosette is a whole instance, and forces the
+    annotator to merge shapes by hand."""
+    size = 300
+    bgr = np.full((size, size, 3), (70, 45, 60), np.uint8)
+    plant = _rosette(size, size, 150, 150, 70, arms=8)
+    bgr[plant] = (35, 110, 40)
+
+    assert len(wd.growth_peaks(plant, wd.CONFIG)) >= 1
+    instances, _ = wd.analyze_frame(bgr, [plant], wd.CONFIG)
+    assert len(instances) == 1, "one weed must export as one instance"
+
+    # And with splitting explicitly enabled the machinery still works, so this
+    # is a default change rather than a capability being lost.
+    merged = np.zeros((size, size), bool)
+    for cx, cy in ((100, 100), (210, 130)):
+        merged |= _rosette(size, size, cx, cy, 55)
+    cfg_on = dict(wd.CONFIG, SPLIT_TOUCHING_INSTANCES=True)
+    assert len(wd.split_touching_instances(merged, wd.growth_peaks(merged, cfg_on),
+                                           cfg_on)) >= 2
+
+
+def test_default_lep_is_the_geometric_dt_peak():
+    """With the fused estimator off, an instance still carries a usable growth
+    point - the distance-transform peak, which for a rosette is the crown. The
+    LEP is not lost, it is just the simpler PR #12 estimate."""
+    bgr = np.full((240, 240, 3), (70, 45, 60), np.uint8)
+    m = _rosette(240, 240, 120, 120, 55)
+    bgr[m] = (35, 110, 40)
+
+    inst = wd.analyze_frame(bgr, [m], wd.CONFIG)[0][0]
+    assert inst.get("lep") is None                  # fused estimator not run
+    x, y = inst["points"]["lep_dt"]                 # but the geometric one is
+    assert abs(x - 120) < 20 and abs(y - 120) < 20
+
+
+def test_polygon_export_is_single_contour_by_default():
+    """PR #12 exported the largest contour only, so one instance draws exactly
+    one outline. POLY_ALL_PARTS restores multi-part export for callers that
+    would rather keep detached tissue than avoid the fragmented look."""
+    m = np.zeros((200, 200), bool)
+    m[20:60, 20:60] = True                          # main body
+    m[120:150, 120:150] = True                      # detached tissue
+
+    assert len(wd.mask_polygons(m, wd.CONFIG)) == 1
+    assert len(wd.mask_polygons(m, dict(wd.CONFIG, POLY_ALL_PARTS=True))) == 2
