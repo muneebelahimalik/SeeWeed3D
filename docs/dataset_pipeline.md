@@ -155,6 +155,85 @@ prelabel quality and annotation time honestly, then `b02_seed`.
 
 ---
 
+## 6b. Curating the pool — dropping redundant and bad frames
+
+Two things go wrong on a real capture run: you move slowly (often at the start),
+so consecutive pooled frames show almost the same ground; and some frames are
+simply bad and you want them gone after seeing the previews.
+
+```bash
+python seeweed3d/extraction/curate_pool.py     # DRY_RUN = True by default
+```
+
+### Never delete or rename the image files
+
+The filename `<session_id>_<video_frame_idx:06d>.png` **is the join key**. The
+same name appears in `rgb/`, `depth/`, `right/` and `conf/`, and the number is
+the frame's index in the source video.
+
+- Deleting the `rgb` file but not the `depth` file silently desynchronises the
+  pair.
+- Renaming files to close the gaps destroys the link back to the video and to
+  `meta/frames_index.csv`, and breaks the invariant in §2 that every stream is
+  aligned **by index**.
+
+**Gaps in the numbering are correct.** They mean "this frame exists in the video
+but is not in the pool" — that is exactly what a stride, a QC gate, or a curation
+drop is supposed to produce.
+
+So curation is recorded in `meta/pool.csv` — the manifest every later stage
+already reads — as two columns:
+
+| Column | Meaning |
+|---|---|
+| `dropped` | `0` = use it, `1` = skip it |
+| `drop_reason` | `redundant` / `manual`, so a decision is auditable later |
+
+`select_batches.py` and both prelabelers skip dropped rows automatically. A
+pool written before curation existed has no `dropped` column, which reads as
+keep-everything, so old sessions are unaffected.
+
+Because nothing is deleted, every drop is reversible: `RESTORE_ALL = True`
+clears the flags and the frames come straight back.
+
+### How redundant frames are found
+
+Overlap is a question about how far the **camera travelled**, so that is what
+gets measured, preferring real physical evidence over a proxy:
+
+1. **Pose** (best) — v2 captures record `tx_mm/ty_mm/tz_mm` from ZED positional
+   tracking, so the distance between two frames is literal camera travel in
+   millimetres. Set `MIN_TRAVEL_MM`. A pose recorded while tracking was *lost*
+   is refused rather than trusted — a bogus jump is worse than no pose at all.
+2. **Image shift** (fallback) — phase correlation gives the dominant
+   translation in pixels, as a fraction of frame width so the threshold is
+   resolution independent. Set `MIN_SHIFT_FRAC`.
+
+Travel accumulates **from the last kept frame, not the previous frame**. That
+distinction is the whole point: crawling at 5 mm/frame, every consecutive pair
+looks "different enough" pairwise, so a pairwise rule with a 20 mm threshold
+drops *nothing*. Accumulating from the last kept frame keeps one frame per
+`MIN_TRAVEL_MM` of ground actually covered — which is the property you want.
+
+`MIN_TRAVEL_MM` must be **calibrated to your mount height**: it should be a
+meaningful fraction of the ground footprint of one frame. Run with `DRY_RUN`
+first and read the before → after counts.
+
+### Dropping specific bad frames
+
+`MANUAL_DROPS` takes a per-session list and accepts whichever form you have to
+hand — a bare index, an inclusive range, or any filename whose stem ends in the
+index. Preview names (`.jpg`) work as well as the source `.png`, because
+previews are what you actually look at when deciding a frame is bad:
+
+```python
+"MANUAL_DROPS": {
+    "weed1_20260108_143022": ["0-250", "1187", "weed1_20260108_143022_001900.jpg"],
+},
+```
+
+---
+
 ## 7. Suggested run order
 
 1. Set the two prominent blocks at the top of `extraction/extract_sessions.py` —
@@ -163,12 +242,14 @@ prelabel quality and annotation time honestly, then `b02_seed`.
    `CONFIG["FFMPEG"]` if they are not on PATH. Run stage 1 with `DRY_RUN=True`.
 2. Confirm session IDs and warnings, then run for real.
 3. Read `registry.csv` — pick holdout sessions, sanity-check `median_depth_valid_frac_veg`.
-4. Run stage 2 with only `b01_gold` enabled; the gate report tells you which
+4. *(optional)* Run `extraction/curate_pool.py` to thin slow/overlapping
+   segments and drop bad frames — see §6b. Dry-run it first.
+5. Run stage 2 with only `b01_gold` enabled; the gate report tells you which
    threshold is rejecting frames and what value the data suggests.
-5. Create a CVAT task from `batches/b01_gold/images/`, paste `cvat_labels.json`.
-6. Annotate the gold set manually. Keep CVAT/Datumaro as the master format;
+6. Create a CVAT task from `batches/b01_gold/images/`, paste `cvat_labels.json`.
+7. Annotate the gold set manually. Keep CVAT/Datumaro as the master format;
    generate COCO/YOLO exports from it, never the reverse.
-7. Double-label 10–15% of LEPs with a second annotator before trusting any
+8. Double-label 10–15% of LEPs with a second annotator before trusting any
    pixel-level LEP target.
 
 ---

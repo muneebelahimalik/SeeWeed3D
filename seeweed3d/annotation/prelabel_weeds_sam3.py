@@ -909,11 +909,16 @@ def link_or_copy(src, dst):
 
 
 def pool_frames(session_dir):
+    """Pooled frame filenames, minus any curated out by extraction/curate_pool.py.
+
+    A missing `dropped` column means the pool predates curation, which reads as
+    "keep everything" - so an old session still behaves exactly as before."""
     pool_csv = session_dir / "meta" / "pool.csv"
     if not pool_csv.exists():
         return []
     return [r["filename"] for r in csv.DictReader(open(pool_csv, encoding="utf-8"))
-            if r.get("filename")]
+            if r.get("filename")
+            and str(r.get("dropped", "0")).strip() not in ("1", "true", "True")]
 
 
 def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
