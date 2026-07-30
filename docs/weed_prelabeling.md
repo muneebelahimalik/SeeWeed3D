@@ -27,8 +27,9 @@ scenes.**
    exemplars are the default, as established for onions.)
 3. Instances are validated against the vegetation prior and de-duplicated by
    **mask NMS**; too-small and whole-frame masks are rejected.
-4. **Recall backstop**: vegetation no instance claimed is recovered as extra
-   instances, so a plant SAM missed still reaches the annotator (see below).
+4. **Recall backstop (off by default)**: optionally, vegetation no instance
+   claimed can be recovered as extra instances (see below for why this isn't
+   on by default and when to turn it on for a specific session).
 5. Per instance: shape descriptors → provisional morphology class, growth-stage
    estimate, and **three candidate treatment points**.
 6. Export COCO (categories = morphology classes) + per-instance CSV + instance
@@ -85,109 +86,100 @@ growth-point peaks **and** exceeds `CLUSTER_MIN_AREA_PX`. Raise either to make i
 rarer. A cluster gets **no single LEP** (`lep_valid=0` in `instances.csv`); the
 preview marks each detected growth point with a cross instead of one dot.
 
-## Recall: never silently drop a weed
+## Recall vs precision: what shipped, what got reverted, and why
 
-**A weed the prelabeler misses is worse than a weed it labels badly.** A bad
-label gets corrected in CVAT in seconds. A missing one is invisible — it enters
-the training target as *background*, actively teaching the model that such
-plants are not weeds. That error then survives every later stage.
+**A weed the prelabeler misses is worse than a weed it labels badly** in
+principle — a bad label gets corrected in CVAT in seconds, a missing one
+silently becomes *background* in the training target. That reasoning motivated
+two recall-boosting changes: prompting SAM with more, smaller exemplars
+(`EXEMPLAR_MAX_BOXES` 30→60, `EXEMPLAR_MIN_AREA_PX` 300→200), and a backstop
+(`recover_missed_plants()`) that turns any unclaimed vegetation component into
+an instance outright.
 
-SAM only reports what it detects, so anything it does not return was previously
-dropped without trace. Two changes close that gap.
+**Real runs on a pale, textured field surface showed why that reasoning was
+incomplete**: dozens of phantom point detections scattered across bare ground
+with no plant present. A dataset full of phantom detections is not trainable
+at all, which in practice is a worse failure than the recall problem this was
+meant to fix. Two rounds of tightening (a claimed-fraction guard, then a
+vegetation-confidence gate) reduced but never eliminated it on real imagery,
+because the underlying signal — a plain ExG + saturation + green-dominance
+colour index — is a documented weak spot against green-tinted mineral flecks,
+lichen, and shadow reading cooler/greener than sunlit ground. Colour evidence
+alone is sometimes genuinely ambiguous; no amount of threshold tuning makes it
+always separable.
 
-### 1. Prompt SAM on more plants
+**Current defaults, verified clean:**
 
-Exemplar boxes are all submitted in **one forward pass**, so prompting with more
-of them costs almost nothing. The old caps (`EXEMPLAR_MAX_BOXES` 30,
-`EXEMPLAR_MIN_AREA_PX` 300) meant that in a dense frame only the largest ~30
-blobs ever became exemplars; a small plant unlike any of them had no reason to
-be returned. Now **60 boxes down to 200 px**.
+| Setting | Value | |
+|---|---|---|
+| `EXEMPLAR_MAX_BOXES` / `EXEMPLAR_MIN_AREA_PX` | 30 / 300 | reverted to the original, verified-clean values |
+| `RECOVER_MISSED_PLANTS` | **False** | off by default |
+| `EXEMPLAR_MIN_VEG_SCORE` | 0.85 | kept as extra protection on the (now smaller) exemplar set |
+| `RECOVER_MIN_VEG_SCORE` | 0.9 | kept for when recovery is re-enabled |
 
-### 2. The backstop (`RECOVER_MISSED_PLANTS`)
+### Why more exemplars hurt rather than helped
+
+Exemplar boxes are submitted in **one forward pass**, so more of them is cheap
+in *compute* — but SAM 3 concept segmentation is asked to find *every instance
+of the same concept* as the exemplars, **across the whole frame**. A single
+low-quality exemplar (gravel, lichen, a shadowed pit that only marginally
+passed the vegetation prior) does not just risk one bad box — it can teach SAM
+a bad concept and cause it to propose several more false positives elsewhere in
+the frame that resemble it. Lowering the area floor and raising the box count
+made this measurably more likely, not less.
+
+### The backstop (`recover_missed_plants()`, off by default)
 
 In a weed-only scene `vegetation == weed` — the same prior the onion path
-already relies on. So any substantial connected vegetation component that **no
-instance claims** is recovered and becomes an instance in its own right.
+relies on — so any substantial connected vegetation component that **no
+instance claims** can be recovered as an instance in its own right. The
+recovered mask goes through *exactly the same* boundary refinement and
+touching-plant splitting as a detected one, indistinguishable in the output
+except for its recorded `source`.
 
-The recovered mask is then put through *exactly the same* boundary refinement
-and touching-plant splitting as a detected one, so it is indistinguishable in
-the output except for its recorded `source`.
+Two guards exist so it does not fabricate duplicates or trust weak evidence:
 
-The one thing this must not do is fabricate duplicates. A leaf tip poking past
-the edge of an otherwise-good detection is also unclaimed vegetation, and is
-easily larger than `MIN_INSTANCE_AREA_PX`. The guard is therefore not the size
-of the residual but **how much of the whole vegetation blob it belongs to is
-already claimed** (`RECOVER_MAX_CLAIMED_FRAC`, default 0.30). A clipped leaf tip
-sits on a blob that is ~85% claimed and is rejected; a plant SAM never saw sits
-on a blob that is 0% claimed and is recovered. `RECOVER_COVERED_DILATE_PX`
-absorbs the few pixels of disagreement between a SAM edge and the vegetation
-prior so a thin rim never registers as a plant.
+- **`RECOVER_MAX_CLAIMED_FRAC`** (0.30): not the size of the unclaimed residual
+  but how much of the **whole vegetation blob** it belongs to is already
+  claimed. A leaf tip clipped off a good detection sits on a blob ~85%
+  claimed and is rejected; a plant SAM never saw sits on a blob 0% claimed and
+  is recovered.
+- **`RECOVER_MIN_VEG_SCORE`** (0.9): the component's **mean** continuous
+  `vegetation_score()` must clear the floor, not merely cross the binary
+  threshold once. Measured real plant colour, even degraded (shade, a pale
+  cotyledon, a grazing-angle leaf edge), scores ≥ 0.985 - comfortable margin.
+  Measured on a synthetic adversarial gravel/lichen/shadow texture: some
+  components still scored up to 0.971, which is why this remains off by
+  default rather than trusted as a solved problem.
 
-### 3. Confidence, not just area (`EXEMPLAR_MIN_VEG_SCORE` / `RECOVER_MIN_VEG_SCORE`)
+This has **no SAM corroboration at all** — unlike an exemplar, which SAM still
+gets to independently confirm or reject, a recovered instance is accepted
+purely on the vegetation prior's say-so. That is what makes it the most
+exposed mechanism in this pipeline, and why it needs to be turned on
+deliberately, per session, rather than trusted as a default.
 
-Both mechanisms above only had an **area** floor, and area cannot tell a small
-real plant from a same-sized patch of noise. In the field this showed up as
-dozens of phantom point detections scattered across bare, pale, mottled
-ground - because the vegetation prior is a plain colour index (ExG +
-saturation + green dominance), and colour indices are a documented weak spot
-against green-tinted mineral flecks, lichen, and shadow that reads
-cooler/greener than sunlit ground. That failure mode is invisible to an area
-check: the false-positive component clears `MIN_INSTANCE_AREA_PX` exactly
-like a real seedling would.
-
-The fix asks a different question - not "how big" but "how sure" - using
-`vegetation_score()`, the same continuous signal boundary refinement already
-uses, instead of the binary yes/no prior. A component must clear a **mean
-score**, not merely cross the threshold once:
-
-- `EXEMPLAR_MIN_VEG_SCORE` (default **0.85**) gates which vegetation
-  components become SAM exemplars. This matters beyond just that one box: SAM
-  3 concept segmentation is asked to find *every instance of the same concept*
-  across the whole frame, so a single noise exemplar can seed a search for
-  more false positives elsewhere, not just fail at its own location. SAM's own
-  confirmation is still the primary defence here - this only keeps the worst
-  candidates out of the prompt set.
-- `RECOVER_MIN_VEG_SCORE` (default **0.9**, stricter) gates
-  `recover_missed_plants()`, which has **no SAM corroboration at all** and is
-  therefore the most exposed path.
-
-Measured on real plant colour, even degraded (partial shade, a pale young
-cotyledon, a leaf edge at a grazing angle): mean score **≥ 0.985**, comfortably
-clear of both floors. Measured on a synthetic adversarial gravel/lichen/shadow
-texture built specifically to probe this: components scored up to 0.971 - so no
-threshold cleanly separates the worst case, color evidence alone is
-fundamentally ambiguous some of the time - but the defaults still cut that
-texture's exemplar candidates by ~40% and recovered instances by ~62%, at zero
-measured cost to a properly-sized real plant in the same tests.
-
-If phantom detections persist on a particular field's substrate even after
-this, `RECOVER_MISSED_PLANTS: False` remains the full escape hatch, trading
-recall back for precision.
+**When to re-enable it**: if a specific session's previews show real,
+confirmed under-detection (not just an assumption) and spot-checking a run
+with `RECOVER_MISSED_PLANTS: True` shows clean recovered instances (no white
+halos on bare ground), it's a reasonable per-session choice. Don't leave it on
+by default across unseen substrates.
 
 ### Seeing it work
 
-Every session now prints a recall line:
+Every session prints a recall line:
 
 ```
-      recall: 98.7% of vegetation inside an exported instance | 1642 from SAM + 152 recovered
+      recall: 91.2% of vegetation inside an exported instance | 1642 from SAM + 0 recovered
 ```
 
-Watch **that** number rather than the instance count — a run can look productive
-while missing half the plants. In the previews, a recovered instance is drawn
-with a **white halo** around its class-coloured outline, so you can judge from
-the images alone whether the backstop is earning its keep. `instances.csv` has a
-`source` column (`sam` / `vegetation`) so the two populations stay separable
-when auditing or weighting the data.
-
-If this percentage drops on a noisy/textured session after upgrading, that is
-expected and is the metric becoming *more honest*, not new missed plants: it was
-previously possible for the backstop to recover a false-positive vegetation
-component and then get credited for "covering" the very noise it fabricated.
-With the confidence gate, that noise is excluded from both the numerator and
-the count of recovered instances - the percentage now reflects real plant
-coverage, not the pipeline grading its own hallucinations.
-
-Set `RECOVER_MISSED_PLANTS: False` to turn it off (for a pure SAM ablation).
+With recovery off by default, `recovered` will normally read 0 — that's
+expected, not a bug. Watch the SAM-only recall percentage instead: a low number
+on a session that visibly has plenty of plants in it is the signal to go look
+at previews and consider enabling the backstop *for that session specifically*.
+If you do enable it, a recovered instance is drawn with a **white halo** around
+its class-coloured outline, so you can judge directly from the images whether
+it's finding real plants or fabricating them. `instances.csv` always carries a
+`source` column (`sam` / `vegetation`) so the two populations stay separable.
 
 ## Boundary quality
 
@@ -302,7 +294,7 @@ and finishes with a recall readout:
 ```
   [weed1_20260108_143022] 400 frames | 5612 weed instances | 2 flagged | 0 with no instances
       provisional classes: grass_weed=812 weed_cluster=61 other_weed=4739
-      recall: 98.7% of vegetation inside an exported instance | 5160 from SAM + 452 recovered
+      recall: 91.4% of vegetation inside an exported instance | 5612 from SAM + 0 recovered
       LEP: median confidence 0.74 | median channel agreement 3.1px | visible=5401 ...
 ```
 

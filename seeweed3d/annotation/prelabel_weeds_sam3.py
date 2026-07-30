@@ -111,24 +111,20 @@ CONFIG = {
     "SAM_PROMPT_MODE": "auto_exemplar",     # auto_exemplar | text | manual
     "SAM_TEXT_PROMPTS": ["plant", "weed", "green plant"],
     "EXEMPLARS": {},                         # {session_id: [[x1,y1,x2,y2], ...]}
-    # Exemplars are all submitted in ONE forward pass, so prompting with more of
-    # them costs almost nothing while directly raising recall: a plant that never
-    # becomes an exemplar and is not similar to one that did is a plant SAM has
-    # no reason to return. Dense field frames hold far more than 30 plants, so
-    # the old cap silently prompted on only the largest few.
-    #
-    # But more exemplars is not a free lunch: SAM 3 is asked to find every
-    # instance of "the same concept" as the exemplars, across the WHOLE frame -
+    # EXEMPLAR_MIN_AREA_PX / EXEMPLAR_MAX_BOXES were briefly loosened to 200/60
+    # to raise recall (more exemplars, smaller floor - exemplars are all
+    # submitted in one forward pass, so more of them is cheap in compute). That
+    # did not hold up: SAM 3 concept segmentation is asked to find every
+    # instance of "the same concept" as the exemplars, across the WHOLE frame,
     # so a single low-quality exemplar (gravel, lichen, a shadowed pit that
     # only marginally passes the vegetation prior) does not just risk one bad
-    # box, it can teach SAM a bad concept and cause it to propose several more
-    # false positives elsewhere in the frame that resemble it. EXEMPLAR_MIN_AREA_PX
-    # alone cannot filter this - a faint real seedling and a same-sized fleck of
-    # noise can be the same size - so EXEMPLAR_MIN_VEG_SCORE additionally requires
-    # the component's mean vegetation_score() (continuous, not the binary cutoff)
-    # to be comfortably past the threshold, not just barely across it.
-    "EXEMPLAR_MIN_AREA_PX": 200,
-    "EXEMPLAR_MAX_BOXES": 60,
+    # box - it can teach SAM a bad concept and cause it to propose many more
+    # false positives elsewhere in the frame that resemble it. Real runs on a
+    # pale, textured field surface showed dozens of phantom detections on bare
+    # ground from exactly this. Reverted to the original, verified-clean
+    # values: 30 exemplars, 300px floor.
+    "EXEMPLAR_MIN_AREA_PX": 300,
+    "EXEMPLAR_MAX_BOXES": 30,
     "EXEMPLAR_PAD_PX": 8,
     # Measured: real plant colour, even degraded (partial shade, pale young
     # cotyledon, a grazing-angle leaf edge), scores >= 0.985. A synthetic
@@ -156,35 +152,28 @@ CONFIG = {
     "INSTANCE_VEG_OVERLAP_MIN": 0.35,  # instance must sit on vegetation
     "NMS_IOU": 0.65,                 # de-duplicate overlapping SAM instances
 
-    # -- Recall backstop -------------------------------------------------------
-    # A weed SAM misses is dropped silently and never reaches the annotator, so
-    # it never enters the training target - the worst failure mode in this
-    # pipeline. In a weed-only scene every vegetation blob IS a plant, so any
-    # substantial unclaimed vegetation component is recovered as an instance.
-    # See recover_missed_plants().
-    #
-    # This path has NO corroboration from SAM at all - unlike an exemplar,
-    # which SAM still gets to independently confirm or reject, a recovered
-    # instance is accepted purely on the vegetation prior's say-so. That prior
-    # is a plain colour index (ExG + saturation + green dominance), and colour
-    # indices are well known to false-positive on green-tinted mineral flecks,
-    # lichen, and shadow that reads cooler/greener than sunlit ground - measured
-    # on a synthetic pale gravel texture built specifically to probe this,
-    # dozens of components cleared the area floor with no plant present at all.
-    # RECOVER_MIN_VEG_SCORE requires a component's mean vegetation_score() to be
-    # confidently past the threshold, not merely across it, before it is trusted
-    # with no second opinion. Measured real plant colour (even degraded: partial
-    # shade, pale cotyledon, grazing angle) scores >= 0.985, so 0.9 keeps a real
-    # margin below that floor while cutting the adversarial texture's recovered
-    # count by 62% (measured). This reduces but does not eliminate the risk - a
-    # colour-only signal fundamentally cannot always tell "green organic matter"
-    # from "green-tinted mineral" - so RECOVER_MISSED_PLANTS remains a clean
-    # escape hatch to trade recall back for full precision on a substrate where
-    # this keeps firing even after tightening.
-    "RECOVER_MISSED_PLANTS": True,
+    # -- Recall backstop (OFF by default - see below) --------------------------
+    # recover_missed_plants() turns unclaimed vegetation into extra instances
+    # with NO corroboration from SAM at all - unlike an exemplar, which SAM
+    # still gets to independently confirm or reject, a recovered instance is
+    # accepted purely on the vegetation prior's say-so. That prior is a plain
+    # colour index (ExG + saturation + green dominance), and colour indices are
+    # well known to false-positive on green-tinted mineral flecks, lichen, and
+    # shadow reading cooler/greener than sunlit ground. Two rounds of
+    # tightening this (RECOVER_MAX_CLAIMED_FRAC, then RECOVER_MIN_VEG_SCORE
+    # confidence gating) reduced but never eliminated phantom detections on
+    # real field imagery with a pale, textured surface - a colour-only signal
+    # fundamentally cannot always tell "green organic matter" from
+    # "green-tinted mineral". Verified-clean runs (matching PR #11, before this
+    # backstop existed) had it off, so it now defaults to False: a missed plant
+    # is a worse failure than a phantom one, but a dataset full of phantom
+    # detections is not trainable at all. Set True to re-enable if a session
+    # has real, confirmed under-detection and the confidence gates below are
+    # enough to keep it clean for that session's substrate.
+    "RECOVER_MISSED_PLANTS": False,
     "RECOVER_COVERED_DILATE_PX": 3,   # tolerance between SAM edge and veg prior
     "RECOVER_MAX_CLAIMED_FRAC": 0.30,  # blob already this claimed -> not a new plant
-    "RECOVER_MIN_VEG_SCORE": 0.9,
+    "RECOVER_MIN_VEG_SCORE": 0.9,      # mean vegetation_score() required to trust it
 
     # -- Morphology heuristic --------------------------------------------------
     # WHAT SHAPE CAN AND CANNOT TELL YOU:
