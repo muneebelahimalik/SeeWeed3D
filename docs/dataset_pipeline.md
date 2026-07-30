@@ -215,9 +215,50 @@ looks "different enough" pairwise, so a pairwise rule with a 20 mm threshold
 drops *nothing*. Accumulating from the last kept frame keeps one frame per
 `MIN_TRAVEL_MM` of ground actually covered — which is the property you want.
 
-`MIN_TRAVEL_MM` must be **calibrated to your mount height**: it should be a
-meaningful fraction of the ground footprint of one frame. Run with `DRY_RUN`
-first and read the before → after counts.
+### Choosing the threshold
+
+The before → after count alone cannot tell you whether a threshold is right, so
+a dry run also prints a **sweep** — every candidate threshold evaluated against
+your own footage. The measurement is done once, so the extra rows are nearly
+free:
+
+```
+        threshold sweep (current = 0.15):
+          value    kept   dropped   overlap between kept frames
+          0.05      120         0      95% of each frame re-annotated
+          0.1        60        60      90% of each frame re-annotated
+          0.15       42        78      85% of each frame re-annotated <-- current
+          0.25       30        90      75% of each frame re-annotated
+          0.4        20       100      60% of each frame re-annotated
+          0.6        14       106      40% of each frame re-annotated
+          1.0         9       111       0% of each frame re-annotated
+```
+
+**Overlap is the column to choose on.** `MIN_SHIFT_FRAC` is how far the camera
+travels between kept frames as a fraction of frame width, so `1 - value` is how
+much of each kept frame shows ground you already annotated in the previous one.
+At `0.15`, 85% of every frame is a re-annotation of the frame before it.
+
+There is no universally correct value — it is a trade-off you own:
+
+| | Low value (0.05–0.15) | High value (0.5–1.0) |
+|---|---|---|
+| Frames | many | few |
+| Annotation cost | high — the same plant labelled repeatedly | low |
+| Ground covered | same | same |
+| Useful when | you want many views of each plant | you want maximum distinct ground per labelling hour |
+
+Since the point of this stage is to build a **manually corrected** training set,
+annotation cost usually dominates, which argues for a higher value than the
+`0.15` default. Start around `0.4–0.6` and check the previews.
+
+A flat drop histogram is **not** a sign the threshold is wrong here — it just
+means you moved at a steady speed, so the threshold alone sets the sampling
+rate. Bunched drops mean a genuinely slow patch was thinned.
+
+`MIN_TRAVEL_MM` (pose mode) must be **calibrated to your mount height**: it
+should be a meaningful fraction of the ground footprint of one frame. Its sweep
+is `SWEEP_TRAVEL_MM`.
 
 ### Dropping specific bad frames
 

@@ -271,3 +271,55 @@ def test_diagnose_pose_distinguishes_missing_from_untrusted():
     good = cp.diagnose_pose(
         [{"tx_mm": "1", "ty_mm": "0", "tz_mm": "0", "pose_state": "OK"}], states)
     assert "usable on all 1" in good
+
+
+def test_sweep_is_monotonic_and_matches_the_real_selection():
+    """The sweep must agree exactly with what applying that threshold would
+    actually do - otherwise it is a table you cannot act on."""
+    # Straight-line travel, 1 unit per frame.
+    positions = [np.array([float(i), 0.0]) for i in range(21)]
+    forced = [False] * 21
+
+    sweep = cp.sweep_thresholds(positions, forced, [1, 2, 5, 10], "frac")
+    assert [s["kept"] for s in sweep] == [21, 11, 5, 3]     # strictly decreasing
+
+    for s in sweep:
+        real = cp.select_keeps(positions, forced, s["threshold"])
+        assert len(real) == s["kept"]
+        assert s["kept"] + s["dropped"] == len(positions)
+
+
+def test_sweep_reports_overlap_only_for_image_mode():
+    """Overlap is 1 - shift as a fraction of frame width; it is meaningless for
+    a pose threshold in millimetres, so it must not be invented there."""
+    positions = [np.array([float(i), 0.0]) for i in range(10)]
+    forced = [False] * 10
+
+    frac = cp.sweep_thresholds(positions, forced, [0.25], "frac")
+    assert abs(frac[0]["overlap_pct"] - 75.0) < 1e-6
+
+    mm = cp.sweep_thresholds(positions, forced, [100], "mm")
+    assert "overlap_pct" not in mm[0]
+
+
+def test_unmeasurable_frames_are_never_dropped():
+    """A frame whose shift could not be measured must be kept, at any
+    threshold - a measurement failure is not evidence of redundancy."""
+    positions = [np.zeros(2) for _ in range(5)]      # no travel at all
+    forced = [False, False, True, False, False]      # frame 2 unmeasurable
+    keep = cp.select_keeps(positions, forced, 999.0)
+    assert keep == [0, 2]                            # anchor + the forced one
+
+
+def test_pose_mode_used_only_when_every_frame_has_one(tmp_path):
+    """Mixing millimetres and frame-widths inside one session would make the
+    threshold change meaning partway through, so a single missing pose must
+    demote the whole session to image mode rather than silently mixing."""
+    sdir = _session(tmp_path, n=6, travel_mm=50.0)
+    rows, _ = cp.read_pool(sdir)
+    _, _, signal, unit = cp.frame_positions(rows, sdir / "rgb", cp.CONFIG)
+    assert signal == "pose" and unit == "mm"
+
+    rows[3]["pose_state"] = "SEARCHING"               # one bad frame
+    _, _, signal, unit = cp.frame_positions(rows, sdir / "rgb", cp.CONFIG)
+    assert signal == "image" and unit == "frac"
