@@ -69,7 +69,7 @@ from common.vegetation import white_balance as _white_balance  # noqa: E402
 DATASET_ROOT   = r"E:\Dataset_Vidalia"
 SAM_VERSION    = "sam3"        # "sam3" | "sam3.1"
 # e.g. r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt". None => auto-download.
-SAM_CHECKPOINT = "E:\Models\sam3.pt"
+SAM_CHECKPOINT = r"E:\Models\sam3.pt"
 
 # =============================================================================
 # CONFIG - advanced tuning below; defaults are sensible for onion-only scenes
@@ -425,11 +425,16 @@ def link_or_copy(src, dst):
 # Driver
 # --------------------------------------------------------------------------- #
 def pool_frames(session_dir):
+    """Pooled frame filenames, minus any curated out by extraction/curate_pool.py.
+
+    A missing `dropped` column means the pool predates curation, which reads as
+    "keep everything" - so an old session still behaves exactly as before."""
     pool_csv = session_dir / "meta" / "pool.csv"
     if not pool_csv.exists():
         return []
     return [r["filename"] for r in csv.DictReader(open(pool_csv, encoding="utf-8"))
-            if r.get("filename")]
+            if r.get("filename")
+            and str(r.get("dropped", "0")).strip() not in ("1", "true", "True")]
 
 
 def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):

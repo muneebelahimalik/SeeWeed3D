@@ -16,6 +16,7 @@ Perception, localization, tracking, and evaluation are the next stages.
 seeweed3d/
   capture/      zed_capture.py            ZED field capture (v2: SVO + depth + confidence + logs)
   extraction/   extract_sessions.py       recordings -> indexed, QC'd frame pool (v1 & v2)
+                curate_pool.py             drop redundant/bad frames (manifest-only, reversible)
                 select_batches.py          pool -> CVAT-ready annotation batches (holdout-safe)
   annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
                 prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
@@ -44,10 +45,13 @@ python seeweed3d/capture/zed_capture.py
 # 2. Extract recordings into an indexed, QC'd dataset
 python seeweed3d/extraction/extract_sessions.py
 
-# 3. Select CVAT-ready annotation batches (whole-session holdout enforced)
+# 3. (optional) Drop overlapping/bad frames - edits pool.csv only, never files
+python seeweed3d/extraction/curate_pool.py
+
+# 4. Select CVAT-ready annotation batches (whole-session holdout enforced)
 python seeweed3d/extraction/select_batches.py
 
-# 4. (onion-only scenes) Prelabel onions with SAM 3, then verify in CVAT
+# 5. (onion-only scenes) Prelabel onions with SAM 3, then verify in CVAT
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 

@@ -141,10 +141,17 @@ def fnum(row, key, default=None):
 
 
 def load_pool(root):
+    """Every pooled frame across sessions, minus any curated out by
+    extraction/curate_pool.py.
+
+    A missing `dropped` column means the pool predates curation, which reads as
+    "keep everything" - so an old dataset still behaves exactly as before."""
     rows = []
     for pool_csv in sorted((root / "sessions").glob("*/meta/pool.csv")):
         sid = pool_csv.parts[-3]
         for r in csv.DictReader(open(pool_csv, encoding="utf-8")):
+            if str(r.get("dropped", "0")).strip() in ("1", "true", "True"):
+                continue
             r["session_id"] = r.get("session_id") or sid
             r["_rgb"] = root / "sessions" / sid / "rgb" / r["filename"]
             r["_depth"] = root / "sessions" / sid / "depth" / r["filename"]
