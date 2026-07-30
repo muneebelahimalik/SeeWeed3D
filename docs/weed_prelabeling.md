@@ -183,8 +183,32 @@ it's finding real plants or fabricating them. `instances.csv` always carries a
 
 ## Boundary quality
 
+> **All of the post-processing in this section is OFF by default.** A field
+> comparison judged the PR #11/#12 masks — plain SAM output, no post-processing
+> — better than the processed ones, so that is the shipped default. The code is
+> intact, tested, and each piece is one config flag away; this section explains
+> what each does so you can re-enable them individually and judge for yourself.
+>
+> The decisive one is **splitting** (§3): it is the only thing in the pipeline
+> that can turn one SAM mask into several instances, and on real plants a leaf
+> reaching away from the crown produces a second distance-transform peak, which
+> was enough to cut one weed into two or three separate annotations. A false
+> split is worse than a missed one — an over-segmented plant teaches the model
+> that half a rosette is a whole instance, and the annotator has to merge shapes
+> by hand instead of just drawing one boundary. With it off, intergrown plants
+> stay one blob and become `weed_cluster`, which is the honest label for tissue
+> that genuinely cannot be separated.
+
+| Feature | Flag | Default | Enable with |
+|---|---|---|---|
+| Edge snapping | `BOUNDARY_REFINE_BAND_PX` | `0` | `3` |
+| Anti-aliasing | `BOUNDARY_SMOOTH_SIGMA_PX` | `0.0` | `0.7` |
+| Splitting touching plants | `SPLIT_TOUCHING_INSTANCES` | `False` | `True` |
+| Multi-part polygons | `POLY_ALL_PARTS` | `False` | `True` |
+| Multi-evidence LEP | `USE_FUSED_LEP` | `False` | `True` |
+
 Four things determine how good the exported boundaries are as a *training
-target*, and all four are now handled explicitly.
+target*, and all four are handled explicitly (when enabled).
 
 ### 1. Edge snapping (`BOUNDARY_REFINE_BAND_PX`)
 
@@ -246,10 +270,15 @@ for what genuinely cannot be separated.
 
 ### 4. Polygon fidelity
 
-- **All parts are exported.** Previously only the largest contour survived, so
-  any tissue separated by an occluding leaf was silently dropped from the
-  training target. COCO's `segmentation` is a list precisely so a multi-part
-  instance can be represented.
+- **`POLY_ALL_PARTS` (default off) exports every part**, not just the largest
+  contour. This does *not* create extra instances — a multi-part instance is
+  still one COCO annotation — but it draws one outline per part in the preview,
+  which can read as fragmentation even though it isn't. PR #12 exported the
+  largest contour only, so that is the default.
+  **The trade-off is real:** largest-only *silently drops* tissue whenever a
+  leaf is separated from the crown by an occluding leaf, so that plant tissue
+  enters the training target as background. If previews look clean but plants
+  have visibly missing leaves, turn this on.
 - **Tolerance scales with instance size** (`POLY_APPROX_EPS_FRAC`, clamped by
   `_MIN`/`_MAX`). A fixed tolerance erases real shape on a cotyledon seedling
   and leaves thousands of near-duplicate vertices on a large rosette; scaling

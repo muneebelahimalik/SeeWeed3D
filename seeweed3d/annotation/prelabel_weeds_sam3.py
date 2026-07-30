@@ -205,7 +205,18 @@ CONFIG = {
     # isotropy, young-tissue chromatics, canopy height and medial-axis
     # interiority. Set USE_FUSED_LEP False to fall back to the plain
     # distance-transform peak.
-    "USE_FUSED_LEP": True,
+    #
+    # OFF by default, matching the PR #11/#12 build whose output was judged
+    # best in the field - including its LEP. The plain DT peak lands at the
+    # deepest interior point of the mask, which for a rosette IS the crown, and
+    # it has no dependence on boundary detail. The fused estimator's extra
+    # evidence channels (especially the skeleton one) are sensitive to exactly
+    # the boundary noise that the disabled post-processing below used to clean
+    # up, so running it on unrefined masks is not the configuration it was
+    # tuned for. It is also by far the most expensive per-instance step, so
+    # leaving it off makes a full pass dramatically faster. Turn it back on
+    # when the LEP itself is the object of study.
+    "USE_FUSED_LEP": False,
     "USE_DEPTH_FOR_LEP": True,    # enables the canopy-height channel when depth exists
     "LEP_CROP_PAD_PX": 10,
 
@@ -216,33 +227,43 @@ CONFIG = {
     # -- Frame-level safety ----------------------------------------------------
     "MAX_MASK_FRACTION": 0.5,        # total veg > this = colour-cast/glare failure
 
-    # -- Boundary quality ------------------------------------------------------
-    # Snap each instance edge onto the image's own plant/soil evidence. SAM
-    # gives the structure; the vegetation score decides exactly where the leaf
-    # margin falls, within a narrow band. Set BAND to 0 to disable.
-    "BOUNDARY_REFINE_BAND_PX": 3,
+    # #########################################################################
+    # ##  MASK POST-PROCESSING - ALL OFF, matching the PR #11/#12 build      ##
+    # #########################################################################
+    # Everything in this block was added after #12 and is now disabled by
+    # default, because #12's masks were judged better in the field.
+    #
+    # The decisive one is SPLIT_TOUCHING_INSTANCES. It is the ONLY thing in the
+    # pipeline that can turn one SAM mask into several instances, so it is the
+    # direct cause of a single weed appearing as two or three separate
+    # annotations with their own outlines, labels and LEP dots. It was built
+    # for genuinely intergrown rosettes, but on real plants a leaf reaching
+    # away from the crown produces a second distance-transform peak, and that
+    # is enough to trigger a split of one plant. A false split is worse than a
+    # missed one here: an over-segmented plant teaches the model that half a
+    # rosette is a whole instance, and an annotator has to merge shapes by hand
+    # rather than just drawing one boundary. With this off, intergrown plants
+    # stay one blob and are labelled `weed_cluster`, which is the honest answer
+    # for tissue that genuinely cannot be separated.
+    #
+    # Each entry is independent - re-enable them one at a time if you want to
+    # re-evaluate, rather than flipping the whole block back at once.
+
+    # Edge snapping: re-decide a narrow band around each boundary using the
+    # continuous vegetation score. Set BAND to a small integer (3) to enable.
+    "BOUNDARY_REFINE_BAND_PX": 0,
     "BOUNDARY_REFINE_VEG_MIN": 0.5,   # plant likelihood needed to keep a band pixel
     "VEG_SCORE_SOFTNESS": 0.04,       # ExG ramp width for the soft score
 
-    # Blur-and-rethreshold anti-aliasing, applied after refine_boundary. The
-    # pixel-grid threshold decision above still leaves single-pixel staircase
-    # jaggies that a real leaf margin does not have - and those jaggies feed
-    # straight into the skeleton-based LEP evidence (perception/lep.py), where
-    # every notch creates a short spurious branch and a spurious junction.
-    # Sigma is sub-pixel deliberately: large enough to remove 1px noise, far
-    # too small to erode a grass blade's elongation or a cotyledon's outline.
-    # A part of the plant that would be severed by smoothing is protected by
-    # smooth_boundary()'s own area-retention check, which falls back to the
-    # unsmoothed mask rather than lose tissue. Set to 0 to disable.
-    "BOUNDARY_SMOOTH_SIGMA_PX": 0.7,
+    # Anti-aliasing: blur-and-rethreshold to remove single-pixel staircase
+    # noise. Mattered mainly as an input to the skeleton-based fused LEP, which
+    # is also off. Set to ~0.7 to enable.
+    "BOUNDARY_SMOOTH_SIGMA_PX": 0.0,
     "BOUNDARY_SMOOTH_MIN_RETAINED_FRAC": 0.85,
 
-    # -- Splitting touching plants ---------------------------------------------
-    # Two rosettes growing into each other form one connected blob, so SAM
-    # returns them as a single instance. Marker-controlled watershed seeded on
-    # the detected GROWTH POINTS cuts along the neck between the canopies.
-    # Falls back to the unsplit mask whenever the split is not clean.
-    "SPLIT_TOUCHING_INSTANCES": True,
+    # Splitting touching plants (see the note above - this is the one that
+    # fragments single weeds). Set True to enable.
+    "SPLIT_TOUCHING_INSTANCES": False,
     "SPLIT_MIN_PEAKS": 2,             # need at least this many growth points
     "SPLIT_SEED_RADIUS_FRAC": 0.55,   # seed disc as a fraction of inscribed radius
     "SPLIT_MIN_PART_AREA_PX": 250,    # a part below this is not a plant
@@ -256,6 +277,18 @@ CONFIG = {
     "POLY_APPROX_EPS_MAX": 1.5,
     "POLY_MIN_PART_AREA_PX": 60,      # keep detached tissue above this
     "POLY_APPROX_EPS": 1.5,           # legacy, used only by mask_polygon()
+
+    # Export every disconnected part of an instance, not just its largest
+    # contour. This does NOT create extra instances - a multi-part instance is
+    # still one COCO annotation - but it does draw one outline per part in the
+    # preview, which can read as fragmentation even though it is not.
+    # #12 exported only the largest contour, so that is the default here.
+    #
+    # The trade-off is real and worth knowing: largest-only SILENTLY DROPS
+    # tissue whenever a leaf is separated from the crown by an occluding leaf,
+    # so that tissue enters the training target as background. If your previews
+    # look clean but plants have visibly missing leaves, set this True.
+    "POLY_ALL_PARTS": False,
 
     # -- Run control -----------------------------------------------------------
     "LIMIT_PER_SESSION": 20,         # start small; set None for the full pool
@@ -774,21 +807,27 @@ def polygon_epsilon(area_px, cfg):
 
 
 def mask_polygons(mask, cfg):
-    """ALL external contours of an instance as COCO polygons.
+    """External contours of an instance as COCO polygons.
 
-    Exporting only the largest contour silently discarded any part of a plant
-    separated by an occluding leaf or a gap in the mask - real tissue, dropped
-    from the training target. COCO's segmentation field is a list precisely so a
-    multi-part instance can be represented, so every part above a small area
-    floor is kept."""
+    With POLY_ALL_PARTS, every part above a small area floor is kept: COCO's
+    segmentation field is a list precisely so a multi-part instance can be
+    represented, and exporting only the largest contour silently discards any
+    tissue separated by an occluding leaf - real plant, dropped from the
+    training target as background.
+
+    Without it (the default, matching PR #11/#12) only the largest contour is
+    exported. That loses the detached tissue, but it also means one instance
+    draws exactly one outline in the preview, so nothing reads as fragmented."""
     cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
                                cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return []
     eps = polygon_epsilon(int(mask.sum()), cfg)
+    if not cfg.get("POLY_ALL_PARTS", True):
+        cnts = [max(cnts, key=cv2.contourArea)]
     polys = []
     for c in cnts:
-        if cv2.contourArea(c) < cfg["POLY_MIN_PART_AREA_PX"]:
+        if len(cnts) > 1 and cv2.contourArea(c) < cfg["POLY_MIN_PART_AREA_PX"]:
             continue
         a = cv2.approxPolyDP(c, eps, True)
         if len(a) >= 3:
