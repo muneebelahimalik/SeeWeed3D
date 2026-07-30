@@ -376,10 +376,16 @@ def test_plant_missed_by_sam_is_recovered():
     """The failure this guards against: SAM returns one of two plants, so the
     other is silently absent from the export and the annotator never sees it -
     teaching a model that such plants do not exist. In a weed-only scene every
-    vegetation blob IS a plant, so the unclaimed one must come back."""
-    bgr, a, b = _scene_with_two_rosettes()
+    vegetation blob IS a plant, so the unclaimed one must come back.
 
-    instances, _ = wd.analyze_frame(bgr, [a], wd.CONFIG)      # SAM found only `a`
+    RECOVER_MISSED_PLANTS defaults to False (repeated real-run false positives
+    outweighed this benefit - see the CONFIG comment), so this test enables it
+    explicitly: it is checking the mechanism works correctly, not asserting
+    it's on by default."""
+    bgr, a, b = _scene_with_two_rosettes()
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
+
+    instances, _ = wd.analyze_frame(bgr, [a], cfg)      # SAM found only `a`
     assert len(instances) == 2
 
     sources = sorted(i["source"] for i in instances)
@@ -400,6 +406,19 @@ def test_recovery_is_a_no_op_when_sam_finds_everything():
     assert all(i["source"] == "sam" for i in instances)
 
 
+def test_recovery_is_off_by_default():
+    """RECOVER_MISSED_PLANTS defaults to False: repeated real runs on a pale,
+    textured field surface showed phantom detections on bare ground, and no
+    amount of confidence-gate tightening fully eliminated it (colour evidence
+    alone is sometimes genuinely ambiguous). A missed plant is a worse failure
+    than a phantom one in principle, but a dataset full of phantom detections
+    is not trainable at all - so the safer default wins until it is turned
+    back on deliberately for a session where it's been checked to stay clean."""
+    bgr, a, _ = _scene_with_two_rosettes()
+    instances, _ = wd.analyze_frame(bgr, [a], wd.CONFIG)      # unmodified CONFIG
+    assert len(instances) == 1 and instances[0]["source"] == "sam"
+
+
 def test_recovery_can_be_disabled():
     bgr, a, _ = _scene_with_two_rosettes()
     cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=False)
@@ -411,7 +430,11 @@ def test_recovery_does_not_duplicate_an_already_detected_plant():
     """The backstop must not turn a leaf tip poking past the edge of a good
     detection into a second plant. That residual is large enough to pass the
     area test, so the guard has to be the fraction of the WHOLE vegetation blob
-    that is already claimed - here ~85%, far above RECOVER_MAX_CLAIMED_FRAC."""
+    that is already claimed - here ~85%, far above RECOVER_MAX_CLAIMED_FRAC.
+
+    Enabled explicitly (default is now False): this checks the claimed-fraction
+    guard itself, not the default, so it must not pass merely because recovery
+    is off."""
     size = 260
     plant = np.zeros((size, size), np.uint8)
     cv2.circle(plant, (110, 120), 30, 1, -1)                 # crown
@@ -423,7 +446,8 @@ def test_recovery_does_not_duplicate_an_already_detected_plant():
     residual_px = int((plant & ~clipped).sum())
     assert residual_px > wd.CONFIG["MIN_INSTANCE_AREA_PX"]    # area alone would pass
 
-    assert wd.recover_missed_plants(plant, [clipped], wd.CONFIG) == []
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
+    assert wd.recover_missed_plants(plant, [clipped], cfg) == []
 
 
 def test_recovery_returns_a_plant_no_instance_touches():
@@ -433,7 +457,8 @@ def test_recovery_returns_a_plant_no_instance_touches():
     detected = np.zeros((260, 260), bool)
     detected[30:90, 30:90] = True
 
-    out = wd.recover_missed_plants(veg, [detected], wd.CONFIG)
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
+    out = wd.recover_missed_plants(veg, [detected], cfg)
     assert len(out) == 1
     assert out[0][180, 180] and not out[0][50, 50]
 
@@ -449,7 +474,8 @@ def test_session_summary_reports_vegetation_coverage(tmp_path):
     with open(sess / "meta" / "pool.csv", "w", newline="") as f:
         f.write("filename\nf1.png\n")
 
-    st = wd.prelabel_session("sess", sess, tmp_path / "out", dict(wd.CONFIG),
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
+    st = wd.prelabel_session("sess", sess, tmp_path / "out", cfg,
                              predictor="STUB",
                              sam_fn=lambda p, im, cfg, ex=None: [a])
     assert st["instances"] == 2 and st["recovered"] == 1
@@ -559,9 +585,10 @@ def test_recover_missed_plants_rejects_low_confidence_residual():
     veg = np.zeros((size, size), bool)
     veg[50:90, 50:90] = True                              # 1600px, clears the floor
     marginal_score = np.full((size, size), 0.56, np.float32)   # barely past 0.5
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
 
-    legacy = wd.recover_missed_plants(veg, [], wd.CONFIG)              # score=None
-    gated = wd.recover_missed_plants(veg, [], wd.CONFIG, marginal_score)
+    legacy = wd.recover_missed_plants(veg, [], cfg)              # score=None
+    gated = wd.recover_missed_plants(veg, [], cfg, marginal_score)
     assert len(legacy) == 1              # old area-only behaviour is unchanged...
     assert len(gated) == 0               # ...but the confidence gate rejects it
 
@@ -571,7 +598,8 @@ def test_recover_missed_plants_keeps_high_confidence_residual():
     veg = np.zeros((size, size), bool)
     veg[50:90, 50:90] = True
     confident_score = np.full((size, size), 0.97, np.float32)
-    out = wd.recover_missed_plants(veg, [], wd.CONFIG, confident_score)
+    cfg = dict(wd.CONFIG, RECOVER_MISSED_PLANTS=True)
+    out = wd.recover_missed_plants(veg, [], cfg, confident_score)
     assert len(out) == 1
 
 
