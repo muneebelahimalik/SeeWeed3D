@@ -92,28 +92,53 @@ Research was done against current official documentation (July 2026).
 | OpenCV | 5.0.0 (container); repo requires `opencv-python` | — |
 | TensorRT / Jetson | Engines are architecture- and version-specific and must be built on the Orin; measure→optimise→remeasure | NVIDIA TensorRT docs |
 
-### Licensing — read before shipping
+### Stage A backends and licensing
 
-**Ultralytics is AGPL-3.0.** Per Ultralytics' own guidance:
+Stage A is **pluggable**. `perception/segmenter.py` exposes a plain
+`Detections` numpy structure, so nothing downstream knows or cares which model
+produced it — swapping backends is a one-file change.
 
-- AGPL-3.0 compliance requires publicly releasing the **complete corresponding
-  source of the entire derivative work** — this repository, the larger
-  application, and, where applicable, model weights.
-- **Proprietary or commercial use requires an Ultralytics Enterprise License**,
-  and Ultralytics states this applies even to internal company R&D unless the
-  whole project is open-sourced under AGPL-3.0.
+| Backend | Licence | Real-time? | Install | Use when |
+|---|---|---|---|---|
+| **`maskrcnn`** ← **default** | **BSD-3-Clause** | no | *(none — torchvision)* | **Prototyping now.** Zero new dependency, zero licence risk, fine-tunes well on a few hundred frames. |
+| `rfdetr` | **Apache-2.0** | **yes** (TensorRT FP16) | `python -m pip install rfdetr` | **The upgrade path.** Roboflow RF-DETR-Seg, nano..2XL, built for fine-tuning. Ships commercially with no obligation. |
+| `rtmdet` | Apache-2.0 | yes | `mmdet` + `mmengine` + `mmcv` | Long TensorRT track record, but the OpenMMLab stack is version-fragile. |
+| `ultralytics` | **AGPL-3.0 (!)** | yes | `python -m pip install ultralytics` | Research only, or an AGPL project. **Not installed by default.** |
 
-A commercial laser weeder is squarely in the Enterprise-License case. This is a
-**business decision, not a technical one**, and it needs resolving before Stage A
-weights ship in a product.
+**The default is deliberately permissive.** Nothing in the normal path can
+create a licensing obligation by accident. `build_segmenter()` prints a loud
+`[LICENCE WARNING]` if a copyleft backend is chosen — it warns rather than
+refuses, because AGPL is a legitimate choice for research, but it must never be
+silent: unlike a code defect, a licence obligation cannot be corrected after
+distribution.
 
-Mitigation already in place: Stage A sits behind `perception/segmenter.py`,
-which exposes a plain `Detections` numpy structure. Replacing Ultralytics with
-an Apache/BSD-licensed segmenter touches that one file. Stage B (`LEPRoiNet`) is
-original code in this repository and carries no such obligation.
+#### Why `maskrcnn` is the default rather than something faster
+
+For a prototype the binding constraint is *getting a correct pipeline trained on
+a few hundred frames*, not throughput. Mask R-CNN wins there: no new dependency
+(torchvision is already required for Stage B), a mature ONNX path, and
+well-understood fine-tuning behaviour on small datasets. It is **not real-time
+on a Jetson Orin**, and that is an accepted, reversible trade — `rfdetr` is a
+drop-in once the pipeline is proven.
+
+#### The Ultralytics position, for the record
+
+Per Ultralytics' own guidance: AGPL-3.0 compliance requires publicly releasing
+the **complete corresponding source of the entire derivative work** (this
+repository, the larger application, and where applicable model weights), and
+**proprietary or commercial use requires an Enterprise License** — which
+Ultralytics states applies even to internal company R&D unless the whole
+project is AGPL. A commercial laser weeder is squarely that case.
+
+Stage B (`LEPRoiNet`) is original code in this repository and carries no such
+obligation under any backend choice.
 
 Sources: [Ultralytics License](https://www.ultralytics.com/license),
-[AGPL-3.0 terms](https://www.ultralytics.com/legal/agpl-3-0-software-license).
+[AGPL-3.0 terms](https://www.ultralytics.com/legal/agpl-3-0-software-license),
+[RF-DETR (Apache-2.0)](https://github.com/roboflow/rf-detr),
+[RF-DETR Segmentation](https://blog.roboflow.com/rf-detr-segmentation/),
+[RTMDet / MMDetection (Apache-2.0)](https://github.com/open-mmlab/mmdetection),
+[torchvision (BSD-3-Clause)](https://github.com/pytorch/vision/blob/main/LICENSE).
 
 ---
 
@@ -307,10 +332,19 @@ python -m seeweed3d.training.prepare_dataset `
     --out            D:/Dataset_Vidalia/training/mixed_v1 `
     --holdout-test   vid3_20260108_103135
 
-# 2. Stage A
-python -m seeweed3d.training.train_seg `
-    --data D:/Dataset_Vidalia/training/mixed_v1/data.yaml `
-    --model yolo26n-seg.pt --epochs 100 --imgsz 1024 --device 0
+# 2. Stage A - DEFAULT permissive backend (torchvision Mask R-CNN, BSD-3).
+#    Trains from seg_manifest.json; no YOLO label tree, no AGPL dependency.
+python -m seeweed3d.training.train_seg_torchvision `
+    --dataset     D:/Dataset_Vidalia/training/mixed_v1 `
+    --images-root D:/Dataset_Vidalia/sessions `
+    --out         D:/Dataset_Vidalia/runs/seg_v1 `
+    --epochs 20 --batch 2 --device cuda
+
+#    Ultralytics/YOLO26 alternative - AGPL-3.0, see the backend table in §2.
+#    Only if you have accepted the licensing position.
+# python -m seeweed3d.training.train_seg `
+#     --data D:/Dataset_Vidalia/training/mixed_v1/data.yaml `
+#     --model yolo26n-seg.pt --epochs 100 --imgsz 1024 --device 0
 
 # 3. Stage B  (--input-mode selects the ablation)
 python -m seeweed3d.training.train_lep `

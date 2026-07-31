@@ -110,6 +110,33 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         "names:\n" + "".join(f"  {i}: {n}\n" for i, n in enumerate(CLASSES)))
     (out / "data.yaml").write_text(data_yaml, encoding="utf-8")
 
+    # -- Segmentation manifest (permissive backends) ------------------------
+    # The BSD-3 Mask R-CNN and Apache-2.0 RF-DETR paths train from this, so the
+    # permissive default needs no YOLO-format label tree. Derived from the same
+    # FrameRecords as the LEP manifest, so the two stages cannot disagree about
+    # what was annotated.
+    seg_frames = []
+    for f in frames:
+        split = where.get(f.session_id)
+        if split is None or not f.instances:
+            continue
+        seg_frames.append({
+            "session_id": f.session_id, "item_id": f.item_id,
+            "image_path": Path(f.image_path).as_posix(),
+            "width": f.width, "height": f.height, "split": split,
+            "instances": [{"class_name": i.class_name,
+                           "class_index": CLASSES.index(i.class_name),
+                           "polygons": [[round(float(v), 2) for v in p]
+                                        for p in i.polygons]}
+                          for i in f.instances],
+            "ignore_regions": [[round(float(v), 2) for v in p]
+                               for p in f.ignore_regions]})
+    (out / "seg_manifest.json").write_text(
+        json.dumps({"images_root": Path(images_root).as_posix(),
+                    "classes": list(CLASSES),
+                    "n_frames": len(seg_frames), "frames": seg_frames}, indent=2),
+        encoding="utf-8")
+
     # -- LEP manifest, split-aware -----------------------------------------
     rows = dmm.to_lep_manifest(frames)
     for r in rows:

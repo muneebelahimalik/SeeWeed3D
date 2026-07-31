@@ -23,7 +23,7 @@ seeweed3d/
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
                 regen_cvat_labels.py       refresh label schema files without re-running SAM 3
   perception/   lep.py                     multi-evidence LEP estimator (hand-engineered baseline)
-                segmenter.py               thin Ultralytics wrapper -> framework-free Detections
+                segmenter.py               pluggable seg backends -> framework-free Detections
                 pipeline.py                full RGB-D inference: seg -> batched LEP -> 3D -> safety
                 depth3d.py                 robust LEP depth sampling + 3D point with uncertainty
                 safety.py                  treatment-candidate decision (can only ABSTAIN)
@@ -37,7 +37,9 @@ seeweed3d/
                 losses.py                  multitask LEP losses
                 lep_dataset.py             torch Dataset driven by the LEP manifest
                 prepare_dataset.py         entry point: export -> trainable dataset
-                train_seg.py / train_lep.py  training entry points
+                seg_dataset.py             torchvision-format instance segmentation dataset
+                train_seg_torchvision.py   Stage A training, BSD-3 backend (default)
+                train_seg.py / train_lep.py  Ultralytics (AGPL, opt-in) / LEP training
   evaluation/   metrics.py                 segmentation, LEP, safety, 3D and latency metrics
   deploy/       export.py                  ONNX/TensorRT export with numerical parity checks
                 benchmark.py               latency benchmarking (records the device)
@@ -91,6 +93,7 @@ been trained.** Full design, commands and limitations:
 | `LEPRoiNet` + losses (forward, backward, CPU training step, ONNX export) | **implemented, unit-tested** (torch 2.13 CPU) |
 | Depth→3D localization, safety abstention, structured output, full pipeline | **implemented, unit-tested** with mocked segmentation + synthetic RGB-D |
 | Evaluation metrics (segmentation, LEP, safety, 3D, latency) | **implemented, unit-tested** on synthetic inputs |
+| Stage A backends: `maskrcnn` (BSD-3, **default**), `rfdetr` (Apache-2.0), `ultralytics` (AGPL, opt-in) | **implemented, unit-tested**; Mask R-CNN train step + inference verified on CPU |
 | Stage A / Stage B **trained weights** | **requires verified CVAT annotations** — none exist yet |
 | Any accuracy / mAP / LEP-error number | **not measured** — nothing is trained |
 | TensorRT engines, INT8 | **requires a GPU / Jetson Orin** — engines must be built on the device |

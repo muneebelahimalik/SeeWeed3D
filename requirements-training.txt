@@ -14,19 +14,16 @@
 # training stack in a SEPARATE environment rather than breaking SAM 3 - the two
 # stages never run in the same process.
 
-# -- Stage A: instance segmentation ------------------------------------------
-# LICENSING: Ultralytics is AGPL-3.0. Proprietary/commercial use (which a
-# commercial laser weeder is) requires an Ultralytics Enterprise Licence, and
-# AGPL otherwise obliges releasing the complete corresponding source of the
-# larger work. See docs/supervised_perception_baseline.md before shipping.
-# The dependency is isolated behind perception/segmenter.py so it can be
-# replaced without touching the rest of the system.
-ultralytics>=8.3.0
-
-# -- Stage B: LEPRoiNet -------------------------------------------------------
-# Install the CUDA build that matches your driver, e.g.
-#   python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+# =============================================================================
+# Stage A + Stage B core.  Everything below this line is permissively licensed
+# (BSD-3-Clause), so nothing here creates an obligation on a commercial product.
+# =============================================================================
+# torch/torchvision: install the CUDA build matching your driver, e.g.
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # On Jetson use NVIDIA's JetPack wheels, NOT PyPI.
+#
+# torchvision also provides the DEFAULT Stage A backend (Mask R-CNN), so the
+# permissive segmentation path needs no extra package at all.
 torch>=2.3
 torchvision>=0.18
 
@@ -47,3 +44,29 @@ onnx>=1.16
 onnxruntime>=1.18
 # tensorrt is NOT installable from PyPI for Jetson. It ships with JetPack.
 # Build engines ON the Orin: they are architecture- and version-specific.
+
+# =============================================================================
+# OPTIONAL Stage A backends.  Pick ONE; see the licence column before shipping.
+# =============================================================================
+#
+#   backend        licence        install
+#   ------------   ------------   ------------------------------------------
+#   maskrcnn       BSD-3-Clause   (none - torchvision, already above) DEFAULT
+#   rfdetr         Apache-2.0     python -m pip install rfdetr
+#   rtmdet         Apache-2.0     python -m pip install mmdet mmengine mmcv
+#   ultralytics    AGPL-3.0 (!)   python -m pip install ultralytics
+#
+# RF-DETR-Seg (Roboflow, Apache-2.0) is the recommended real-time upgrade once
+# the prototype works: nano..2XL, TensorRT FP16, built for fine-tuning, and no
+# licensing obligation. Uncomment to install.
+# rfdetr>=1.4
+#
+# ULTRALYTICS IS AGPL-3.0 AND IS *NOT* INSTALLED BY DEFAULT.
+# Commercial or proprietary use requires an Ultralytics Enterprise Licence;
+# Ultralytics states this applies even to internal company R&D unless the whole
+# project is released under AGPL-3.0. AGPL otherwise obliges publishing the
+# complete corresponding source of the larger work, potentially including model
+# weights. For a commercial laser weeder this is a real cost, and unlike a code
+# defect it cannot be corrected after distribution. Install only if you have
+# accepted that:
+# ultralytics>=8.3.0
