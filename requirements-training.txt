@@ -1,0 +1,49 @@
+# SeeWeed3D - supervised perception baseline (Stage A + Stage B) dependencies.
+#
+# OPTIONAL. The core data pipeline (requirements.txt) and the entire unit test
+# suite run WITHOUT anything in this file. Install it only to train, export or
+# benchmark.
+#
+# PowerShell, into the active `dl` conda env (use `python -m pip`, not bare
+# `pip`, so packages land in the interpreter you are actually running):
+#     python -m pip install -r requirements-training.txt
+#
+# NUMPY: requirements.txt pins numpy>=1.26,<2 because Meta's sam3 package
+# requires it. That pin is load-bearing for the annotation stage and is NOT
+# relaxed here. If a training dependency ever demands numpy>=2, install the
+# training stack in a SEPARATE environment rather than breaking SAM 3 - the two
+# stages never run in the same process.
+
+# -- Stage A: instance segmentation ------------------------------------------
+# LICENSING: Ultralytics is AGPL-3.0. Proprietary/commercial use (which a
+# commercial laser weeder is) requires an Ultralytics Enterprise Licence, and
+# AGPL otherwise obliges releasing the complete corresponding source of the
+# larger work. See docs/supervised_perception_baseline.md before shipping.
+# The dependency is isolated behind perception/segmenter.py so it can be
+# replaced without touching the rest of the system.
+ultralytics>=8.3.0
+
+# -- Stage B: LEPRoiNet -------------------------------------------------------
+# Install the CUDA build that matches your driver, e.g.
+#   python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+# On Jetson use NVIDIA's JetPack wheels, NOT PyPI.
+torch>=2.3
+torchvision>=0.18
+
+# -- Dataset ingestion --------------------------------------------------------
+# datumaro is OPTIONAL even here: training/datumaro_multitask.py parses the
+# Datumaro 1.0 JSON directly so the unit suite stays dependency-free. When
+# installed it is used by cross_check_with_datumaro() to verify the hand-rolled
+# reader against the reference implementation.
+datumaro>=1.5.0
+
+# Only needed if your CVAT export contains COMPRESSED RLE masks. Polygon
+# exports do not need it, and the importer fails with this instruction rather
+# than silently producing an empty mask.
+# pycocotools>=2.0.7
+
+# -- Export / deployment verification ----------------------------------------
+onnx>=1.16
+onnxruntime>=1.18
+# tensorrt is NOT installable from PyPI for Jetson. It ships with JetPack.
+# Build engines ON the Orin: they are architecture- and version-specific.
