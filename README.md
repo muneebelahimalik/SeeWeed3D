@@ -75,6 +75,10 @@ python seeweed3d/extraction/select_batches.py
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
+**→ [`docs/lep_localization_explained.md`](docs/lep_localization_explained.md)** explains LEP
+localization in full technical detail — biology, both estimators, the math,
+uncertainty, 3D conversion and the safety rules.
+
 **→ [`docs/RUNBOOK.md`](docs/RUNBOOK.md) is the complete end-to-end guide**: every
 step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging
 multiple CVAT tasks, training both stages, evaluation, inference and Jetson
