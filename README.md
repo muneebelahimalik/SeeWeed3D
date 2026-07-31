@@ -75,6 +75,11 @@ python seeweed3d/extraction/select_batches.py
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
+**→ [`docs/RUNBOOK.md`](docs/RUNBOOK.md) is the complete end-to-end guide**: every
+step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging
+multiple CVAT tasks, training both stages, evaluation, inference and Jetson
+deployment — with all commands.
+
 See `docs/dataset_pipeline.md` for the full extraction/selection guide and
 `docs/onion_prelabeling.md` for the SAM 3 workflow. Capture rationale and the
 v1→v2 changes are in `docs/capture_changelog.md`.

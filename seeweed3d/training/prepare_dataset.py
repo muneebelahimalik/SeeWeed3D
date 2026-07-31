@@ -34,22 +34,36 @@ from training import splits as sp  # noqa: E402
 from training.config import AnnotationContract  # noqa: E402
 
 
-def find_annotation_files(root):
-    """Every Datumaro JSON under an export root.
+def find_annotation_files(roots):
+    """Every Datumaro JSON under one or several export roots.
 
-    CVAT writes `annotations/default.json`; a multi-subset export writes one
-    file per subset."""
-    root = Path(root)
-    files = sorted(root.rglob("annotations/*.json"))
+    MERGING SEPARATE CVAT TASKS IS THE NORMAL CASE. Annotating one session per
+    CVAT task is good practice - tasks stay small, and a session is the unit
+    that splits must respect anyway - so this accepts either a parent folder
+    holding many unzipped exports, or several explicit roots.
+
+    Merging across tasks is safe because each file is resolved through its OWN
+    `categories` block: `label_id` 2 can legitimately mean different classes in
+    two tasks, and only the label NAME is carried forward. A merge keyed on
+    label_id would silently relabel half the dataset."""
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+    files = []
+    for root in roots:
+        root = Path(root)
+        found = sorted(root.rglob("annotations/*.json"))
+        if not found:
+            found = sorted(root.glob("*.json"))
+        files.extend(found)
     if not files:
-        files = sorted(root.glob("*.json"))
-    if not files:
+        shown = ", ".join(str(Path(r)) for r in roots)
         raise SystemExit(
-            f"ERROR: no Datumaro JSON found under {root}.\n"
+            f"ERROR: no Datumaro JSON found under: {shown}\n"
             f"Expected <root>/annotations/*.json. In CVAT use "
-            f"Export -> 'Datumaro 1.0' and unzip it, then point --datumaro-root "
-            f"at the unzipped folder.")
-    return files
+            f"Export -> 'Datumaro 1.0', unzip each export, then point "
+            f"--datumaro-root at the unzipped folder(s) - or at one parent "
+            f"folder containing all of them.")
+    return sorted(set(files))
 
 
 def build(datumaro_root, images_root, out_root, *, contract=None,
@@ -62,11 +76,29 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     out = Path(out_root)
     out.mkdir(parents=True, exist_ok=True)
 
+    ann_files = find_annotation_files(datumaro_root)
     frames, report = [], dmm.MultitaskDatasetReport()
-    for f in find_annotation_files(datumaro_root):
+    origin = {}
+    for f in ann_files:
         got, report = dmm.load_datumaro(f, contract, report=report)
+        for rec in got:
+            origin.setdefault(rec.item_id, []).append(str(f))
         frames.extend(got)
+
+    # The same frame annotated in two CVAT tasks would be counted twice and
+    # could land in two splits, which is exactly the leakage this pipeline
+    # exists to prevent. Detected here rather than discovered as an
+    # inexplicably good validation score.
+    dupes = {k: v for k, v in origin.items() if len(v) > 1}
+    if dupes:
+        for item_id, sources in sorted(dupes.items())[:20]:
+            report.add_error(item_id, "duplicate_frame_across_exports",
+                             f"annotated in {len(sources)} exports: "
+                             f"{', '.join(sources)}. Keep exactly one, or the "
+                             f"frame is trained on twice and may span splits.")
+
     report = dmm.validate_frames(frames, contract, report)
+    print(f"  merged {len(ann_files)} annotation file(s) -> {len(frames)} frames")
 
     # -- splits, by whole session ------------------------------------------
     per_session = Counter(f.session_id for f in frames)
@@ -157,8 +189,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     (out / "annotations_needing_correction.json").write_text(
         json.dumps(report.needs_correction, indent=2), encoding="utf-8")
 
-    xcheck = dmm.cross_check_with_datumaro(
-        find_annotation_files(datumaro_root)[0], frames)
+    xcheck = dmm.cross_check_with_datumaro(ann_files[0], frames)
     if xcheck:
         (out / "datumaro_cross_check.json").write_text(json.dumps(xcheck, indent=2),
                                                        encoding="utf-8")
@@ -183,8 +214,11 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--datumaro-root", required=True,
-                   help="unzipped CVAT 'Datumaro 1.0' export")
+    p.add_argument("--datumaro-root", required=True, nargs="+",
+                   help="one or more unzipped CVAT 'Datumaro 1.0' exports, or "
+                        "a single parent folder containing several of them. "
+                        "Annotating one session per CVAT task and merging here "
+                        "is the normal workflow.")
     p.add_argument("--images-root", required=True,
                    help="dataset sessions root holding the RGB frames")
     p.add_argument("--out", required=True, help="output directory")

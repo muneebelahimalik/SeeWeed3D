@@ -254,3 +254,110 @@ def test_latency_summary_reports_percentiles():
     s = met.latency_summary(t)
     assert s["total"]["p50_ms"] == pytest.approx(20.0)
     assert s["total"]["n"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# Merging separate CVAT tasks (one task per session - the normal workflow)
+# --------------------------------------------------------------------------- #
+def _one_session_export(tmp_path, sid, name, frames_per=2, label_order=None):
+    """A single-session export, optionally with a DIFFERENT label order, as two
+    independently-created CVAT tasks genuinely can have."""
+    labels = label_order or LABELS
+    idx = {n: i for i, n in enumerate(labels)}
+    items = []
+    for f in range(frames_per):
+        items.append({"id": f"{sid}_{f:06d}",
+                      "image": {"path": f"{sid}_{f:06d}.png", "size": [480, 640]},
+                      "annotations": [
+                          {"id": 1, "type": "polygon",
+                           "label_id": idx["wild_radish"], "group": 1,
+                           "points": _sq(20, 20, 60), "z_order": 0,
+                           "attributes": {"lep_visibility": "visible",
+                                          "targetable": "yes"}},
+                          {"id": 2, "type": "points", "label_id": idx["weed_LEP"],
+                           "group": 1, "points": [50.0, 50.0], "z_order": 0,
+                           "attributes": {}},
+                          {"id": 3, "type": "polygon", "label_id": idx[CROP_CLASS],
+                           "group": 2, "points": _sq(200, 150, 80), "z_order": 0,
+                           "attributes": {}}]})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []} for n in labels],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / name
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_several_cvat_exports_merge_into_one_dataset(tmp_path):
+    """One CVAT task per session is good practice; merging them is the normal
+    path, not an edge case."""
+    roots = [_one_session_export(tmp_path, f"sess{i:02d}", f"task{i}")
+             for i in range(4)]
+    report, split_map, rows = prep.build(roots, tmp_path / "images",
+                                         tmp_path / "out", val_fraction=0.25,
+                                         test_fraction=0.25, seed=1, strict=False)
+    assert report.ok, report.errors
+    assert report.n_frames == 8                       # 4 sessions x 2 frames
+    assert len(rows) == 8
+    all_sessions = sorted(s for v in split_map.values() for s in v)
+    assert all_sessions == ["sess00", "sess01", "sess02", "sess03"]
+
+
+def test_a_parent_folder_of_exports_is_discovered(tmp_path):
+    parent = tmp_path / "all_exports"
+    parent.mkdir()
+    for i in range(3):
+        _one_session_export(parent, f"sess{i:02d}", f"task{i}")
+    files = prep.find_annotation_files(parent)
+    assert len(files) == 3
+
+
+def test_merging_resolves_labels_by_NAME_not_by_index(tmp_path):
+    """Two CVAT tasks can legitimately order their labels differently, so
+    label_id 2 may mean different classes in each. A merge keyed on the index
+    would silently relabel half the dataset."""
+    normal = _one_session_export(tmp_path, "sessA", "taskA")
+    shuffled = list(reversed(LABELS))
+    assert shuffled != LABELS
+    other = _one_session_export(tmp_path, "sessB", "taskB",
+                                label_order=shuffled)
+
+    report, _, rows = prep.build([normal, other], tmp_path / "images",
+                                 tmp_path / "out", val_fraction=0.0,
+                                 test_fraction=0.5, seed=1, strict=False)
+    assert report.ok, report.errors
+    # Every instance must be the class its NAME says, from both exports.
+    assert set(report.per_class) == {"wild_radish", CROP_CLASS}
+    assert report.per_class["wild_radish"] == 4
+    assert all(r["class_name"] == "wild_radish" for r in rows)
+
+
+def test_the_same_frame_in_two_exports_is_reported(tmp_path):
+    """Duplicate frames would be trained on twice and could span two splits -
+    exactly the leakage the session rule exists to prevent."""
+    a = _one_session_export(tmp_path, "sessX", "taskA")
+    b = _one_session_export(tmp_path, "sessX", "taskB")     # same session again
+    report, _, _ = prep.build([a, b], tmp_path / "images", tmp_path / "out",
+                              val_fraction=0.0, test_fraction=0.0, seed=1,
+                              strict=False)
+    assert any(e["kind"] == "duplicate_frame_across_exports"
+               for e in report.errors)
+
+
+def test_seg_manifest_is_written_for_the_permissive_backend(tmp_path):
+    """The BSD-3 Mask R-CNN path trains from this, so it must exist alongside
+    the YOLO labels rather than instead of them."""
+    root = _export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.25,
+               test_fraction=0.25, seed=1, strict=False)
+    doc = json.loads((out / "seg_manifest.json").read_text())
+    assert doc["classes"] == list(CLASSES)
+    assert doc["n_frames"] == 8
+    f = doc["frames"][0]
+    assert f["split"] in ("train", "val", "test")
+    assert {i["class_name"] for i in f["instances"]} == {"wild_radish", CROP_CLASS}
+    assert f["instances"][0]["polygons"]
