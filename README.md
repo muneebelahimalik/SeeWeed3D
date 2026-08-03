@@ -48,6 +48,7 @@ seeweed3d/
                 vegetation.py              shared ExG vegetation prior + white balance
                 depth_utils.py             canonical depth reader + robust 3D point sampling
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream
+                diagnose_blur.py           is blur MOTION or OPTICS? (decides from the frames)
 docs/           pipeline, capture, and prelabeling guides
 legacy/         superseded scripts, kept for provenance
 tests/          synthetic end-to-end checks for the extraction + prelabel logic
