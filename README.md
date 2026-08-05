@@ -37,6 +37,7 @@ seeweed3d/
                 losses.py                  multitask LEP losses
                 lep_dataset.py             torch Dataset driven by the LEP manifest
                 prepare_dataset.py         entry point: export -> trainable dataset
+                active_learning.py         rank the unlabelled pool: what to annotate NEXT
                 seg_dataset.py             torchvision-format instance segmentation dataset
                 train_seg_torchvision.py   Stage A training, BSD-3 backend (default)
                 train_seg.py / train_lep.py  Ultralytics (AGPL, opt-in) / LEP training

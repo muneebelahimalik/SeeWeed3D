@@ -68,7 +68,7 @@ def find_annotation_files(roots):
 
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
-          holdout_val=(), holdout_test=(), strict=True):
+          holdout_val=(), holdout_test=(), strict=True, gap_frames=2):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call."""
@@ -100,27 +100,65 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     report = dmm.validate_frames(frames, contract, report)
     print(f"  merged {len(ann_files)} annotation file(s) -> {len(frames)} frames")
 
-    # -- splits, by whole session ------------------------------------------
+    # -- splits -------------------------------------------------------------
     per_session = Counter(f.session_id for f in frames)
     infos = [sp.SessionInfo(session_id=s, n_frames=n,
                             class_counts=report.per_session.get(s, {}))
              for s, n in sorted(per_session.items()) if s]
-    split_map = sp.assign_splits(infos, val_fraction, test_fraction, seed,
-                                 holdout_val=holdout_val,
-                                 holdout_test=holdout_test)
+
+    split_mode = "session"
+    frame_split = None
+    if len(infos) < 2:
+        # A single recording cannot be split by session. Rather than silently
+        # producing empty val/test (which trains blind), fall back to
+        # contiguous frame blocks and say plainly what that costs.
+        split_mode = "frame_block"
+        ordered = sorted(frames, key=lambda f: f.item_id)
+        frame_split = sp.assign_frame_blocks(
+            [f.item_id for f in ordered], val_fraction, test_fraction,
+            gap_frames=gap_frames)
+        split_map = {"train": [i.session_id for i in infos], "val": [], "test": []}
+        where = {}
+        for split in ("train", "val", "test"):
+            for item in frame_split[split]:
+                where[item] = split
+        print(f"\n  [!] ONLY ONE SESSION ({infos[0].session_id if infos else '?'}).")
+        print(f"      A session-level split is impossible, so the frames were "
+              f"split into CONTIGUOUS BLOCKS with a {gap_frames}-frame gap:")
+        print(f"        train={len(frame_split['train'])} "
+              f"val={len(frame_split['val'])} test={len(frame_split['test'])} "
+              f"(dropped as buffer: {len(frame_split['_dropped_gap'])})")
+        print(f"      These val/test frames share the session's lighting, soil, "
+              f"growth stage and often the same individual plants.")
+        print(f"      Treat the scores as a SANITY CHECK that training works, "
+              f"NOT as evidence of generalisation.")
+        print(f"      Annotate a SECOND session to get a real held-out test.\n")
+    else:
+        split_map = sp.assign_splits(infos, val_fraction, test_fraction, seed,
+                                     holdout_val=holdout_val,
+                                     holdout_test=holdout_test)
+        sp.check_no_leakage(split_map, {f.item_id: f.session_id for f in frames
+                                        if f.session_id})
+        session_where = {s: k for k, v in split_map.items() for s in v}
+        where = {f.item_id: session_where.get(f.session_id) for f in frames}
+
     frames_by_session = {}
     for f in frames:
         frames_by_session.setdefault(f.session_id, []).append(f.image_path)
-    sp.check_no_leakage(split_map, {f.item_id: f.session_id for f in frames
-                                    if f.session_id})
     summary = sp.write_splits(out / "splits", split_map, frames_by_session, infos)
-
-    where = {s: k for k, v in split_map.items() for s in v}
+    summary["split_mode"] = split_mode
+    if frame_split:
+        summary["frame_blocks"] = {k: v for k, v in frame_split.items()}
+        summary["warning"] = (
+            "frame_block split: val/test come from the SAME recording as train. "
+            "Scores are a sanity check, not evidence of generalisation.")
+        (out / "splits" / "splits_summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8")
 
     # -- Ultralytics labels -------------------------------------------------
     n_labels = 0
     for f in frames:
-        split = where.get(f.session_id)
+        split = where.get(f.item_id)
         if split is None:
             continue
         d = out / "labels" / split
@@ -149,7 +187,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # what was annotated.
     seg_frames = []
     for f in frames:
-        split = where.get(f.session_id)
+        split = where.get(f.item_id)
         if split is None or not f.instances:
             continue
         seg_frames.append({
@@ -172,7 +210,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # -- LEP manifest, split-aware -----------------------------------------
     rows = dmm.to_lep_manifest(frames)
     for r in rows:
-        r["split"] = where.get(r["session_id"], "unassigned")
+        r["split"] = where.get(r["item_id"], "unassigned")
     (out / "lep_manifest.json").write_text(
         json.dumps({"images_root": Path(images_root).as_posix(),
                     "n_rows": len(rows), "rows": rows}, indent=2),
@@ -225,6 +263,9 @@ def main(argv=None):
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--test-fraction", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--gap-frames", type=int, default=2,
+                   help="single-session only: frames discarded at each block "
+                        "boundary to reduce temporal leakage")
     p.add_argument("--holdout-val", nargs="*", default=[])
     p.add_argument("--holdout-test", nargs="*", default=[])
     p.add_argument("--allow-errors", action="store_true",
@@ -234,7 +275,7 @@ def main(argv=None):
     build(a.datumaro_root, a.images_root, a.out,
           val_fraction=a.val_fraction, test_fraction=a.test_fraction,
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
-          strict=not a.allow_errors)
+          strict=not a.allow_errors, gap_frames=a.gap_frames)
 
 
 if __name__ == "__main__":

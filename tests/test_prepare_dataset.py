@@ -9,6 +9,7 @@ from conftest import load_script
 
 prep = load_script("training/prepare_dataset.py")
 met = load_script("evaluation/metrics.py")
+sp = load_script("training/splits.py")
 
 from common.ontology import CLASSES, CROP_CLASS  # noqa: E402
 
@@ -338,8 +339,10 @@ def test_merging_resolves_labels_by_NAME_not_by_index(tmp_path):
 def test_the_same_frame_in_two_exports_is_reported(tmp_path):
     """Duplicate frames would be trained on twice and could span two splits -
     exactly the leakage the session rule exists to prevent."""
-    a = _one_session_export(tmp_path, "sessX", "taskA")
-    b = _one_session_export(tmp_path, "sessX", "taskB")     # same session again
+    # Enough frames that the single-session fallback split is viable; this test
+    # is about duplicate detection, not about splitting.
+    a = _one_session_export(tmp_path, "sessX", "taskA", frames_per=6)
+    b = _one_session_export(tmp_path, "sessX", "taskB", frames_per=6)  # same session
     report, _, _ = prep.build([a, b], tmp_path / "images", tmp_path / "out",
                               val_fraction=0.0, test_fraction=0.0, seed=1,
                               strict=False)
@@ -361,3 +364,76 @@ def test_seg_manifest_is_written_for_the_permissive_backend(tmp_path):
     assert f["split"] in ("train", "val", "test")
     assert {i["class_name"] for i in f["instances"]} == {"wild_radish", CROP_CLASS}
     assert f["instances"][0]["polygons"]
+
+
+# --------------------------------------------------------------------------- #
+# Single-session fallback (35 frames from one recording - the real case)
+# --------------------------------------------------------------------------- #
+def test_single_session_falls_back_to_frame_blocks_not_empty_splits(tmp_path):
+    """One recording cannot be split by session. Silently producing empty
+    val/test would mean training blind with no signal that it is learning."""
+    root = _one_session_export(tmp_path, "vid3_20260108_103135", "task0",
+                               frames_per=35)
+    out = tmp_path / "out"
+    report, split_map, rows = prep.build(root, tmp_path / "images", out,
+                                         val_fraction=0.2, test_fraction=0.2,
+                                         seed=1, strict=False)
+    summary = json.loads((out / "splits" / "splits_summary.json").read_text())
+    assert summary["split_mode"] == "frame_block"
+    assert "warning" in summary and "generalisation" in summary["warning"]
+
+    blocks = summary["frame_blocks"]
+    assert len(blocks["train"]) > 0
+    assert len(blocks["val"]) > 0
+    assert len(blocks["test"]) > 0
+
+    # Every split must actually receive rows. Frames in the discarded gap
+    # legitimately have no split - that is the buffer doing its job.
+    counts = {s: sum(1 for r in rows if r["split"] == s)
+              for s in ("train", "val", "test")}
+    assert all(v > 0 for v in counts.values()), counts
+    n_gap = sum(1 for r in rows if r["split"] == "unassigned")
+    assert n_gap == len(blocks["_dropped_gap"])
+    assert n_gap > 0, "the temporal buffer should have excluded some frames"
+
+
+def test_frame_blocks_are_contiguous_and_gap_separated():
+    """Blocks, not a random frame split: adjacent frames are near-identical, so
+    a random split scores memorisation. The gap buys real separation."""
+    ids = [f"s_{i:06d}" for i in range(40)]
+    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=3)
+
+    for split in ("train", "val", "test"):
+        idx = [ids.index(f) for f in out[split]]
+        assert idx == list(range(idx[0], idx[-1] + 1)), f"{split} is not contiguous"
+
+    assert max(ids.index(f) for f in out["train"]) < min(ids.index(f)
+                                                         for f in out["val"])
+    assert max(ids.index(f) for f in out["val"]) < min(ids.index(f)
+                                                       for f in out["test"])
+    assert len(out["_dropped_gap"]) == 6            # two 3-frame buffers
+
+    everything = out["train"] + out["val"] + out["test"] + out["_dropped_gap"]
+    assert sorted(everything) == sorted(ids)        # nothing invented or lost
+    assert len(set(everything)) == len(ids)         # nothing in two blocks
+
+
+def test_frame_block_split_refuses_when_there_are_too_few_frames():
+    with pytest.raises(sp.SplitError) as e:
+        sp.assign_frame_blocks([f"f{i}" for i in range(4)], 0.2, 0.2)
+    assert "at least 5" in str(e.value)
+
+
+def test_class_counts_are_reported_so_imbalance_is_visible(tmp_path):
+    """A class with zero instances cannot be learned, and a model that never
+    sees it will silently never predict it. per_class must show exactly what
+    was annotated so the gap is obvious before training, not after."""
+    root = _one_session_export(tmp_path, "sessOnly", "t", frames_per=8)
+    report, _, _ = prep.build(root, tmp_path / "images", tmp_path / "out",
+                              val_fraction=0.2, test_fraction=0.2, seed=1,
+                              strict=False)
+    # This export contains only wild_radish and onion_plant, so every other
+    # ontology class must be absent from the counts.
+    assert set(report.per_class) == {"wild_radish", CROP_CLASS}
+    missing = [c for c in CLASSES if c not in report.per_class]
+    assert "grass_weed" in missing and "weed_cluster" in missing
