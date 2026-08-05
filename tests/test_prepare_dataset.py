@@ -437,3 +437,131 @@ def test_class_counts_are_reported_so_imbalance_is_visible(tmp_path):
     assert set(report.per_class) == {"wild_radish", CROP_CLASS}
     missing = [c for c in CLASSES if c not in report.per_class]
     assert "grass_weed" in missing and "weed_cluster" in missing
+
+
+# --------------------------------------------------------------------------- #
+# Dropping classes for one build, and excluding un-annotated frames
+# --------------------------------------------------------------------------- #
+def _mixed_export(tmp_path, name="mixed", frames_per=10, n_empty=0):
+    """Frames with wild_radish + grass_weed, plus optionally some with no
+    annotations at all (the un-annotated case)."""
+    items = []
+    for f in range(frames_per):
+        anns = [
+            {"id": 1, "type": "polygon", "label_id": L["wild_radish"],
+             "group": 1, "points": _sq(20, 20, 60), "z_order": 0,
+             "attributes": {"lep_visibility": "visible", "targetable": "yes"}},
+            {"id": 2, "type": "points", "label_id": L["weed_LEP"], "group": 1,
+             "points": [50.0, 50.0], "z_order": 0, "attributes": {}},
+            {"id": 3, "type": "polygon", "label_id": L["grass_weed"],
+             "group": 2, "points": _sq(200, 20, 60), "z_order": 0,
+             "attributes": {"lep_visibility": "visible", "targetable": "yes"}},
+            {"id": 4, "type": "points", "label_id": L["weed_LEP"], "group": 2,
+             "points": [230.0, 50.0], "z_order": 0, "attributes": {}},
+        ]
+        items.append({"id": f"sessM_{f:06d}", "annotations": anns,
+                      "image": {"path": f"sessM_{f:06d}.png", "size": [480, 640]}})
+    for e in range(n_empty):
+        i = frames_per + e
+        items.append({"id": f"sessM_{i:06d}", "annotations": [],
+                      "image": {"path": f"sessM_{i:06d}.png", "size": [480, 640]}})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []} for n in LABELS],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / name
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_dropped_classes_leave_the_ontology_untouched(tmp_path):
+    """The ontology fixes COCO ids, the CVAT schema and every file already
+    exported. Dropping must be local to the build so a future dataset that DOES
+    contain the class still merges with this one."""
+    root = _mixed_export(tmp_path)
+    out = tmp_path / "out"
+    report, _, rows = prep.build(root, tmp_path / "images", out,
+                                 val_fraction=0.2, test_fraction=0.2, seed=1,
+                                 strict=False, drop_classes=["wild_radish"])
+
+    assert "wild_radish" not in report.per_class
+    assert report.per_class.get("grass_weed", 0) > 0
+    assert all(r["class_name"] != "wild_radish" for r in rows)
+
+    from common.ontology import CLASSES as LIVE
+    assert "wild_radish" in LIVE, "the ontology must NOT be mutated"
+
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["dropped"] == ["wild_radish"]
+    assert "wild_radish" not in mapping["active_classes"]
+    assert mapping["ontology"] == list(LIVE)
+
+
+def test_dropping_keeps_training_indices_contiguous(tmp_path):
+    """A gap in the label indices would silently shift every class above it."""
+    root = _mixed_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               drop_classes=["wild_radish", "weed_cluster"])
+
+    active = json.loads((out / "seg_manifest.json").read_text())["classes"]
+    assert "wild_radish" not in active and "weed_cluster" not in active
+    assert len(active) == len(CLASSES) - 2
+
+    y = (out / "data.yaml").read_text()
+    assert f"nc: {len(active)}" in y
+    for i, n in enumerate(active):
+        assert f"  {i}: {n}" in y
+
+    # Every YOLO label index must be inside the reduced, contiguous range.
+    for txt in (out / "labels").rglob("*.txt"):
+        for line in txt.read_text().split("\n"):
+            if line.strip():
+                assert 0 <= int(line.split()[0]) < len(active)
+
+    # And the per-instance index in the manifest agrees with that list.
+    for f in json.loads((out / "seg_manifest.json").read_text())["frames"]:
+        for inst in f["instances"]:
+            assert active[inst["class_index"]] == inst["class_name"]
+
+
+def test_unannotated_frames_are_excluded_by_default(tmp_path):
+    """An empty frame in a hand-annotated export is almost always one you did
+    not reach. Training on it teaches the model that plants are background."""
+    root = _mixed_export(tmp_path, frames_per=10, n_empty=4)
+    out = tmp_path / "out"
+    report, _, _ = prep.build(root, tmp_path / "images", out,
+                              val_fraction=0.2, test_fraction=0.2, seed=1,
+                              strict=False)
+    assert report.n_frames == 14                 # all 14 were read...
+    seg = json.loads((out / "seg_manifest.json").read_text())
+    # ...the 4 un-annotated ones were excluded, and the single-session
+    # frame-block split additionally discards its gap frames as a buffer.
+    assert 0 < seg["n_frames"] <= 10
+    kept = {f["item_id"] for f in seg["frames"]}
+    assert not any(int(i.rsplit("_", 1)[1]) >= 10 for i in kept), \
+        "an un-annotated frame reached the training set"
+    for txt in (out / "labels").rglob("*.txt"):
+        assert txt.read_text().strip(), f"{txt.name} is an empty label file"
+
+
+def test_empty_frames_can_be_kept_deliberately(tmp_path):
+    """Genuinely bare ground is a legitimate negative example - but it has to
+    be an explicit choice."""
+    root = _mixed_export(tmp_path, frames_per=10, n_empty=4)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False, keep_empty_frames=True)
+    labels = list((out / "labels").rglob("*.txt"))
+    assert any(not t.read_text().strip() for t in labels)
+
+
+def test_unknown_drop_class_fails_clearly(tmp_path):
+    root = _mixed_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        prep.build(root, tmp_path / "images", tmp_path / "out",
+                   drop_classes=["nonexistent_weed"], strict=False)
+    assert "nonexistent_weed" in str(e.value)

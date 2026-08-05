@@ -57,6 +57,10 @@ class SegManifestDataset(Dataset):
         self.frames = [f for f in manifest["frames"]
                        if not split or f.get("split") == split]
         self.images_root = Path(images_root or manifest.get("images_root", "."))
+        # The manifest's own class list, which may be a REDUCED active set.
+        # Indexing into the full ontology here would shift every class above a
+        # dropped one.
+        self.classes = list(manifest.get("classes") or CLASSES)
         self.min_area_px = min_area_px
         self.augment = augment
         self.rng = np.random.default_rng(seed)
@@ -100,7 +104,8 @@ class SegManifestDataset(Dataset):
             if x1 <= x0 or y1 <= y0:
                 continue                      # torchvision rejects empty boxes
             masks.append(m)
-            labels.append(CLASSES.index(inst["class_name"]) + BACKGROUND_OFFSET)
+            labels.append(self.classes.index(inst["class_name"])
+                          + BACKGROUND_OFFSET)
             boxes.append([x0, y0, x1, y1])
 
         # Horizontal/vertical flips only. Mosaic and MixUp are NOT used here

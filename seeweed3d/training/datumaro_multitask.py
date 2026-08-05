@@ -576,20 +576,24 @@ def _suggest_owners(rec, report):
 # --------------------------------------------------------------------------- #
 # Exports
 # --------------------------------------------------------------------------- #
-def to_yolo_segmentation(rec):
+def to_yolo_segmentation(rec, classes=None):
     """One Ultralytics segmentation label file body for a frame.
 
     Format: `class_idx x1 y1 x2 y2 ...` with coordinates normalised to [0,1].
-    Class index is `CLASSES.index(name)`, i.e. the ontology order, so the YOLO
-    ids and the COCO category ids stay derived from the same single source."""
+    Index is into `classes`, which defaults to the full ontology. A build that
+    dropped classes passes its reduced ACTIVE list so indices stay contiguous -
+    a gap in the label indices would silently shift every class above it."""
     if not rec.width or not rec.height:
         raise DatumaroFormatError(
             f"frame {rec.item_id!r} has no image size; YOLO labels are "
             f"normalised and cannot be written. Re-export from CVAT with image "
             f"info, or pass explicit sizes.")
+    names = list(classes) if classes else list(CLASSES)
     lines = []
     for inst in rec.instances:
-        idx = CLASSES.index(inst.class_name)
+        if inst.class_name not in names:
+            continue
+        idx = names.index(inst.class_name)
         for poly in inst.polygons:
             a = np.asarray(poly, np.float64).reshape(-1, 2)
             if len(a) < 3:

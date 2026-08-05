@@ -68,13 +68,46 @@ def find_annotation_files(roots):
 
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
-          holdout_val=(), holdout_test=(), strict=True, gap_frames=2):
+          holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
+          drop_classes=(), keep_empty_frames=False):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
-    AttributeError deep inside validation rather than an error at the call."""
+    AttributeError deep inside validation rather than an error at the call.
+
+    drop_classes: exclude these ontology classes from THIS dataset build.
+
+        Use this instead of editing common/ontology.py. The ontology is the
+        stable, project-wide source of truth: its order fixes the COCO category
+        ids, the CVAT label schema, and every file already exported. Deleting a
+        class from it would renumber everything and make a future dataset that
+        DOES contain that class impossible to merge with this one. Dropping per
+        build is reversible and local - re-run without the flag once you have
+        examples.
+
+        A `class_mapping.json` records ontology name -> training index, so a
+        model trained on the reduced set can still be interpreted against the
+        full ontology.
+
+    keep_empty_frames: by default a frame with ZERO annotations is EXCLUDED.
+        In an export from a task you annotated by hand, an empty frame is
+        almost always one you did not get to - and it is indistinguishable from
+        genuinely bare ground. Training on it teaches the model that a frame
+        full of weeds is background, which is far more damaging than the frame
+        being missing. Pass True only if your empty frames are deliberately
+        empty ground."""
     contract = contract or AnnotationContract()
     out = Path(out_root)
     out.mkdir(parents=True, exist_ok=True)
+
+    drop = {c for c in (drop_classes or ())}
+    unknown_drop = sorted(drop - set(CLASSES))
+    if unknown_drop:
+        raise SystemExit(
+            f"ERROR: --drop-classes names classes not in the ontology: "
+            f"{unknown_drop}\nKnown: {CLASSES}")
+    active_classes = [c for c in CLASSES if c not in drop]
+    if not active_classes:
+        raise SystemExit("ERROR: every class was dropped; nothing to train on.")
 
     ann_files = find_annotation_files(datumaro_root)
     frames, report = [], dmm.MultitaskDatasetReport()
@@ -99,6 +132,50 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
 
     report = dmm.validate_frames(frames, contract, report)
     print(f"  merged {len(ann_files)} annotation file(s) -> {len(frames)} frames")
+
+    # -- drop classes for THIS build (ontology untouched) --------------------
+    if drop:
+        removed = 0
+        for f in frames:
+            before = len(f.instances)
+            f.instances = [i for i in f.instances if i.class_name not in drop]
+            removed += before - len(f.instances)
+        print(f"  dropped {removed} instance(s) of {sorted(drop)} from this "
+              f"build. common/ontology.py is UNCHANGED - re-run without "
+              f"--drop-classes once you have examples.")
+        # Recount, so the report describes the dataset that was actually built
+        # rather than the export it was read from. A per_class still listing a
+        # dropped class would send you looking for it in the trained model.
+        per_class, per_session = Counter(), {}
+        for f in frames:
+            for i in f.instances:
+                per_class[i.class_name] += 1
+                per_session.setdefault(f.session_id, Counter())[i.class_name] += 1
+        report.per_class = dict(per_class)
+        report.per_session = {k: dict(v) for k, v in per_session.items()}
+        report.n_instances = int(sum(per_class.values()))
+
+    # -- exclude un-annotated frames ----------------------------------------
+    # An empty frame in a hand-annotated export is almost always one you did
+    # not reach, and it is indistinguishable from genuinely bare ground.
+    # Training on it teaches the model that a frame full of weeds is
+    # background, which is far worse than the frame simply being absent.
+    empty = [f for f in frames if not f.instances]
+    if empty and not keep_empty_frames:
+        frames = [f for f in frames if f.instances]
+        print(f"  EXCLUDED {len(empty)} frame(s) with no annotations "
+              f"({', '.join(f.item_id for f in empty[:5])}"
+              f"{' ...' if len(empty) > 5 else ''}).")
+        print(f"      If any of those are genuinely bare ground you WANT to "
+              f"train on, pass --keep-empty-frames.")
+    elif empty:
+        print(f"  [!] KEEPING {len(empty)} frame(s) with no annotations as "
+              f"negative examples, because --keep-empty-frames was given.")
+
+    if not frames:
+        raise SystemExit(
+            "ERROR: no annotated frames left after filtering. Check that the "
+            "CVAT task actually contains saved annotations.")
 
     # -- splits -------------------------------------------------------------
     per_session = Counter(f.session_id for f in frames)
@@ -163,7 +240,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             continue
         d = out / "labels" / split
         d.mkdir(parents=True, exist_ok=True)
-        body = dmm.to_yolo_segmentation(f)
+        body = dmm.to_yolo_segmentation(f, active_classes)
         (d / f"{Path(f.image_path).stem}.txt").write_text(body + "\n",
                                                           encoding="utf-8")
         n_labels += 1
@@ -176,8 +253,9 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         "train: ../training/splits/train_images.txt\n"
         "val: ../training/splits/val_images.txt\n"
         "test: ../training/splits/test_images.txt\n"
-        f"nc: {len(CLASSES)}\n"
-        "names:\n" + "".join(f"  {i}: {n}\n" for i, n in enumerate(CLASSES)))
+        f"nc: {len(active_classes)}\n"
+        "names:\n" + "".join(f"  {i}: {n}\n"
+                             for i, n in enumerate(active_classes)))
     (out / "data.yaml").write_text(data_yaml, encoding="utf-8")
 
     # -- Segmentation manifest (permissive backends) ------------------------
@@ -195,7 +273,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             "image_path": Path(f.image_path).as_posix(),
             "width": f.width, "height": f.height, "split": split,
             "instances": [{"class_name": i.class_name,
-                           "class_index": CLASSES.index(i.class_name),
+                           "class_index": active_classes.index(i.class_name),
                            "polygons": [[round(float(v), 2) for v in p]
                                         for p in i.polygons]}
                           for i in f.instances],
@@ -203,7 +281,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                                for p in f.ignore_regions]})
     (out / "seg_manifest.json").write_text(
         json.dumps({"images_root": Path(images_root).as_posix(),
-                    "classes": list(CLASSES),
+                    "classes": list(active_classes),
                     "n_frames": len(seg_frames), "frames": seg_frames}, indent=2),
         encoding="utf-8")
 
@@ -215,6 +293,17 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         json.dumps({"images_root": Path(images_root).as_posix(),
                     "n_rows": len(rows), "rows": rows}, indent=2),
         encoding="utf-8")
+
+    (out / "class_mapping.json").write_text(json.dumps({
+        "ontology": list(CLASSES),
+        "active_classes": list(active_classes),
+        "dropped": sorted(drop),
+        "train_index_to_ontology_name": {i: n for i, n in
+                                         enumerate(active_classes)},
+        "note": ("Training indices are into active_classes, which is contiguous. "
+                 "common/ontology.py is unchanged, so a future dataset "
+                 "containing the dropped classes merges with this one.")},
+        indent=2), encoding="utf-8")
 
     # -- reports ------------------------------------------------------------
     rep = report.to_dict()
@@ -263,6 +352,15 @@ def main(argv=None):
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--test-fraction", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--drop-classes", nargs="*", default=[],
+                   help="exclude these ontology classes from THIS build "
+                        "(e.g. --drop-classes wild_radish weed_cluster). "
+                        "common/ontology.py is NOT modified.")
+    p.add_argument("--keep-empty-frames", action="store_true",
+                   help="keep frames with no annotations as negative examples. "
+                        "Off by default: an empty frame is usually one you did "
+                        "not annotate, and training on it teaches the model "
+                        "that plants are background.")
     p.add_argument("--gap-frames", type=int, default=2,
                    help="single-session only: frames discarded at each block "
                         "boundary to reduce temporal leakage")
@@ -275,7 +373,9 @@ def main(argv=None):
     build(a.datumaro_root, a.images_root, a.out,
           val_fraction=a.val_fraction, test_fraction=a.test_fraction,
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
-          strict=not a.allow_errors, gap_frames=a.gap_frames)
+          strict=not a.allow_errors, gap_frames=a.gap_frames,
+          drop_classes=a.drop_classes,
+          keep_empty_frames=a.keep_empty_frames)
 
 
 if __name__ == "__main__":
