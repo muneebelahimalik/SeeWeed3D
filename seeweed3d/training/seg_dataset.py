@@ -33,6 +33,68 @@ from common.ontology import CLASSES  # noqa: E402
 BACKGROUND_OFFSET = 1
 
 
+#: Subfolders of a session that hold the RGB frames, in preference order. The
+#: extractor writes <images_root>/<session_id>/{rgb,depth,right,conf}/, and only
+#: rgb is a training image - a depth PNG has the same filename, so searching
+#: blindly could return the wrong stream.
+RGB_SUBDIRS = ("rgb", "")
+
+_INDEX_CACHE = {}
+
+
+def resolve_image(rel, images_root, session_id=None):
+    """Find a frame on disk from the relative path a manifest stored.
+
+    CVAT tasks are flat uploads, so an export's media path is usually a bare
+    filename with no session folder in it. The canonical layout is
+    <images_root>/<session_id>/rgb/<name>, and trying that directly matters:
+    the fallback is a recursive scan, and running one per image per epoch over
+    a dataset root holding tens of thousands of PNGs dominates training time.
+
+    The scan is therefore built once per root and cached. The first name wins
+    on collision, which is safe because extraction prefixes every frame with
+    its session id, so two sessions cannot produce the same filename."""
+    p = Path(rel)
+    if p.is_absolute() and p.exists():
+        return p
+    root = Path(images_root)
+
+    cand = root / p
+    if cand.exists():
+        return cand
+
+    sess = session_id or (p.parts[0] if len(p.parts) > 1 else None)
+    if not sess:
+        # `<session>_<index>.png` - the extractor's naming, so the session is
+        # recoverable even from a bare filename.
+        stem = p.stem
+        if "_" in stem and stem.rsplit("_", 1)[-1].isdigit():
+            sess = stem.rsplit("_", 1)[0]
+    if sess:
+        for sub in RGB_SUBDIRS:
+            cand = root / sess / sub / p.name if sub else root / sess / p.name
+            if cand.exists():
+                return cand
+
+    key = str(root.resolve())
+    index = _INDEX_CACHE.get(key)
+    if index is None:
+        index = {}
+        for q in root.rglob("*"):
+            if q.is_file():
+                index.setdefault(q.name, q)
+        _INDEX_CACHE[key] = index
+    hit = index.get(p.name)
+    if hit is not None:
+        return hit
+
+    raise FileNotFoundError(
+        f"image {rel!r} not found under {root}.\n"
+        f"Expected <images-root>/<session_id>/rgb/<name>. Point --images-root "
+        f"at the SESSIONS folder - the one whose children are session id "
+        f"folders - not at a session itself and not at its rgb/ subfolder.")
+
+
 def polygons_to_mask(polygons, h, w):
     m = np.zeros((h, w), np.uint8)
     for p in polygons:
@@ -68,24 +130,12 @@ class SegManifestDataset(Dataset):
     def __len__(self):
         return len(self.frames)
 
-    def _resolve(self, rel):
-        p = Path(rel)
-        if p.is_absolute() and p.exists():
-            return p
-        cand = self.images_root / p
-        if cand.exists():
-            return cand
-        hits = list(self.images_root.rglob(p.name))
-        if hits:
-            return hits[0]
-        raise FileNotFoundError(
-            f"image {rel!r} not found under {self.images_root}. Pass the "
-            f"correct --images-root; manifests store relative paths so the "
-            f"dataset is not duplicated.")
+    def _resolve(self, rel, session_id=None):
+        return resolve_image(rel, self.images_root, session_id)
 
     def __getitem__(self, i):
         rec = self.frames[i]
-        path = self._resolve(rec["image_path"])
+        path = self._resolve(rec["image_path"], rec.get("session_id"))
         bgr = cv2.imread(str(path))
         if bgr is None:
             raise FileNotFoundError(f"cannot read image {path}")

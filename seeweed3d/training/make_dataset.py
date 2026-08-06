@@ -51,14 +51,22 @@ CONFIG = {
     #
     # NOT the SAM 3 output folder (auto_labels_weeds/<session>/). That holds
     # COCO, which is the format you IMPORT into CVAT, not the one you export.
-    "DATUMARO_ROOT": r"E:\CVAT_exports\vid2_20260108_122731",
+    "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\CVAT_exports\vid2_20260108_122731",
 
-    # The sessions root from extract_sessions.py - the folder whose children are
-    # session ids. Images are never copied; manifests point at these files.
-    "IMAGES_ROOT": r"E:\Dataset_Vidalia\sessions",
+    # The SESSIONS folder from extract_sessions.py - the one whose CHILDREN are
+    # session ids, not a session itself and not its rgb/ subfolder:
+    #
+    #   <IMAGES_ROOT>\
+    #     vid2_20260108_122731\
+    #       rgb\    vid2_20260108_122731_000123.png   <- training images
+    #       depth\  vid2_20260108_122731_000123.png   <- same name, NOT an image
+    #       meta\   pool.csv, frames_index.csv, session.json, calibration.json
+    #
+    # Images are never copied; manifests point at these files.
+    "IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
-    "OUT_DIR": r"E:\Dataset_Vidalia\training\subset45",
+    "OUT_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\training\subset45",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
