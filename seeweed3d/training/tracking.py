@@ -87,9 +87,7 @@ class Tracker:
             from torch.utils.tensorboard import SummaryWriter
         except ImportError:
             if required:
-                raise SystemExit(
-                    "ERROR: --track tensorboard requested but tensorboard is "
-                    "not installed:\n    python -m pip install tensorboard")
+                raise SystemExit(_missing_package_error("tensorboard"))
             return None
         w = SummaryWriter(str(self.out_dir / "tb"))
         self.active.append("tensorboard")
@@ -100,9 +98,7 @@ class Tracker:
             import mlflow
         except ImportError:
             if required:
-                raise SystemExit(
-                    "ERROR: --track mlflow requested but mlflow is not "
-                    "installed:\n    python -m pip install mlflow")
+                raise SystemExit(_missing_package_error("mlflow"))
             return None
         try:
             return self._start_mlflow_inner(mlflow)
@@ -325,6 +321,37 @@ def environment_params(dataset_dir=None):
         out["seg_manifest_sha256"] = file_digest(d / "seg_manifest.json")
         out["class_mapping_sha256"] = file_digest(d / "class_mapping.json")
     return {k: v for k, v in out.items() if v is not None}
+
+
+def _missing_package_error(package):
+    """`pip install X` is not actionable on its own when several interpreters
+    are on the machine.
+
+    SeeWeed3D deliberately uses two conda environments - `dl` pins numpy<2 for
+    SAM 3, `sw-train` carries the training stack - so "not installed" almost
+    always means "you ran the other one", and the fix is to switch interpreter,
+    NOT to install into whichever one happens to be current. Installing the
+    training stack into `dl` is how SAM 3's numpy pin gets broken.
+
+    Naming sys.executable makes the mismatch visible immediately, because a
+    shell prompt showing (sw-train) says nothing about which python an
+    explicit path or an IDE's configured interpreter actually launched."""
+    import sys as _sys
+    exe = Path(_sys.executable)
+    env = exe.parent.name if exe.parent.name != "bin" else exe.parents[1].name
+    return (
+        f"ERROR: {package} is not installed in the interpreter that is "
+        f"running:\n"
+        f"    {exe}\n"
+        f"    (environment: {env})\n\n"
+        f"SeeWeed3D uses TWO environments on purpose:\n"
+        f"    dl        data pipeline + SAM 3   (numpy<2 pin, do NOT add the "
+        f"training stack here)\n"
+        f"    sw-train  training + deployment   (torch, mlflow, tensorboard)\n\n"
+        f"If the above is not your training environment, run with that one "
+        f"instead - in VS Code, Ctrl+Shift+P -> 'Python: Select Interpreter'.\n"
+        f"If it IS the right one, install there:\n"
+        f"    \"{exe}\" -m pip install -r requirements-training.txt")
 
 
 def _available(mod):

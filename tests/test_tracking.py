@@ -247,7 +247,9 @@ def test_a_missing_mlflow_is_still_fatal_when_explicitly_requested(
         return real(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", blocked)
-    with pytest.raises(SystemExit, match="pip install mlflow"):
+    # Asserts the INTENT (it is fatal, and names the package), not the
+    # exact wording - the message now also names the interpreter.
+    with pytest.raises(SystemExit, match="mlflow is not installed"):
         tk.Tracker("mlflow", out_dir=tmp_path)
 
 
@@ -258,3 +260,62 @@ def test_the_hint_prints_the_uri_the_run_was_written_to(tmp_path):
     t._uri = "sqlite:////x/mlruns/mlflow.db"
     assert "sqlite:////x/mlruns/mlflow.db" in t.hint()
     t.close()
+
+
+# --------------------------------------------------------------------------- #
+# "not installed" must say WHICH interpreter
+# --------------------------------------------------------------------------- #
+def test_the_missing_package_error_names_the_interpreter(tmp_path, monkeypatch):
+    """`pip install X` is not actionable with several interpreters around: a
+    prompt reading (sw-train) says nothing about which python an explicit path
+    or an IDE's configured interpreter actually launched."""
+    import builtins
+    import sys as _sys
+    real = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name == "mlflow":
+            raise ImportError("blocked")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(SystemExit) as e:
+        tk.Tracker("mlflow", out_dir=tmp_path)
+    msg = str(e.value)
+    assert _sys.executable in msg, "must name the interpreter that ran"
+    assert "requirements-training.txt" in msg
+
+
+def test_the_error_warns_against_installing_into_the_sam3_environment(
+        tmp_path, monkeypatch):
+    """Installing the training stack into `dl` is how SAM 3's numpy pin breaks,
+    so the message must not simply say 'pip install' into whatever is current."""
+    import builtins
+    real = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name == "mlflow":
+            raise ImportError("blocked")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(SystemExit) as e:
+        tk.Tracker("mlflow", out_dir=tmp_path)
+    msg = str(e.value)
+    assert "numpy<2" in msg and "sw-train" in msg
+
+
+def test_tensorboard_gets_the_same_treatment(tmp_path, monkeypatch):
+    import builtins
+    import sys as _sys
+    real = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if "tensorboard" in name:
+            raise ImportError("blocked")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(SystemExit) as e:
+        tk.Tracker("tensorboard", out_dir=tmp_path)
+    assert _sys.executable in str(e.value)
