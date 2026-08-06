@@ -53,21 +53,61 @@ def find_annotation_files(roots):
     label_id would silently relabel half the dataset."""
     if isinstance(roots, (str, Path)):
         roots = [roots]
-    files = []
+    candidates = []
     for root in roots:
         root = Path(root)
         found = sorted(root.rglob("annotations/*.json"))
         if not found:
-            found = sorted(root.glob("*.json"))
-        files.extend(found)
+            found = sorted(root.rglob("*.json"))
+        candidates.extend(found)
+
+    # Sniff each file rather than trusting its location. The SAM 3 prelabel
+    # output directory holds `instances_default.json` in COCO format plus
+    # several bookkeeping JSONs, and pointing at that folder is an easy mistake
+    # - it is where the CVAT round trip started. Parsing COCO as Datumaro would
+    # fail somewhere deep with a message about a missing 'items' array.
+    files, coco, other = [], [], []
+    for p in sorted(set(candidates)):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        if isinstance(doc.get("items"), list):
+            files.append(p)
+        elif isinstance(doc.get("images"), list) and "annotations" in doc:
+            coco.append(p)
+        else:
+            other.append(p)
+
     if not files:
         shown = ", ".join(str(Path(r)) for r in roots)
-        raise SystemExit(
-            f"ERROR: no Datumaro JSON found under: {shown}\n"
-            f"Expected <root>/annotations/*.json. In CVAT use "
-            f"Export -> 'Datumaro 1.0', unzip each export, then point "
-            f"--datumaro-root at the unzipped folder(s) - or at one parent "
-            f"folder containing all of them.")
+        msg = [f"ERROR: no Datumaro JSON found under: {shown}"]
+        if coco:
+            msg += [
+                f"",
+                f"Found {len(coco)} COCO file(s) instead, e.g. {coco[0]}.",
+                f"COCO is the format you IMPORT into CVAT (the SAM 3 "
+                f"prelabels). The EXPORT must be 'Datumaro 1.0' - COCO cannot "
+                f"carry shape groups, so it would silently discard every "
+                f"mask-to-LEP link.",
+                f"In CVAT: Task menu -> Export annotations -> 'Datumaro 1.0' "
+                f"-> download -> UNZIP, then point at the unzipped folder.",
+            ]
+        else:
+            if other:
+                msg += [f"",
+                        f"Found {len(other)} JSON file(s) that are neither "
+                        f"Datumaro nor COCO, e.g. {other[0]}."]
+            msg += [
+                f"",
+                f"Expected <root>/annotations/*.json. In CVAT use "
+                f"Export annotations -> 'Datumaro 1.0' -> download -> UNZIP, "
+                f"then point at the unzipped folder(s), or at one parent "
+                f"folder containing all of them.",
+            ]
+        raise SystemExit("\n".join(msg))
     return sorted(set(files))
 
 

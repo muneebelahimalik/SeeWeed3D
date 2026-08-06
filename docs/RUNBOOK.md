@@ -302,6 +302,31 @@ E:\CVAT_exports\
 
 This is where the separate CVAT tasks become one dataset.
 
+### The easy way: edit a config block, no command line
+
+`prepare_dataset.py`'s flags are all available in a config block, the same
+convention the extraction and prelabel stages use. Works identically in cmd.exe,
+PowerShell and VS Code's Run button — no backticks, no quoting rules.
+
+> **cmd.exe note:** a trailing `` ` `` is **not** a line continuation there —
+> that's PowerShell. In cmd it's `^`. A pasted PowerShell command arrives as a
+> series of broken commands, which is exactly what it looks like.
+
+```
+1. Open seeweed3d/training/make_dataset.py in VS Code
+2. Set DATUMARO_ROOT, IMAGES_ROOT, OUT_DIR
+3. Leave LIST_FRAMES = True     → python seeweed3d/training/make_dataset.py
+4. Read the table, set INCLUDE_FRAMES
+5. Set LIST_FRAMES = False      → python seeweed3d/training/make_dataset.py
+```
+
+Then `seeweed3d/training/train_model.py` the same way — it trains and evaluates
+in one run.
+
+The command-line form below stays supported and takes exactly the same options.
+
+### The command-line way
+
 ```powershell
 conda activate sw-train
 
