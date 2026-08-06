@@ -36,9 +36,13 @@ CONFIG = {
     # OUT_DIR from make_dataset.py (the folder holding seg_manifest.json).
     "DATASET_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\training\subset45",
 
-    # Same IMAGES_ROOT you used in make_dataset.py: the SESSIONS folder, whose
-    # children are session ids each holding rgb/, depth/ and meta/.
-    "IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+    # The sessions root(s) - a single path, or a LIST of them if make_dataset.py
+    # merged sources under more than one parent folder (e.g. a weed sessions
+    # folder plus a separately-recorded onion sessions folder). Leave "" to
+    # reuse exactly what make_dataset.py already recorded in seg_manifest.json,
+    # which is the normal choice - there is then nothing to keep in sync
+    # between the two files.
+    "IMAGES_ROOT": "",
 
     # Where checkpoints, curves and metrics go. One folder per run - do not
     # reuse it, or you lose the comparison.
@@ -99,18 +103,42 @@ CONFIG = {
 # #############################################################################
 
 
+def _resolve_images_root(c, manifest_path):
+    """CONFIG['IMAGES_ROOT'] if set, else whatever make_dataset.py already
+    recorded in seg_manifest.json - so a multi-source build does not need its
+    root list typed out a second time in a second file."""
+    given = c.get("IMAGES_ROOT")
+    if isinstance(given, (list, tuple)):
+        roots = [str(r) for r in given if str(r).strip()]
+    elif str(given or "").strip():
+        roots = [str(given)]
+    else:
+        import json as _json
+        doc = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        stored = doc.get("images_root")
+        roots = stored if isinstance(stored, list) else ([stored] if stored else [])
+        if not roots:
+            raise SystemExit(
+                f"ERROR: CONFIG['IMAGES_ROOT'] is empty and {manifest_path} "
+                f"has no 'images_root' recorded either. Set IMAGES_ROOT.")
+
+    missing = [r for r in roots if not Path(r).exists()]
+    if missing:
+        raise SystemExit(f"ERROR: IMAGES_ROOT path(s) do not exist: {missing}")
+    return roots[0] if len(roots) == 1 else roots
+
+
 def main(cfg=None):
     c = dict(CONFIG if cfg is None else cfg)
 
     ds = Path(c["DATASET_DIR"])
-    if not (ds / "seg_manifest.json").exists():
+    man_path = ds / "seg_manifest.json"
+    if not man_path.exists():
         raise SystemExit(
-            f"ERROR: {ds / 'seg_manifest.json'} not found.\n"
+            f"ERROR: {man_path} not found.\n"
             f"Build the dataset first: edit and run "
             f"seeweed3d/training/make_dataset.py")
-    images = Path(c["IMAGES_ROOT"])
-    if not images.exists():
-        raise SystemExit(f"ERROR: IMAGES_ROOT does not exist:\n    {images}")
+    images = _resolve_images_root(c, man_path)
 
     run = Path(c["RUN_DIR"])
     if (run / "best.pt").exists():

@@ -31,6 +31,24 @@ having no data at all, because the mask geometry is broadly right and only the
 label is wrong, so the loss is confident and consistent and the model reliably
 learns the wrong class. Nothing else in the pipeline can filter them. That is
 what INCLUDE_FRAMES is for, and why it is not optional here.
+
+MULTIPLE DATASETS, ONE BUILD
+-----------------------------
+SOURCES below is a LIST - one entry per CVAT export you are merging (a weed
+session, an onion session, another weed session, ...). Each entry names its own
+CVAT export AND its own sessions folder, because they are not always the same
+recording campaign under the same parent directory - an onion-only capture done
+separately from the weed sessions is the ordinary case, not a special one.
+
+A session's frames are found by trying every SOURCE's IMAGES_ROOT in turn, so a
+session need only exist under ONE of them - it is fine, and normal, for two
+sources to share the same IMAGES_ROOT.
+
+Frame positions in INCLUDE_FRAMES/EXCLUDE_FRAMES restart at 1 IN EACH SESSION
+(not in each source), so once SOURCES has more than one entry, or a source's
+export itself spans more than one session, scope every range with its session
+id - see INCLUDE_FRAMES below. LIST_FRAMES prints every session from every
+source, grouped, with the numbering to use.
 """
 
 import sys
@@ -45,25 +63,40 @@ from training import prepare_dataset as pdz  # noqa: E402
 
 CONFIG = {
     # -- Where things are ------------------------------------------------------
-    # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
-    # `annotations/default.json`. May also be one PARENT folder holding several
-    # unzipped exports; they are merged.
+    # One entry per CVAT export being merged. Add or remove entries freely; a
+    # single-source build is just a list of one.
     #
-    # NOT the SAM 3 output folder (auto_labels_weeds/<session>/). That holds
-    # COCO, which is the format you IMPORT into CVAT, not the one you export.
-    "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\CVAT_exports\vid2_20260108_122731",
-
-    # The SESSIONS folder from extract_sessions.py - the one whose CHILDREN are
-    # session ids, not a session itself and not its rgb/ subfolder:
+    # DATUMARO_ROOT: the UNZIPPED CVAT 'Datumaro 1.0' export - the folder
+    #   containing `annotations/default.json`. May also be one PARENT folder
+    #   holding several unzipped exports; they are merged. NOT the SAM 3 output
+    #   folder (auto_labels_weeds/<session>/ or auto_labels_onion/<session>/) -
+    #   that holds COCO, the format you IMPORT into CVAT, not the one you
+    #   export.
     #
-    #   <IMAGES_ROOT>\
-    #     vid2_20260108_122731\
-    #       rgb\    vid2_20260108_122731_000123.png   <- training images
-    #       depth\  vid2_20260108_122731_000123.png   <- same name, NOT an image
-    #       meta\   pool.csv, frames_index.csv, session.json, calibration.json
+    # IMAGES_ROOT: the SESSIONS folder from extract_sessions.py FOR THIS
+    #   SOURCE - the one whose CHILDREN are session ids, not a session itself
+    #   and not its rgb/ subfolder:
     #
-    # Images are never copied; manifests point at these files.
-    "IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+    #     <IMAGES_ROOT>\
+    #       vid2_20260108_122731\
+    #         rgb\    vid2_20260108_122731_000123.png   <- training images
+    #         depth\  vid2_20260108_122731_000123.png   <- same name, NOT one
+    #         meta\   pool.csv, frames_index.csv, session.json, calibration.json
+    #
+    #   Two sources may share the same IMAGES_ROOT (the normal case when they
+    #   are sessions from the same capture campaign) or point at entirely
+    #   different folders (an onion set recorded separately from the weed
+    #   sessions). Images are never copied; manifests point at these files.
+    "SOURCES": [
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\CVAT_exports\vid2_20260108_122731",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+        },
+        # {
+        #     "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Onion_only\CVAT_exports\vid3_20260108_132749",
+        #     "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Onion_only\sessions",
+        # },
+    ],
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
     "OUT_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\training\subset45",
@@ -80,12 +113,14 @@ CONFIG = {
     #   ""                   keep every frame (ONLY correct if you annotated
     #                        every frame in the task)
     #
-    # POSITIONS RESTART AT 1 IN EACH SESSION. Once this build merges more than
-    # one export, scope every range with its session id - a bare position is
+    # POSITIONS RESTART AT 1 IN EACH SESSION, not in each SOURCE. Once SOURCES
+    # has more than one entry (or even one source whose export spans more than
+    # one session), scope every range with its session id - a bare position is
     # then ambiguous and is refused rather than guessed:
     #   "vid2_20260108_122731:1-27,vid2_20260108_122731:29-36,
     #    vid2_20260108_122731:51-60,onion1_20260115_090000:*"
-    # `<session>:*` keeps all of that session.
+    # `<session>:*` keeps all of that session. With exactly one session across
+    # every source, a bare "1-27,29-36,51-60" is still fine.
     "INCLUDE_FRAMES": "1-27,29-36,51-60",
 
     # Applied after INCLUDE_FRAMES. Same syntax. Usually left empty.
@@ -134,38 +169,70 @@ CONFIG = {
 # #############################################################################
 
 
+def _resolve_sources(c):
+    """Validate SOURCES and split it into (datumaro_roots, images_roots).
+
+    Every error names WHICH source is wrong (by its 1-based position in the
+    list), because 'IMAGES_ROOT does not exist' is not actionable once there
+    are several of them."""
+    sources = c.get("SOURCES")
+    if not sources:
+        raise SystemExit(
+            f"ERROR: CONFIG['SOURCES'] is empty. Edit {Path(__file__).name} "
+            f"and add at least one {{'DATUMARO_ROOT': ..., 'IMAGES_ROOT': "
+            f"...}} entry.")
+
+    datumaro_roots, images_roots = [], []
+    for i, src in enumerate(sources, start=1):
+        for key in ("DATUMARO_ROOT", "IMAGES_ROOT"):
+            if not str(src.get(key, "")).strip():
+                raise SystemExit(
+                    f"ERROR: SOURCES[{i}]['{key}'] is empty. Edit "
+                    f"{Path(__file__).name} and set it.")
+        dr = Path(src["DATUMARO_ROOT"])
+        if not dr.exists():
+            raise SystemExit(
+                f"ERROR: SOURCES[{i}]['DATUMARO_ROOT'] does not exist:\n"
+                f"    {dr}\n"
+                f"Point it at the UNZIPPED CVAT 'Datumaro 1.0' export - the "
+                f"folder containing annotations/default.json.")
+        ir = Path(src["IMAGES_ROOT"])
+        if not ir.exists():
+            raise SystemExit(
+                f"ERROR: SOURCES[{i}]['IMAGES_ROOT'] does not exist:\n"
+                f"    {ir}\n"
+                f"This is the sessions root from extract_sessions.py, whose "
+                f"children are session id folders.")
+        datumaro_roots.append(dr)
+        if ir not in images_roots:      # sharing one root across sources is normal
+            images_roots.append(ir)
+    return datumaro_roots, images_roots
+
+
 def main(cfg=None):
     c = dict(CONFIG if cfg is None else cfg)
 
-    for key in ("DATUMARO_ROOT", "IMAGES_ROOT", "OUT_DIR"):
-        if not str(c.get(key, "")).strip():
-            raise SystemExit(f"ERROR: CONFIG['{key}'] is empty. Edit "
-                             f"{Path(__file__).name} and set it.")
+    if not str(c.get("OUT_DIR", "")).strip():
+        raise SystemExit(f"ERROR: CONFIG['OUT_DIR'] is empty. Edit "
+                         f"{Path(__file__).name} and set it.")
 
-    root = Path(c["DATUMARO_ROOT"])
-    if not root.exists():
-        raise SystemExit(
-            f"ERROR: DATUMARO_ROOT does not exist:\n    {root}\n"
-            f"Point it at the UNZIPPED CVAT 'Datumaro 1.0' export - the folder "
-            f"containing annotations/default.json.")
-    images = Path(c["IMAGES_ROOT"])
-    if not images.exists():
-        raise SystemExit(
-            f"ERROR: IMAGES_ROOT does not exist:\n    {images}\n"
-            f"This is the sessions root from extract_sessions.py, whose "
-            f"children are session id folders.")
+    datumaro_roots, images_roots = _resolve_sources(c)
 
     if c["LIST_FRAMES"]:
-        print(f"\nListing frames in {root}\n")
-        pdz.list_frames(root)
+        label = (f"{len(datumaro_roots)} source(s)" if len(datumaro_roots) > 1
+                else str(datumaro_roots[0]))
+        print(f"\nListing frames in {label}\n")
+        pdz.list_frames(datumaro_roots)
         print("\n" + "=" * 74)
         print("NOTHING WAS WRITTEN. This was the listing pass.")
         print("  1. Find the positions of the frames you hand-corrected.")
         print("     Frames you never opened still have SAM's annotations, so")
-        print("     'has annotations' does NOT mean 'verified'. A frame")
+        print("     'has annotations' does NOT mean 'verified'. A weed frame")
         print("     containing cutleaf_evening_primrose or wild_radish is")
         print("     certainly yours - SAM only ever proposes grass_weed,")
-        print("     weed_cluster and other_weed.")
+        print("     weed_cluster and other_weed. An ONION session has no such")
+        print("     tell (only one class exists), so track which onion")
+        print("     positions you corrected as you go through the CVAT task.")
         print("  2. Set INCLUDE_FRAMES to those positions.")
         print("  3. Set LIST_FRAMES = False and run again.")
         print("=" * 74 + "\n")
@@ -179,7 +246,7 @@ def main(cfg=None):
               "wrong classes and will be trained on.\n")
 
     pdz.build(
-        root, images, c["OUT_DIR"],
+        datumaro_roots, images_roots, c["OUT_DIR"],
         include_frames=c["INCLUDE_FRAMES"] or None,
         exclude_frames=c["EXCLUDE_FRAMES"] or None,
         drop_classes=c["DROP_CLASSES"],

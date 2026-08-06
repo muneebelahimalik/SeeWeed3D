@@ -42,57 +42,86 @@ RGB_SUBDIRS = ("rgb", "")
 _INDEX_CACHE = {}
 
 
+def as_roots(images_root):
+    """Normalize a single path or a list/tuple of paths into list[Path].
+
+    Multiple datasets (e.g. a weed capture set and a separately-recorded onion
+    set) are not always under one sessions folder, so every images_root
+    parameter accepts either form - a bare list of one is the common case and
+    costs nothing."""
+    if isinstance(images_root, (list, tuple)):
+        return [Path(r) for r in images_root]
+    return [Path(images_root)]
+
+
+def _session_from_name(p):
+    """`<session>_<index>.png` -> `<session>`, the extractor's naming, so the
+    session is recoverable even from a bare filename with no folder in it."""
+    stem = p.stem
+    if "_" in stem and stem.rsplit("_", 1)[-1].isdigit():
+        return stem.rsplit("_", 1)[0]
+    return None
+
+
 def resolve_image(rel, images_root, session_id=None):
     """Find a frame on disk from the relative path a manifest stored.
 
+    `images_root` is a single path or a list of candidate roots, tried in
+    order - a merged build from several CVAT exports may have its sessions
+    spread across more than one sessions folder, and each frame belongs to
+    whichever root actually contains its session, not to all of them.
+
     CVAT tasks are flat uploads, so an export's media path is usually a bare
     filename with no session folder in it. The canonical layout is
-    <images_root>/<session_id>/rgb/<name>, and trying that directly matters:
-    the fallback is a recursive scan, and running one per image per epoch over
-    a dataset root holding tens of thousands of PNGs dominates training time.
+    <root>/<session_id>/rgb/<name>, and trying that directly matters: the
+    fallback is a recursive scan, and running one per image per epoch over a
+    dataset root holding tens of thousands of PNGs dominates training time.
 
-    The scan is therefore built once per root and cached. The first name wins
-    on collision, which is safe because extraction prefixes every frame with
-    its session id, so two sessions cannot produce the same filename."""
+    Every root's cheap, direct checks run before any root's expensive scan, so
+    a frame that resolves canonically under the SECOND root never pays for a
+    full walk of the first one first.
+
+    The scan is built once per root and cached. The first name wins on
+    collision, which is safe because extraction prefixes every frame with its
+    session id, so two sessions cannot produce the same filename."""
     p = Path(rel)
     if p.is_absolute() and p.exists():
         return p
-    root = Path(images_root)
+    roots = as_roots(images_root)
+    sess = session_id or (p.parts[0] if len(p.parts) > 1 else None) \
+        or _session_from_name(p)
 
-    cand = root / p
-    if cand.exists():
-        return cand
+    for root in roots:
+        cand = root / p
+        if cand.exists():
+            return cand
+        if sess:
+            for sub in RGB_SUBDIRS:
+                cand = root / sess / sub / p.name if sub else root / sess / p.name
+                if cand.exists():
+                    return cand
 
-    sess = session_id or (p.parts[0] if len(p.parts) > 1 else None)
-    if not sess:
-        # `<session>_<index>.png` - the extractor's naming, so the session is
-        # recoverable even from a bare filename.
-        stem = p.stem
-        if "_" in stem and stem.rsplit("_", 1)[-1].isdigit():
-            sess = stem.rsplit("_", 1)[0]
-    if sess:
-        for sub in RGB_SUBDIRS:
-            cand = root / sess / sub / p.name if sub else root / sess / p.name
-            if cand.exists():
-                return cand
+    for root in roots:
+        key = str(root.resolve())
+        index = _INDEX_CACHE.get(key)
+        if index is None:
+            index = {}
+            for q in root.rglob("*"):
+                if q.is_file():
+                    index.setdefault(q.name, q)
+            _INDEX_CACHE[key] = index
+        hit = index.get(p.name)
+        if hit is not None:
+            return hit
 
-    key = str(root.resolve())
-    index = _INDEX_CACHE.get(key)
-    if index is None:
-        index = {}
-        for q in root.rglob("*"):
-            if q.is_file():
-                index.setdefault(q.name, q)
-        _INDEX_CACHE[key] = index
-    hit = index.get(p.name)
-    if hit is not None:
-        return hit
-
+    shown = ", ".join(str(r) for r in roots)
     raise FileNotFoundError(
-        f"image {rel!r} not found under {root}.\n"
+        f"image {rel!r} not found under: {shown}\n"
         f"Expected <images-root>/<session_id>/rgb/<name>. Point --images-root "
         f"at the SESSIONS folder - the one whose children are session id "
-        f"folders - not at a session itself and not at its rgb/ subfolder.")
+        f"folders - not at a session itself and not at its rgb/ subfolder. If "
+        f"your sessions are split across more than one parent folder, pass all "
+        f"of them.")
 
 
 def polygons_to_mask(polygons, h, w):
@@ -118,7 +147,10 @@ class SegManifestDataset(Dataset):
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         self.frames = [f for f in manifest["frames"]
                        if not split or f.get("split") == split]
-        self.images_root = Path(images_root or manifest.get("images_root", "."))
+        # A single path or a list of them - resolve_image tries every root.
+        # NOT collapsed to one Path here: a merged multi-source build's
+        # sessions can live under more than one sessions folder.
+        self.images_root = images_root or manifest.get("images_root") or "."
         # The manifest's own class list, which may be a REDUCED active set.
         # Indexing into the full ontology here would shift every class above a
         # dropped one.

@@ -121,7 +121,10 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
             f"silently compares different labels - rebuild or retrain so the "
             f"two agree.")
 
-    root = Path(images_root or doc.get("images_root", "."))
+    # A single path or a list - NOT collapsed to one Path here, since a
+    # merged multi-source build's sessions can live under more than one
+    # sessions folder. resolve_image tries every root.
+    root = images_root or doc.get("images_root") or "."
     per_class_ap = {c: {t: {"scores": [], "is_tp": [], "n_gt": 0}
                         for t in IOU_THRESHOLDS} for c in classes}
     op = {c: {"tp": 0, "n_pred": 0, "n_gt": 0, "ious": []} for c in classes}
@@ -302,7 +305,9 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--dataset", required=True, help="prepare_dataset output dir")
-    p.add_argument("--images-root", required=True)
+    p.add_argument("--images-root", required=True, nargs="+",
+                   help="sessions root(s); more than one if the datasets were "
+                        "not captured under a common parent")
     p.add_argument("--split", default="val", choices=["train", "val", "test"])
     p.add_argument("--device", default="cpu")
     p.add_argument("--conf", type=float, default=0.5,
