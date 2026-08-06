@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+SeeWeed3D - train Stage A and evaluate it (EDIT THE CONFIG BELOW)
+================================================================
+Runs `train_seg_torchvision` then `eval_seg`, driven by the config block in this
+file. Edit, save, run:
+
+    python seeweed3d/training/train_model.py
+
+Build the dataset first with `make_dataset.py`.
+
+WHAT TO WATCH
+-------------
+Loss is not a quality number. Two things tell you whether this is working:
+
+  * The PREVIEW PANELS (TensorBoard -> Images tab). Ground truth left,
+    prediction right, on a fixed sample of val frames. At 45 annotated frames
+    this beats every scalar - a loss curve cannot show you that every mask is
+    one plant too large, or that the model has learned to call every onion a
+    weed.
+  * The EVAL TABLE printed at the end: mAP, per-class precision/recall, and
+    missed onion pixels kept out of every averaged score.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# #############################################################################
+# ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
+# #############################################################################
+
+CONFIG = {
+    # -- Where things are ------------------------------------------------------
+    # OUT_DIR from make_dataset.py (the folder holding seg_manifest.json).
+    "DATASET_DIR": r"E:\Dataset_Vidalia\training\subset45",
+
+    # Same IMAGES_ROOT you used in make_dataset.py.
+    "IMAGES_ROOT": r"E:\Dataset_Vidalia\sessions",
+
+    # Where checkpoints, curves and metrics go. One folder per run - do not
+    # reuse it, or you lose the comparison.
+    "RUN_DIR": r"E:\Dataset_Vidalia\runs\seg_v1",
+
+    # -- Training --------------------------------------------------------------
+    "DEVICE": "cuda",          # "cuda", or "cpu" if you have no GPU (very slow)
+
+    # ~34 training frames is ~17 steps per epoch at BATCH 2. The default of 20
+    # epochs is only ~340 steps, nowhere near enough to fit a fresh head.
+    "EPOCHS": 60,
+
+    # Drop to 1 on CUDA out-of-memory - ZED frames are large and Mask R-CNN v2
+    # at full resolution is heavy. If you do, halve LR too.
+    "BATCH": 2,
+
+    # Mask R-CNN's reference schedule is 0.02 at batch 16; linear scaling to
+    # batch 2 gives 2.5e-3. The module default of 5e-3 is twice that and can
+    # diverge on a set this small.
+    "LR": 2.5e-3,
+
+    # Dataloader processes. Full-resolution decode is the bottleneck; 0 makes
+    # the GPU wait on the CPU. Set 0 if you hit Windows multiprocessing errors.
+    "WORKERS": 4,
+
+    # COCO-pretrained weights. Downloaded once, needs network access. NOT
+    # optional at this data volume - 34 frames cannot train a backbone from
+    # scratch.
+    "PRETRAINED": True,
+
+    "SEED": 1234,
+
+    # -- Monitoring ------------------------------------------------------------
+    # "auto" uses whatever of tensorboard/mlflow is installed and never fails.
+    # "all" requires both and errors if either is missing. "none" disables it.
+    # Everything is written locally; nothing is uploaded anywhere.
+    #     python -m pip install tensorboard mlflow
+    "TRACK": "auto",
+
+    # GT-vs-prediction overlay panels every N epochs. 0 disables.
+    "PREVIEW_EVERY": 5,
+
+    # Val mAP every N epochs. 0 disables. Slow - a full pass over val - so this
+    # is off by default; the final evaluation below runs regardless.
+    "EVAL_EVERY": 0,
+
+    # -- Evaluation ------------------------------------------------------------
+    "EVALUATE_AFTER": True,
+    "EVAL_SPLIT": "val",       # "val", or "test" once you have a real one
+
+    # The confidence you would actually deploy at, for the precision/recall
+    # table. mAP is threshold-free; a robot is not.
+    "EVAL_CONF": 0.5,
+}
+
+# #############################################################################
+# ##  Nothing below here needs editing                                       ##
+# #############################################################################
+
+
+def main(cfg=None):
+    c = dict(CONFIG if cfg is None else cfg)
+
+    ds = Path(c["DATASET_DIR"])
+    if not (ds / "seg_manifest.json").exists():
+        raise SystemExit(
+            f"ERROR: {ds / 'seg_manifest.json'} not found.\n"
+            f"Build the dataset first: edit and run "
+            f"seeweed3d/training/make_dataset.py")
+    images = Path(c["IMAGES_ROOT"])
+    if not images.exists():
+        raise SystemExit(f"ERROR: IMAGES_ROOT does not exist:\n    {images}")
+
+    run = Path(c["RUN_DIR"])
+    if (run / "best.pt").exists():
+        print(f"\n[!] {run / 'best.pt'} already exists and WILL BE "
+              f"OVERWRITTEN.\n    Point RUN_DIR at a new folder to keep the "
+              f"old run comparable.\n")
+
+    from training.train_seg_torchvision import train
+    train(ds, images, run,
+          epochs=c["EPOCHS"], batch=c["BATCH"], lr=c["LR"],
+          device=c["DEVICE"], workers=c["WORKERS"], seed=c["SEED"],
+          pretrained=c["PRETRAINED"], track=c["TRACK"],
+          preview_every=c["PREVIEW_EVERY"], eval_every=c["EVAL_EVERY"])
+
+    if not c["EVALUATE_AFTER"]:
+        return
+    ckpt = run / "best.pt"
+    if not ckpt.exists():
+        print("\n[!] no best.pt was written, so there is nothing to evaluate. "
+              "That happens when the val split is empty - check "
+              "splits/splits_summary.json.\n")
+        return
+
+    import json
+    from evaluation.eval_seg import evaluate, format_report
+    print("\n" + "=" * 74)
+    res = evaluate(ckpt, ds, images, c["EVAL_SPLIT"], c["DEVICE"],
+                   conf=c["EVAL_CONF"])
+    print(format_report(res))
+    out = run / f"metrics_{c['EVAL_SPLIT']}.json"
+    out.write_text(json.dumps(res, indent=2), encoding="utf-8")
+    print(f"\n-> {out}")
+    print("\nSingle-session splits: val comes from the same drive as train - "
+          "same light,\nsame soil, often the same plants. These numbers show "
+          "training WORKS. They are\nnot evidence it generalises; only a "
+          "held-out session can show that.\n")
+
+
+if __name__ == "__main__":
+    main()
