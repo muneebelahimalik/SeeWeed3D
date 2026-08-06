@@ -754,8 +754,20 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
 
     print(f"\n{report.summary()}")
     print(f"  classes : {report.per_class}")
+    # FRAMES per split, which is what "is this trainable" depends on. The
+    # session counts in split_map are meaningless under the frame_block
+    # fallback - every session is listed under train there, so this line read
+    # "val=0" while sixteen val frames existed, which is exactly the wrong
+    # thing to tell someone about to start a run.
+    frames_per_split = Counter(s for s in where.values() if s)
     print(f"  splits  : " + " ".join(
-        f"{k}={len(v)}" for k, v in split_map.items()))
+        f"{k}={frames_per_split.get(k, 0)}"
+        for k in ("train", "val", "test")) + " frames"
+        + (f"  (by session: " + " ".join(f"{k}={len(v)}"
+                                         for k, v in split_map.items()) + ")"
+           if split_mode == "session" else
+           f"  [{split_mode} split within each of "
+           f"{len({f.session_id for f in frames})} session(s)]"))
     print(f"  LEP rows: {len(rows)}  ({rep['lep_rows_per_split']})")
     print(f"  -> {out}")
 
