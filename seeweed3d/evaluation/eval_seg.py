@@ -94,7 +94,7 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
              mask_threshold=0.5):
     import cv2
     from perception.segmenter import MaskRCNNSegmenter
-    from training.seg_dataset import polygons_to_mask
+    from training.seg_dataset import polygons_to_mask, resolve_image
 
     man_path = Path(dataset_dir) / "seg_manifest.json"
     if not man_path.exists():
@@ -131,14 +131,10 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
     n_frames = 0
 
     for rec in frames:
-        p = Path(rec["image_path"])
-        path = p if p.is_absolute() and p.exists() else root / p
-        if not path.exists():
-            hits = list(root.rglob(p.name))
-            if not hits:
-                raise SystemExit(f"ERROR: image {rec['image_path']!r} not "
-                                 f"found under {root}. Check --images-root.")
-            path = hits[0]
+        try:
+            path = resolve_image(rec["image_path"], root, rec.get("session_id"))
+        except FileNotFoundError as e:
+            raise SystemExit(f"ERROR: {e}")
         bgr = cv2.imread(str(path))
         if bgr is None:
             raise SystemExit(f"ERROR: cannot read {path}")

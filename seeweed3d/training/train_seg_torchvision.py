@@ -179,7 +179,7 @@ def _log_previews(trk, model, records, images_root, classes, device,
     import numpy as np
     import torch
     from common.ontology import CROP_CLASS
-    from training.seg_dataset import polygons_to_mask
+    from training.seg_dataset import polygons_to_mask, resolve_image
     from training.tracking import overlay_masks, side_by_side
 
     root = Path(images_root)
@@ -187,13 +187,11 @@ def _log_previews(trk, model, records, images_root, classes, device,
     model.eval()
     try:
         for k, rec in enumerate(records):
-            p = Path(rec["image_path"])
-            path = p if p.is_absolute() and p.exists() else root / p
-            if not path.exists():
-                hits = list(root.rglob(p.name))
-                if not hits:
-                    continue
-                path = hits[0]
+            try:
+                path = resolve_image(rec["image_path"], root,
+                                     rec.get("session_id"))
+            except FileNotFoundError:
+                continue
             bgr = cv2.imread(str(path))
             if bgr is None:
                 continue

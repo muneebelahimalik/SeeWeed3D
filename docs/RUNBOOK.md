@@ -302,6 +302,28 @@ E:\CVAT_exports\
 
 This is where the separate CVAT tasks become one dataset.
 
+### What `--images-root` / `IMAGES_ROOT` means
+
+The **sessions** folder — the one whose *children* are session ids. Not a
+session itself, and not its `rgb/` subfolder.
+
+```
+<IMAGES_ROOT>\
+  vid2_20260108_122731\
+    rgb\    vid2_20260108_122731_000123.png    ← training images
+    depth\  vid2_20260108_122731_000123.png    ← same filename, NOT an image
+    meta\   pool.csv  frames_index.csv  session.json  calibration.json
+  vid3_20260108_103135\
+    ...
+```
+
+CVAT tasks are flat uploads, so an export's media path is usually a bare
+filename with no session folder in it. Resolution therefore reconstructs the
+canonical path from the session id embedded in the name
+(`<session_id>_<index>.png`) and looks in `rgb/` **first** — the `depth/` frame
+has the identical filename, so a blind recursive search could return it as a
+training image.
+
 ### The easy way: edit a config block, no command line
 
 `prepare_dataset.py`'s flags are all available in a config block, the same
