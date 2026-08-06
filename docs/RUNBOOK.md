@@ -406,8 +406,16 @@ Then build with the selection:
 | `12` | a single position |
 | `frame_0007` | a literal item id |
 | `*_001*` | fnmatch glob over item ids |
+| `<session>:1-26` | any of the above, scoped to one session |
+| `<session>:*` | every frame of that session |
 | `@keep.txt` | read the list from a file, one token per line, `#` comments |
 | `--exclude-frames` | same syntax, applied **after** `--include-frames` |
+
+> **Positions restart at 1 in each session.** That is what makes a range stable:
+> merging a second CVAT export must not renumber the first one and quietly
+> redirect a checked selection at different frames. Once more than one session
+> is present, a bare position is ambiguous and is **refused**, not guessed —
+> scope it with the session id.
 
 Selection happens **before** validation, so the frames you discarded cannot fill
 `annotations_needing_correction.json` with errors about annotations you are

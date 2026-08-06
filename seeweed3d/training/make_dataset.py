@@ -79,7 +79,14 @@ CONFIG = {
     #   "1-26,28-36,50-59"   ranges, inclusive, comma separated
     #   ""                   keep every frame (ONLY correct if you annotated
     #                        every frame in the task)
-    "INCLUDE_FRAMES": "1-26,28-36,50-59",
+    #
+    # POSITIONS RESTART AT 1 IN EACH SESSION. Once this build merges more than
+    # one export, scope every range with its session id - a bare position is
+    # then ambiguous and is refused rather than guessed:
+    #   "vid2_20260108_122731:1-27,vid2_20260108_122731:29-36,
+    #    vid2_20260108_122731:51-60,onion1_20260115_090000:*"
+    # `<session>:*` keeps all of that session.
+    "INCLUDE_FRAMES": "1-27,29-36,51-60",
 
     # Applied after INCLUDE_FRAMES. Same syntax. Usually left empty.
     "EXCLUDE_FRAMES": "",
