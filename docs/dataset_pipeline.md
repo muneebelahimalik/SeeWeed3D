@@ -1,5 +1,12 @@
 # SeeWeed3D — ZED dataset extraction & annotation prep
 
+> **Superseded by [`docs/RUNBOOK.md`](RUNBOOK.md).** This page describes an
+> earlier pipeline (`select_batches.py` for curation, and the CVAT label
+> names below predate the ontology's snake_case rule). RUNBOOK.md's curation
+> step is `extraction/curate_pool.py`, and its CVAT label schemas come from
+> `common/ontology.py::cvat_labels()` / `annotation/cvat_roundtrip.py`. Using
+> the label names on this page will fail against the current importer.
+
 Edit only the `CONFIG` block at the top of each script.
 
 ```

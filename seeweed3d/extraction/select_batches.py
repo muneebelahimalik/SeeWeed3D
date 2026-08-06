@@ -2,6 +2,19 @@
 """
 SeeWeed3D - Stage 2: Frame selection and CVAT batch export
 ===========================================================
+SUPERSEDED as the documented workflow - see docs/RUNBOOK.md, whose curation
+step is extraction/curate_pool.py. This module is still exercised by the test
+suite and safe to run, but its CVAT_LABELS constant below predates the
+project's snake_case naming rule (common/ontology.py) and is NOT what current
+CVAT tasks should be pasted from: "onion plant" / "ignore region" here do not
+match the "onion_plant" / "ignore_region" that common/ontology.py and every
+current importer expect, and pasting them causes real failures - an unknown
+label under CVAT's Datumaro export, or a COCO import that creates a duplicate
+label instead of filling the one already in the task.
+For a label schema, use `common.ontology.cvat_labels()` (weeds) or
+`annotation.cvat_roundtrip.ONION_CVAT_LABELS` (onion), both regeneratable with
+`annotation/regen_cvat_labels.py` so they can never drift from the ontology.
+
 Turns the extracted pool into annotation batches: QC gating, near-duplicate
 removal, diversity selection, deliberate hard-case quotas, and a CVAT label
 schema matching the project ontology.
