@@ -93,9 +93,11 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
              conf=0.5, ap_conf=0.05, small_area_px=1500, min_area_px=16,
              mask_threshold=0.5):
     import cv2
+    from common.torch_utils import require_device
     from perception.segmenter import MaskRCNNSegmenter
     from training.seg_dataset import polygons_to_mask, resolve_image
 
+    device = require_device(device)
     man_path = Path(dataset_dir) / "seg_manifest.json"
     if not man_path.exists():
         raise SystemExit(f"ERROR: {man_path} not found. Build the dataset "
