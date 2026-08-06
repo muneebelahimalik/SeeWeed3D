@@ -36,9 +36,13 @@ def _ok_depth():
 # Acceptance, so the rejections below mean something
 # --------------------------------------------------------------------------- #
 def test_a_clean_weed_becomes_a_candidate():
+    # An EMPTY crop mask, not None: the model looked for onions and found none.
+    # None would mean it has no crop class and cannot look, which is a
+    # rejection - see the crop-availability tests at the end of this file.
     d = sf.decide(class_name="wild_radish", class_confidence=0.9,
                   lep=_lep(90, 90), instance_mask=_mask(),
-                  onion_mask=None, cfg=CFG, visibility="visible",
+                  onion_mask=np.zeros((200, 200), bool), cfg=CFG,
+                  visibility="visible",
                   visibility_conf=0.9, targetable="yes", targetable_conf=0.9,
                   depth_result=_ok_depth())
     assert d.is_candidate and not d.abstained and d.reasons == []
@@ -320,3 +324,65 @@ def test_frame_result_separates_candidates_from_abstentions():
     assert len(fr.candidates) == 1 and len(fr.abstentions) == 1
     assert fr.reason_counts()[sf.R_ONION_CONFLICT] == 1
     assert fr.to_dict()["n_candidates"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# A model that cannot see the crop must not clear the laser
+# --------------------------------------------------------------------------- #
+def _ok_kwargs(**over):
+    """A candidate that passes everything else, so the crop check is isolated."""
+    import numpy as np
+    m = np.zeros((60, 60), bool); m[20:40, 20:40] = True
+    kw = dict(class_name="grass_weed", class_confidence=0.95,
+              lep={"uv_full": (30.0, 30.0), "peak": 0.9, "sigma_px": 2.0},
+              instance_mask=m, onion_mask=None, cfg=sf_cfg(),
+              visibility="visible", targetable="yes")
+    kw.update(over)
+    return kw
+
+
+def sf_cfg(**over):
+    return cfgm.SafetyConfig(**over)
+
+
+def test_a_weed_only_model_cannot_clear_the_laser_by_default():
+    """onion_mask=None means the segmenter has no crop class at all. Reading
+    that as 'no onions present' is the fail-open case this module exists for."""
+    d = sf.decide(**_ok_kwargs(onion_mask=None))
+    assert not d.is_candidate
+    assert sf.R_CROP_UNVERIFIABLE in d.reasons
+    assert d.notes["crop_mask_available"] is False
+
+
+def test_an_empty_crop_mask_is_not_the_same_as_no_crop_mask():
+    """Empty means the model looked and found nothing - that is a real
+    observation and may fire. None means it cannot look."""
+    import numpy as np
+    empty = np.zeros((60, 60), bool)
+    seen = sf.decide(**_ok_kwargs(onion_mask=empty))
+    blind = sf.decide(**_ok_kwargs(onion_mask=None))
+    assert seen.is_candidate
+    assert not blind.is_candidate
+    assert seen.notes["crop_mask_available"] is True
+
+
+def test_missing_crop_mask_may_be_overridden_explicitly():
+    """A claim about the FIELD, not about the model. Opt-in only."""
+    d = sf.decide(**_ok_kwargs(
+        onion_mask=None, cfg=sf_cfg(allow_missing_crop_mask=True)))
+    assert d.is_candidate
+    assert sf.R_CROP_UNVERIFIABLE not in d.reasons
+    assert d.notes["crop_mask_available"] is False, "still recorded"
+
+
+def test_the_override_does_not_disable_a_real_conflict():
+    import numpy as np
+    onion = np.zeros((60, 60), bool); onion[28:33, 28:33] = True
+    d = sf.decide(**_ok_kwargs(
+        onion_mask=onion, cfg=sf_cfg(allow_missing_crop_mask=True)))
+    assert not d.is_candidate
+    assert sf.R_ONION_CONFLICT in d.reasons
+
+
+def test_the_new_reason_is_registered():
+    assert sf.R_CROP_UNVERIFIABLE in sf.ALL_REJECTION_REASONS

@@ -45,11 +45,12 @@ R_NOT_TARGETABLE = "not_targetable"
 R_CLASS_UNCERTAIN = "class_uncertain"
 R_3D_UNCERTAIN = "high_3d_uncertainty"
 R_NO_LEP = "no_lep_predicted"
+R_CROP_UNVERIFIABLE = "crop_protection_unavailable"
 
 ALL_REJECTION_REASONS = (
     R_ONION, R_CLUSTER, R_NOT_VISIBLE, R_LOW_CONF, R_HIGH_UNC, R_OUTSIDE_MASK,
     R_ONION_CONFLICT, R_NO_DEPTH, R_DEPTH_DISC, R_NOT_TARGETABLE,
-    R_CLASS_UNCERTAIN, R_3D_UNCERTAIN, R_NO_LEP)
+    R_CLASS_UNCERTAIN, R_3D_UNCERTAIN, R_NO_LEP, R_CROP_UNVERIFIABLE)
 
 
 @dataclass
@@ -177,13 +178,29 @@ def decide(*, class_name, class_confidence, lep, instance_mask, onion_mask,
                 d.reject(R_OUTSIDE_MASK)
 
     # --- Crop safety --------------------------------------------------------
-    conflict, dist = check_onion_conflict(onion_mask, u, v,
-                                          cfg.laser_spot_radius_px,
-                                          cfg.onion_safety_margin_px)
-    d.notes["onion_distance_px"] = (None if dist == float("inf")
-                                    else round(float(dist), 2))
-    if conflict:
-        d.reject(R_ONION_CONFLICT)
+    # onion_mask is None means the segmenter CANNOT predict the crop class at
+    # all - a weed-only model, trained from an export with no onion instances.
+    # That is not the same statement as "looked and found no onions", and
+    # treating it as such is the fail-open case this whole module exists to
+    # prevent: the laser would be cleared to fire in a crop row by a model that
+    # is structurally incapable of seeing the crop.
+    #
+    # Firing anyway requires cfg.allow_missing_crop_mask, which is a claim ABOUT
+    # THE FIELD - that no crop is present - and can only be made by whoever is
+    # standing in it. It is recorded either way.
+    d.notes["crop_mask_available"] = onion_mask is not None
+    if onion_mask is None:
+        if not getattr(cfg, "allow_missing_crop_mask", False):
+            d.reject(R_CROP_UNVERIFIABLE)
+        d.notes["onion_distance_px"] = None
+    else:
+        conflict, dist = check_onion_conflict(onion_mask, u, v,
+                                              cfg.laser_spot_radius_px,
+                                              cfg.onion_safety_margin_px)
+        d.notes["onion_distance_px"] = (None if dist == float("inf")
+                                        else round(float(dist), 2))
+        if conflict:
+            d.reject(R_ONION_CONFLICT)
 
     # --- Depth / 3D ---------------------------------------------------------
     if depth_result is not None:

@@ -190,6 +190,15 @@ class SafetyConfig:
     # plus a margin clear of onion tissue, not merely the centre pixel.
     laser_spot_radius_px: float = 6.0
     onion_safety_margin_px: float = 12.0
+    # A segmenter trained without any onion_plant instances cannot predict the
+    # crop, so it returns no crop mask at all. Default False rejects every
+    # candidate in that case, because "this model cannot see onions" must never
+    # be read as "there are no onions here".
+    #
+    # Setting True is a claim ABOUT THE FIELD - that no crop is present in what
+    # the camera is looking at - and only whoever is standing in it can make
+    # that claim. It is recorded in every decision either way.
+    allow_missing_crop_mask: bool = False
     # Depth / 3D
     min_depth_valid_fraction: float = 0.35
     max_depth_spread_mm: float = 40.0
