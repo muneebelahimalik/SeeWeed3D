@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -33,6 +35,8 @@ from common.ontology import CLASSES  # noqa: E402
 from training import datumaro_multitask as dmm  # noqa: E402
 from training import splits as sp  # noqa: E402
 from training.config import AnnotationContract  # noqa: E402
+
+RANGE_RE = re.compile(r"\d+-\d+")
 
 
 def find_annotation_files(roots):
@@ -67,10 +71,117 @@ def find_annotation_files(roots):
     return sorted(set(files))
 
 
+def parse_frame_spec(spec):
+    """Parse a frame selection into (positions, patterns).
+
+    Tokens are comma-separated and are one of:
+        12          a single 1-based POSITION in sorted item_id order
+        1-26        an inclusive position range
+        frame_0007  a literal item id
+        *_00[0-3]*  an fnmatch glob over item ids
+
+    Positions are 1-based because that is how a person counts images in the
+    CVAT frame slider, and off-by-one here silently trains on the wrong frames.
+
+    `@path` reads the spec from a file instead, one token per line, `#`
+    comments allowed - use it when the list is long enough to mistype."""
+    if not spec:
+        return set(), []
+    if isinstance(spec, str) and spec.startswith("@"):
+        p = Path(spec[1:])
+        if not p.exists():
+            raise SystemExit(f"ERROR: frame list file not found: {p}")
+        toks = [ln.split("#")[0].strip() for ln in
+                p.read_text(encoding="utf-8").splitlines()]
+    else:
+        toks = []
+        for part in ([spec] if isinstance(spec, str) else list(spec)):
+            toks.extend(str(part).split(","))
+
+    positions, patterns = set(), []
+    for t in (x.strip() for x in toks):
+        if not t:
+            continue
+        if RANGE_RE.fullmatch(t):
+            a, b = (int(v) for v in t.split("-"))
+            if b < a:
+                raise SystemExit(f"ERROR: reversed frame range {t!r}")
+            positions.update(range(a, b + 1))
+        elif t.isdigit():
+            positions.add(int(t))
+        else:
+            patterns.append(t)
+    if any(v < 1 for v in positions):
+        raise SystemExit("ERROR: frame positions are 1-based; 0 is not a frame.")
+    return positions, patterns
+
+
+def select_frames(frames, include=None, exclude=None):
+    """Keep only hand-verified frames. Returns (kept, dropped).
+
+    Why this exists: `keep_empty_frames` removes frames with NO annotations,
+    which does NOT cover the common case. A CVAT task pre-loaded with SAM
+    proposals has annotations on EVERY frame - the ones you never reached are
+    full of machine guesses with the wrong classes. Those frames are not empty,
+    so nothing else filters them, and training on them actively teaches the
+    model the wrong label for a correctly-shaped mask. That is worse than no
+    data, because the mask geometry is right and only the class is wrong, so
+    the loss is confident and consistent.
+
+    Ordering is by item_id, which matches CVAT's frame order whenever the
+    filenames are zero-padded (which the extractor guarantees)."""
+    ordered = sorted(frames, key=lambda f: f.item_id)
+    inc_pos, inc_pat = parse_frame_spec(include)
+    exc_pos, exc_pat = parse_frame_spec(exclude)
+
+    n = len(ordered)
+    over = sorted(v for v in (inc_pos | exc_pos) if v > n)
+    if over:
+        raise SystemExit(
+            f"ERROR: frame position(s) {over} exceed the {n} frame(s) in this "
+            f"export. Positions are 1-based over item_id order; run "
+            f"--list-frames to see the numbering.")
+
+    def matches(i, rec, pos, pat):
+        return (i in pos) or any(fnmatch.fnmatch(rec.item_id, g) for g in pat)
+
+    kept, dropped = [], []
+    for i, rec in enumerate(ordered, start=1):
+        want = matches(i, rec, inc_pos, inc_pat) if (inc_pos or inc_pat) else True
+        if want and (exc_pos or exc_pat):
+            want = not matches(i, rec, exc_pos, exc_pat)
+        (kept if want else dropped).append(rec)
+    return kept, dropped
+
+
+def list_frames(datumaro_root, contract=None):
+    """Print the numbered frame table, then stop.
+
+    Always run this before --include-frames. The positions you remember from
+    CVAT are only as good as the assumption that its frame order matches
+    item_id order, and this is the cheapest way to check that assumption
+    instead of discovering it in a trained model."""
+    contract = contract or AnnotationContract()
+    frames = []
+    for f in find_annotation_files(datumaro_root):
+        got, _ = dmm.load_datumaro(f, contract)
+        frames.extend(got)
+    ordered = sorted(frames, key=lambda f: f.item_id)
+    print(f"{'pos':>5}  {'item_id':<44}{'n':>4}  classes")
+    for i, rec in enumerate(ordered, start=1):
+        c = Counter(inst.class_name for inst in rec.instances)
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(c.items())) or "-EMPTY-"
+        print(f"{i:>5}  {rec.item_id:<44}{len(rec.instances):>4}  {summary}")
+    print(f"\n{len(ordered)} frame(s). Positions are 1-based and are what "
+          f"--include-frames / --exclude-frames use.")
+    return ordered
+
+
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
-          drop_classes=(), keep_empty_frames=False, require_lep="auto"):
+          drop_classes=(), keep_empty_frames=False, require_lep="auto",
+          include_frames=None, exclude_frames=None):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -108,7 +219,14 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         genuinely bare ground. Training on it teaches the model that a frame
         full of weeds is background, which is far more damaging than the frame
         being missing. Pass True only if your empty frames are deliberately
-        empty ground."""
+        empty ground.
+
+    include_frames / exclude_frames: keep only the frames you actually
+        hand-verified. Needed whenever the CVAT task was pre-loaded with SAM
+        proposals, because then the frames you never reached are NOT empty -
+        they carry machine guesses with the wrong classes, and no other filter
+        removes them. See select_frames(). Run --list-frames first to get the
+        numbering."""
     contract = contract or AnnotationContract()
     out = Path(out_root)
     out.mkdir(parents=True, exist_ok=True)
@@ -131,6 +249,30 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         for rec in got:
             origin.setdefault(rec.item_id, []).append(str(f))
         frames.extend(got)
+
+    # -- keep only hand-verified frames --------------------------------------
+    # FIRST, before duplicate detection and before validation. A frame you never
+    # reached in CVAT is full of SAM guesses with the wrong classes; reporting
+    # errors on annotations that are about to be discarded would fill
+    # annotations_needing_correction.json with noise and, under strict mode,
+    # block the build over frames that are not part of the dataset.
+    if include_frames or exclude_frames:
+        before = len(frames)
+        frames, discarded = select_frames(frames, include_frames, exclude_frames)
+        if not frames:
+            raise SystemExit(
+                "ERROR: the frame selection kept 0 frames. Run --list-frames "
+                "to check the numbering before selecting.")
+        keep_ids = {f.item_id for f in frames}
+        origin = {k: v for k, v in origin.items() if k in keep_ids}
+        report = dmm.MultitaskDatasetReport()     # errors from discarded frames
+        for f in ann_files:                       # are not yours to fix
+            _, report = dmm.load_datumaro(f, contract, report=report,
+                                          only_items=keep_ids)
+        kept_ids = sorted(keep_ids)
+        print(f"  SELECTED {len(frames)} of {before} frame(s); discarded "
+              f"{len(discarded)}.")
+        print(f"      kept: {kept_ids[0]} .. {kept_ids[-1]}")
 
     # The same frame annotated in two CVAT tasks would be counted twice and
     # could land in two splits, which is exactly the leakage this pipeline
@@ -404,6 +546,20 @@ def main(argv=None):
                         "Off by default: an empty frame is usually one you did "
                         "not annotate, and training on it teaches the model "
                         "that plants are background.")
+    p.add_argument("--list-frames", action="store_true",
+                   help="print the numbered frame table and exit. RUN THIS "
+                        "FIRST if you intend to use --include-frames.")
+    p.add_argument("--include-frames", default=None,
+                   help="keep ONLY these frames, e.g. '1-26,28-36,50-59' "
+                        "(1-based positions in item_id order), an item id, an "
+                        "fnmatch glob, or '@list.txt'. REQUIRED when the CVAT "
+                        "task was pre-loaded with SAM proposals: frames you "
+                        "never reached are not empty, they hold machine "
+                        "guesses with the wrong classes, and no other filter "
+                        "removes them.")
+    p.add_argument("--exclude-frames", default=None,
+                   help="drop these frames; same syntax as --include-frames. "
+                        "Applied after it.")
     p.add_argument("--gap-frames", type=int, default=2,
                    help="single-session only: frames discarded at each block "
                         "boundary to reduce temporal leakage")
@@ -413,13 +569,17 @@ def main(argv=None):
                    help="write outputs even when the contract is violated "
                         "(for triage only - do NOT train on the result)")
     a = p.parse_args(argv)
+    if a.list_frames:
+        list_frames(a.datumaro_root)
+        return
     build(a.datumaro_root, a.images_root, a.out,
           val_fraction=a.val_fraction, test_fraction=a.test_fraction,
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
           keep_empty_frames=a.keep_empty_frames,
-          require_lep=False if a.no_require_lep else "auto")
+          require_lep=False if a.no_require_lep else "auto",
+          include_frames=a.include_frames, exclude_frames=a.exclude_frames)
 
 
 if __name__ == "__main__":

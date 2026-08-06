@@ -201,7 +201,14 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
 
     # Layout: [ train | gap | val | gap | test ]
     # Test last so it sits at one end of the drive, furthest from training.
-    need = n_val + n_test + 2 * gap
+    #
+    # A gap is spent only where a REAL boundary exists. With test_fraction=0
+    # there is no train|val|test seam to buffer, only train|val, and charging
+    # for the absent one would discard annotated frames to separate a block
+    # from nothing. On a 45-frame dataset that is two hand-corrected frames
+    # thrown away for no separation at all.
+    n_gaps = (1 if n_val else 0) + (1 if n_test else 0)
+    need = n_val + n_test + n_gaps * gap
     if need >= n:
         gap = 0                                    # too small to afford buffers
         need = n_val + n_test
@@ -213,8 +220,8 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
 
     n_train = n - need
     i = 0
-    train = ids[i:i + n_train]; i += n_train + gap
-    val = ids[i:i + n_val]; i += n_val + gap
+    train = ids[i:i + n_train]; i += n_train + (gap if n_val else 0)
+    val = ids[i:i + n_val]; i += n_val + (gap if n_test else 0)
     test = ids[i:i + n_test]
     return {"train": train, "val": val, "test": test,
             "_dropped_gap": [f for f in ids

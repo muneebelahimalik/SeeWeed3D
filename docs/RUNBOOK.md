@@ -324,6 +324,49 @@ python -m seeweed3d.training.prepare_dataset `
     --out            E:/Dataset_Vidalia/training/mixed_v1
 ```
 
+### 5.1 ⚠️ If the CVAT task was pre-loaded with SAM prelabels
+
+Then **every frame in the export has annotations**, including the ones you never
+reached. Those frames are *not* empty — they carry SAM's masks with whatever
+class it guessed. Nothing else in the pipeline filters them, and the
+un-annotated-frame exclusion will not catch them.
+
+Training on them is **worse than having no data**: the mask geometry is
+basically correct and only the label is wrong, so the loss is confident and
+consistent, and the model reliably learns the wrong class.
+
+Select the frames you actually verified. **List first:**
+
+```powershell
+python -m seeweed3d.training.prepare_dataset `
+    --datumaro-root E:/CVAT_exports --list-frames
+```
+
+That prints a numbered table — position, item id, instance count, class
+breakdown. Positions are **1-based** over item-id order. Check the numbering
+against what you remember from CVAT *before* selecting, rather than discovering
+a one-off in a trained model.
+
+Then build with the selection:
+
+```powershell
+    --include-frames "1-26,28-36,50-59"
+```
+
+| Syntax | Meaning |
+|---|---|
+| `1-26` | inclusive position range |
+| `12` | a single position |
+| `frame_0007` | a literal item id |
+| `*_001*` | fnmatch glob over item ids |
+| `@keep.txt` | read the list from a file, one token per line, `#` comments |
+| `--exclude-frames` | same syntax, applied **after** `--include-frames` |
+
+Selection happens **before** validation, so the frames you discarded cannot fill
+`annotations_needing_correction.json` with errors about annotations you are
+throwing away. A position beyond the end of the export is an **error**, not a
+silent no-op — quietly ignoring it would build the wrong dataset.
+
 **Merging is safe across tasks:** each export is resolved through its *own*
 `categories` block, so two CVAT tasks that happen to order their labels
 differently still merge correctly — only the label **name** is carried forward.
