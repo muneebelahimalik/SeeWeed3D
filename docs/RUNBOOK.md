@@ -415,6 +415,37 @@ training, so the full model still works when depth fails at runtime.
 
 ## 8. Evaluate
 
+### 8.1 Stage A
+
+Training prints loss, which is not a model-quality number — it is not comparable
+across runs with different class counts, and it says nothing about whether small
+weeds are found or onions are protected. Run this instead:
+
+```powershell
+python -m seeweed3d.evaluation.eval_seg `
+    --checkpoint  E:/Dataset_Vidalia/runs/seg_v1/best.pt `
+    --dataset     E:/Dataset_Vidalia/training/mixed_v1 `
+    --images-root E:/Dataset_Vidalia/sessions `
+    --split val --device cuda --conf 0.5
+```
+
+Three tables, deliberately not combined into one score:
+
+| Table | What it answers |
+|---|---|
+| **detection** | `mAP@50`, `mAP@50:95` per class — score-ranked, 101-point interpolated, so comparable with published numbers |
+| **operating point** | precision/recall/IoU at the confidence you would actually deploy at. mAP is threshold-free; a robot is not |
+| **crop safety** | **missed onion pixels** — crop pixels the system believes are safe to fire at |
+
+Crop safety is reported separately on purpose. A model can post excellent mAP and
+still miss the one onion that matters, and averaging that into a headline number
+hides it. A class with no ground truth in the split reports AP as `-` (undefined)
+and is excluded from the mean, rather than counted as zero.
+
+Writes `metrics_<split>.json` next to the checkpoint.
+
+### 8.2 Everything else
+
 Metrics live in `seeweed3d/evaluation/metrics.py` and are computed from stored
 results, so you can re-evaluate without re-running inference.
 
@@ -530,6 +561,7 @@ python seeweed3d/annotation/regen_cvat_labels.py
 # Environment B (sw-train): training + deployment
 python -m seeweed3d.training.prepare_dataset --datumaro-root <exports> --images-root <sessions> --out <dir>
 python -m seeweed3d.training.train_seg_torchvision --dataset <dir> --images-root <sessions> --out <run>
+python -m seeweed3d.evaluation.eval_seg --checkpoint <run>/best.pt --dataset <dir> --images-root <sessions> --split val
 python -m seeweed3d.training.train_lep --manifest <dir>/lep_manifest.json --images-root <sessions> --out <run>
 python -m seeweed3d.deploy.export --checkpoint <run>/best.pt --out <run>/export --precision fp16
 python -m seeweed3d.deploy.benchmark --checkpoint <run>/best.pt --device cuda

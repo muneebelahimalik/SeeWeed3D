@@ -60,7 +60,13 @@ class Detections:
     """Segmenter output for one frame, framework-independent.
 
     masks: (N, H, W) bool. boxes: (N, 4) xywh. classes: (N,) int index into
-    CLASSES. scores: (N,) float."""
+    `names`. scores: (N,) float.
+
+    `names` is the class list the MODEL was trained on, which is not always the
+    full ontology: prepare_dataset's --drop-classes builds a reduced, contiguous
+    active set, and a checkpoint trained that way emits indices into that set.
+    Every index here is resolved through `names` for exactly that reason - see
+    `crop_index`."""
     masks: np.ndarray
     boxes: np.ndarray
     classes: np.ndarray
@@ -75,27 +81,47 @@ class Detections:
     def class_name(self, i):
         return self.names[int(self.classes[i])]
 
+    def crop_index(self):
+        """Index of the crop class IN THIS MODEL'S class list, or None.
+
+        Resolving against the full ontology instead would be a crop-safety bug,
+        not a cosmetic one. Drop one class below `onion_plant` and the ontology
+        puts the crop at 5 while the model emits 4: `onion_safety_mask` would
+        return an empty mask and `weed_indices` would hand every onion to the
+        targeting stage as a weed.
+
+        None means the crop class is absent from this model's vocabulary, so it
+        can never predict a crop. That is not the same as 'no crop present' and
+        callers must treat it as 'crop protection unavailable'."""
+        return self.names.index(CROP_CLASS) if CROP_CLASS in self.names else None
+
     def onion_safety_mask(self):
         """Union of every predicted crop mask.
 
         The union, not the individual instances, is the safety output: for
         crop protection it does not matter which onion a pixel belongs to, only
         that it is onion. Instances stay separate for training and metrics, but
-        one conservative mask is what the laser decision consults."""
+        one conservative mask is what the laser decision consults.
+
+        Returns None when this model cannot predict the crop class at all,
+        which is a different statement from an empty mask and must not be
+        collapsed into one."""
+        crop_idx = self.crop_index()
+        if crop_idx is None:
+            return None
         if self.height and self.width:
             out = np.zeros((self.height, self.width), bool)
         elif len(self.masks):
             out = np.zeros(self.masks[0].shape, bool)
         else:
             return None
-        crop_idx = CLASSES.index(CROP_CLASS)
         for i in range(len(self)):
             if int(self.classes[i]) == crop_idx:
                 out |= self.masks[i].astype(bool)
         return out
 
     def weed_indices(self):
-        crop_idx = CLASSES.index(CROP_CLASS)
+        crop_idx = self.crop_index()
         return [i for i in range(len(self)) if int(self.classes[i]) != crop_idx]
 
 
@@ -184,6 +210,9 @@ class MaskRCNNSegmenter:
         self.conf, self.device = conf, device
         self.max_det, self.mask_threshold = max_det, mask_threshold
         self._model = None
+        # Filled from the checkpoint by load(). Never assumed to be the full
+        # ontology - a --drop-classes build trains on a reduced active set.
+        self.classes = None
 
     @staticmethod
     def build(num_classes=None, pretrained=False):
@@ -217,7 +246,8 @@ class MaskRCNNSegmenter:
                 f"  python -m seeweed3d.training.train_seg_torchvision "
                 f"--dataset <prepared> --images-root <sessions> --out <dir>")
         blob = torch.load(p, map_location=self.device, weights_only=False)
-        self._model = self.build(len(blob.get("classes", CLASSES)))
+        self.classes = list(blob.get("classes") or CLASSES)
+        self._model = self.build(len(self.classes))
         self._model.load_state_dict(blob["model"])
         self._model.to(self.device).eval()
         return self
@@ -232,11 +262,13 @@ class MaskRCNNSegmenter:
             out = self._model([t])[0]
 
         h, w = bgr.shape[:2]
+        names = list(self.classes or CLASSES)
         keep = out["scores"] >= self.conf
         scores = out["scores"][keep][: self.max_det].cpu().numpy()
         if not len(scores):
             return Detections(np.zeros((0, h, w), bool), np.zeros((0, 4)),
-                              np.zeros((0,), int), np.zeros((0,)), w, h)
+                              np.zeros((0,), int), np.zeros((0,)), w, h,
+                              names=names)
         masks = (out["masks"][keep][: self.max_det, 0]
                  >= self.mask_threshold).cpu().numpy()
         xyxy = out["boxes"][keep][: self.max_det].cpu().numpy()
@@ -245,7 +277,7 @@ class MaskRCNNSegmenter:
         # Undo the background offset so downstream indices are ontology order.
         labels = out["labels"][keep][: self.max_det].cpu().numpy() - 1
         return Detections(masks, boxes, labels.astype(int),
-                          scores.astype(float), w, h)
+                          scores.astype(float), w, h, names=names)
 
 
 class RFDETRSegmenter:
