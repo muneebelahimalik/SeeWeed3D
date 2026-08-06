@@ -16,37 +16,45 @@ pd = load_script("training/prepare_dataset.py")
 
 
 class Rec:
-    def __init__(self, item_id, n=1):
+    def __init__(self, item_id, n=1, session_id="sess_a"):
         self.item_id = item_id
         self.instances = list(range(n))
+        self.session_id = session_id
 
 
-def frames(n=60):
-    return [Rec(f"frame_{i:04d}") for i in range(1, n + 1)]
+def frames(n=60, session_id="sess_a"):
+    return [Rec(f"frame_{i:04d}", session_id=session_id)
+            for i in range(1, n + 1)]
 
 
 # --------------------------------------------------------------------------- #
 # spec parsing
 # --------------------------------------------------------------------------- #
+def _flat(spec):
+    """(positions, patterns) of the unscoped group, for the simple cases."""
+    g = pd.parse_frame_spec(spec)
+    return g.get(None, (set(), []))
+
+
 def test_ranges_are_inclusive_on_both_ends():
-    pos, _ = pd.parse_frame_spec("3-5")
+    pos, _ = _flat("3-5")
     assert pos == {3, 4, 5}
 
 
 def test_multiple_ranges_and_singles_combine():
-    pos, _ = pd.parse_frame_spec("1-3,7,10-11")
+    pos, _ = _flat("1-3,7,10-11")
     assert pos == {1, 2, 3, 7, 10, 11}
 
 
 def test_non_numeric_tokens_are_patterns_not_positions():
-    pos, pat = pd.parse_frame_spec("1-2,frame_0009,*_001*")
+    pos, pat = _flat("1-2,frame_0009,*_001*")
     assert pos == {1, 2}
     assert pat == ["frame_0009", "*_001*"]
 
 
 def test_empty_spec_selects_nothing_specific():
-    assert pd.parse_frame_spec(None) == (set(), [])
-    assert pd.parse_frame_spec("") == (set(), [])
+    assert pd.parse_frame_spec(None) == {}
+    assert pd.parse_frame_spec("") == {}
 
 
 def test_reversed_range_is_rejected():
@@ -62,7 +70,7 @@ def test_zero_is_rejected_because_positions_are_one_based():
 def test_spec_can_be_read_from_a_file(tmp_path):
     f = tmp_path / "keep.txt"
     f.write_text("1-3\n# a comment\n\n7   # trailing comment\n")
-    pos, _ = pd.parse_frame_spec(f"@{f}")
+    pos, _ = _flat(f"@{f}")
     assert pos == {1, 2, 3, 7}
 
 
@@ -233,3 +241,91 @@ def test_every_frame_is_accounted_for():
     for vf, tf in [(0.2, 0.2), (0.2, 0.0), (0.0, 0.0)]:
         r = assign_frame_blocks(ids, vf, tf, gap_frames=2)
         assert sum(len(v) for v in r.values()) == len(ids)
+
+
+# --------------------------------------------------------------------------- #
+# Multiple sessions: adding an onion export must not renumber the weed one
+# --------------------------------------------------------------------------- #
+WEED, ONION = "vid2_20260108_122731", "onion1_20260115_090000"
+
+
+def two_sessions(n_weed=60, n_onion=20):
+    return (frames(n_weed, session_id=WEED)
+            + [Rec(f"{ONION}_{i:06d}", session_id=ONION)
+               for i in range(1, n_onion + 1)])
+
+
+def test_positions_restart_at_one_in_each_session():
+    """The whole point: merging a second export must not shift the first."""
+    alone, _ = pd.select_frames(frames(60, session_id=WEED),
+                                include=f"{WEED}:1-27,{WEED}:29-36,{WEED}:51-60")
+    merged, _ = pd.select_frames(two_sessions(),
+                                 include=f"{WEED}:1-27,{WEED}:29-36,{WEED}:51-60")
+    assert [r.item_id for r in alone] == [r.item_id for r in merged]
+    assert len(merged) == 45
+
+
+def test_a_bare_position_is_refused_when_sessions_are_merged():
+    """Applying '1-26' to both a weed task and an onion task would select the
+    wrong frames from at least one. Guessing is not an option."""
+    with pytest.raises(SystemExit, match="ambiguous"):
+        pd.select_frames(two_sessions(), include="1-26")
+
+
+def test_the_ambiguity_error_shows_how_to_scope_it():
+    with pytest.raises(SystemExit, match=r"<session>:\*"):
+        pd.select_frames(two_sessions(), include="1-26")
+
+
+def test_a_bare_position_is_still_fine_with_one_session():
+    kept, _ = pd.select_frames(frames(10, session_id=WEED), include="1-3")
+    assert len(kept) == 3
+
+
+def test_star_keeps_a_whole_session():
+    kept, _ = pd.select_frames(two_sessions(n_onion=20),
+                               include=f"{WEED}:1-5,{ONION}:*")
+    assert sum(1 for r in kept if r.session_id == ONION) == 20
+    assert sum(1 for r in kept if r.session_id == WEED) == 5
+
+
+def test_a_session_not_mentioned_is_excluded():
+    kept, _ = pd.select_frames(two_sessions(), include=f"{ONION}:*")
+    assert {r.session_id for r in kept} == {ONION}
+
+
+def test_a_typo_in_a_session_id_fails_instead_of_selecting_nothing():
+    with pytest.raises(SystemExit, match="not in this export"):
+        pd.select_frames(two_sessions(), include="vid2_wrong:1-5")
+
+
+def test_out_of_range_is_checked_per_session():
+    """20 onion frames; position 30 exists in the weed session but not here."""
+    with pytest.raises(SystemExit, match="onion1_20260115_090000"):
+        pd.select_frames(two_sessions(n_onion=20), include=f"{ONION}:30")
+
+
+def test_exclude_can_be_scoped_to_one_session():
+    kept, _ = pd.select_frames(two_sessions(n_onion=20),
+                               include=f"{WEED}:*,{ONION}:*",
+                               exclude=f"{WEED}:28")
+    weed = [r.item_id for r in kept if r.session_id == WEED]
+    assert "frame_0028" not in weed
+    assert len(weed) == 59
+    assert sum(1 for r in kept if r.session_id == ONION) == 20
+
+
+def test_a_scoped_exclude_leaves_other_sessions_alone():
+    kept, _ = pd.select_frames(two_sessions(n_onion=20),
+                               include=f"{WEED}:*,{ONION}:*",
+                               exclude=f"{ONION}:1-20")
+    assert sum(1 for r in kept if r.session_id == ONION) == 0
+    assert sum(1 for r in kept if r.session_id == WEED) == 60
+
+
+def test_a_windows_path_in_a_list_file_is_not_read_as_a_session_scope(tmp_path):
+    """'E:/x.png' has a colon. A single-letter head is a drive, not a session."""
+    f = tmp_path / "keep.txt"
+    f.write_text("E:/frames/frame_0003.png\nframe_0005\n")
+    g = pd.parse_frame_spec(f"@{f}")
+    assert set(g) == {None}, "a drive letter must not become a session scope"

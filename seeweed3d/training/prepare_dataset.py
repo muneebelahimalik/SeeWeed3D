@@ -111,22 +111,10 @@ def find_annotation_files(roots):
     return sorted(set(files))
 
 
-def parse_frame_spec(spec):
-    """Parse a frame selection into (positions, patterns).
-
-    Tokens are comma-separated and are one of:
-        12          a single 1-based POSITION in sorted item_id order
-        1-26        an inclusive position range
-        frame_0007  a literal item id
-        *_00[0-3]*  an fnmatch glob over item ids
-
-    Positions are 1-based because that is how a person counts images in the
-    CVAT frame slider, and off-by-one here silently trains on the wrong frames.
-
-    `@path` reads the spec from a file instead, one token per line, `#`
-    comments allowed - use it when the list is long enough to mistype."""
+def _spec_tokens(spec):
+    """Split a spec into raw tokens, honouring the `@file` form."""
     if not spec:
-        return set(), []
+        return []
     if isinstance(spec, str) and spec.startswith("@"):
         p = Path(spec[1:])
         if not p.exists():
@@ -137,23 +125,61 @@ def parse_frame_spec(spec):
         toks = []
         for part in ([spec] if isinstance(spec, str) else list(spec)):
             toks.extend(str(part).split(","))
+    return [t.strip() for t in toks if t.strip()]
 
-    positions, patterns = set(), []
-    for t in (x.strip() for x in toks):
-        if not t:
-            continue
+
+def parse_frame_spec(spec):
+    """Parse a frame selection into {session_or_None: (positions, patterns)}.
+
+    Tokens are comma-separated and are one of:
+        12                a single 1-based POSITION within its session
+        1-26              an inclusive position range
+        frame_0007        a literal item id
+        *_00[0-3]*        an fnmatch glob over item ids
+        vid2_2026...:1-26 any of the above, scoped to ONE session
+        vid2_2026...:*    every frame of that session
+
+    Positions are 1-based because that is how a person counts images in the
+    CVAT frame slider, and an off-by-one here silently trains on the wrong
+    frames.
+
+    POSITIONS ARE NUMBERED WITHIN A SESSION, not across the merged dataset.
+    That is what makes a range stable: merging a second CVAT export must not
+    renumber the first one and quietly redirect a carefully-checked selection
+    at different frames.
+
+    `@path` reads the spec from a file instead, one token per line, `#`
+    comments allowed - use it when the list is long enough to mistype.
+
+    The None key holds unscoped tokens, which apply to every session."""
+    groups = {}
+    for t in _spec_tokens(spec):
+        sess = None
+        if ":" in t:
+            head, _, tail = t.partition(":")
+            # A drive letter is not a session scope. Windows paths reach here
+            # via @file lists and bare item ids.
+            if head and not (len(head) == 1 and head.isalpha()):
+                sess, t = head, tail.strip()
+            if not t:
+                continue
+        pos, pat = groups.setdefault(sess, (set(), []))
         if RANGE_RE.fullmatch(t):
             a, b = (int(v) for v in t.split("-"))
             if b < a:
                 raise SystemExit(f"ERROR: reversed frame range {t!r}")
-            positions.update(range(a, b + 1))
+            if a < 1:
+                raise SystemExit(
+                    "ERROR: frame positions are 1-based; 0 is not a frame.")
+            pos.update(range(a, b + 1))
         elif t.isdigit():
-            positions.add(int(t))
+            if int(t) < 1:
+                raise SystemExit(
+                    "ERROR: frame positions are 1-based; 0 is not a frame.")
+            pos.add(int(t))
         else:
-            patterns.append(t)
-    if any(v < 1 for v in positions):
-        raise SystemExit("ERROR: frame positions are 1-based; 0 is not a frame.")
-    return positions, patterns
+            pat.append(t)
+    return groups
 
 
 def select_frames(frames, include=None, exclude=None):
@@ -168,29 +194,70 @@ def select_frames(frames, include=None, exclude=None):
     data, because the mask geometry is right and only the class is wrong, so
     the loss is confident and consistent.
 
-    Ordering is by item_id, which matches CVAT's frame order whenever the
-    filenames are zero-padded (which the extractor guarantees)."""
-    ordered = sorted(frames, key=lambda f: f.item_id)
-    inc_pos, inc_pat = parse_frame_spec(include)
-    exc_pos, exc_pat = parse_frame_spec(exclude)
+    Frames are numbered 1..n WITHIN each session, ordered by item_id - which
+    matches CVAT's frame order whenever the filenames are zero-padded, as the
+    extractor guarantees. An unscoped positional token is therefore ambiguous
+    once more than one session is present, and is refused rather than guessed:
+    silently applying `1-26` to both a weed task and an onion task would select
+    the wrong frames from at least one of them."""
+    inc = parse_frame_spec(include)
+    exc = parse_frame_spec(exclude)
 
-    n = len(ordered)
-    over = sorted(v for v in (inc_pos | exc_pos) if v > n)
-    if over:
+    by_session = {}
+    for rec in frames:
+        by_session.setdefault(getattr(rec, "session_id", "") or "", []).append(rec)
+    sessions = sorted(by_session)
+
+    named = {s for s in list(inc) + list(exc) if s is not None}
+    unknown = sorted(named - set(sessions))
+    if unknown:
         raise SystemExit(
-            f"ERROR: frame position(s) {over} exceed the {n} frame(s) in this "
-            f"export. Positions are 1-based over item_id order; run "
-            f"--list-frames to see the numbering.")
+            f"ERROR: frame selection names session(s) not in this export: "
+            f"{unknown}\nPresent: {sessions}")
 
-    def matches(i, rec, pos, pat):
-        return (i in pos) or any(fnmatch.fnmatch(rec.item_id, g) for g in pat)
+    unscoped_positions = any(inc.get(k, (set(), []))[0] or
+                             exc.get(k, (set(), []))[0] for k in (None,))
+    if unscoped_positions and len(sessions) > 1:
+        raise SystemExit(
+            f"ERROR: this build merges {len(sessions)} sessions "
+            f"({', '.join(sessions)}), so a bare frame position is ambiguous - "
+            f"positions are numbered WITHIN a session.\n"
+            f"Scope each range with its session id, e.g.\n"
+            f"    {sessions[0]}:1-26,{sessions[0]}:28-36\n"
+            f"and use  <session>:*  to keep all of a session.")
+
+    def matches(i, rec, groups):
+        for key in (None, getattr(rec, "session_id", "") or ""):
+            pos, pat = groups.get(key, (set(), []))
+            if i in pos or any(fnmatch.fnmatch(rec.item_id, g) for g in pat):
+                return True
+        return False
+
+    def relevant(rec, groups):
+        """Does any token address this frame's session at all?"""
+        return (None in groups) or ((getattr(rec, "session_id", "") or "")
+                                    in groups)
+
+    for sess in sessions:
+        n = len(by_session[sess])
+        for groups in (inc, exc):
+            for key in (None, sess):
+                over = sorted(v for v in groups.get(key, (set(), []))[0] if v > n)
+                if over:
+                    raise SystemExit(
+                        f"ERROR: frame position(s) {over} exceed the {n} "
+                        f"frame(s) in session {sess!r}. Positions are 1-based "
+                        f"within a session; run --list-frames to see the "
+                        f"numbering.")
 
     kept, dropped = [], []
-    for i, rec in enumerate(ordered, start=1):
-        want = matches(i, rec, inc_pos, inc_pat) if (inc_pos or inc_pat) else True
-        if want and (exc_pos or exc_pat):
-            want = not matches(i, rec, exc_pos, exc_pat)
-        (kept if want else dropped).append(rec)
+    for sess in sessions:
+        ordered = sorted(by_session[sess], key=lambda f: f.item_id)
+        for i, rec in enumerate(ordered, start=1):
+            want = matches(i, rec, inc) if inc else True
+            if want and exc and relevant(rec, exc):
+                want = not matches(i, rec, exc)
+            (kept if want else dropped).append(rec)
     return kept, dropped
 
 
@@ -206,15 +273,35 @@ def list_frames(datumaro_root, contract=None):
     for f in find_annotation_files(datumaro_root):
         got, _ = dmm.load_datumaro(f, contract)
         frames.extend(got)
-    ordered = sorted(frames, key=lambda f: f.item_id)
-    print(f"{'pos':>5}  {'item_id':<44}{'n':>4}  classes")
-    for i, rec in enumerate(ordered, start=1):
-        c = Counter(inst.class_name for inst in rec.instances)
-        summary = ", ".join(f"{k}={v}" for k, v in sorted(c.items())) or "-EMPTY-"
-        print(f"{i:>5}  {rec.item_id:<44}{len(rec.instances):>4}  {summary}")
-    print(f"\n{len(ordered)} frame(s). Positions are 1-based and are what "
-          f"--include-frames / --exclude-frames use.")
-    return ordered
+
+    by_session = {}
+    for rec in frames:
+        by_session.setdefault(rec.session_id or "", []).append(rec)
+
+    out = []
+    for sess in sorted(by_session):
+        ordered = sorted(by_session[sess], key=lambda f: f.item_id)
+        if len(by_session) > 1:
+            print(f"\n=== session {sess!r}  ({len(ordered)} frames) ===")
+        print(f"{'pos':>5}  {'item_id':<44}{'n':>4}  classes")
+        for i, rec in enumerate(ordered, start=1):
+            c = Counter(inst.class_name for inst in rec.instances)
+            summary = ", ".join(f"{k}={v}" for k, v in sorted(c.items())) \
+                or "-EMPTY-"
+            print(f"{i:>5}  {rec.item_id:<44}{len(rec.instances):>4}  {summary}")
+        out.extend(ordered)
+
+    total = len(out)
+    if len(by_session) > 1:
+        print(f"\n{total} frame(s) across {len(by_session)} sessions. "
+              f"Positions restart at 1 in EACH session, so scope every range "
+              f"with its session id:")
+        for sess in sorted(by_session):
+            print(f"    {sess}:1-10      or  {sess}:*  for all of it")
+    else:
+        print(f"\n{total} frame(s). Positions are 1-based and are what "
+              f"--include-frames / --exclude-frames use.")
+    return out
 
 
 def build(datumaro_root, images_root, out_root, *, contract=None,
