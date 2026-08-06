@@ -90,8 +90,14 @@ def match_instances(pred_masks, pred_classes, gt_masks, gt_classes,
 
 
 def segmentation_metrics(pred_masks, pred_classes, gt_masks, gt_classes,
-                         iou_thresholds=None, small_area_px=1500):
-    """Per-class precision/recall/AP-style summary plus crop-safety pixels."""
+                         iou_thresholds=None, small_area_px=1500,
+                         classes=None):
+    """Per-class precision/recall/AP-style summary plus crop-safety pixels.
+
+    `classes` is the class list to report over; pass the model's ACTIVE list
+    when it was trained on a reduced set, otherwise the table gains rows for
+    classes the model was never taught and cannot predict."""
+    class_list = list(classes or CLASSES)
     thresholds = iou_thresholds or [0.5 + 0.05 * i for i in range(10)]
     out = {"per_class": {}, "mask_ap50_95": None, "small_weed_recall": None}
 
@@ -106,7 +112,7 @@ def segmentation_metrics(pred_masks, pred_classes, gt_masks, gt_classes,
     m50, up50, ug50 = match_instances(pred_masks, pred_classes, gt_masks,
                                       gt_classes, 0.5)
     matched_gt = {x["gt"] for x in m50}
-    for c in CLASSES:
+    for c in class_list:
         gt_idx = [j for j, g in enumerate(gt_classes) if g == c]
         pr_idx = [i for i, p in enumerate(pred_classes) if p == c]
         if not gt_idx and not pr_idx:
