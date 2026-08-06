@@ -261,6 +261,46 @@ def select_frames(frames, include=None, exclude=None):
     return kept, dropped
 
 
+def _reject_silently_dropped_sessions(all_sessions, kept_per_session,
+                                      include_frames, exclude_frames):
+    """Refuse a build that discards an ENTIRE session nobody asked to discard.
+
+    You loaded that export on purpose, so contributing zero frames from it is
+    almost never what you meant. The realistic way it happens is not a wrong
+    range but a Python dict with a repeated key:
+
+        "INCLUDE_FRAMES": "onion_sess:1-36",
+        "INCLUDE_FRAMES": "weed_sess:1-27,weed_sess:51-60",   # silently wins
+
+    Python keeps only the last, without a warning, and the onion export
+    vanishes. Everything downstream still succeeds - the model simply never
+    learns the crop class, and the first evidence is `crop safety is
+    UNMEASURED` after a full training run.
+
+    Naming a session in EITHER spec counts as asking for it, so an explicit
+    `<session>:*` in --exclude-frames is honoured silently."""
+    named = set()
+    for spec in (include_frames, exclude_frames):
+        named |= {s for s in parse_frame_spec(spec) if s is not None}
+
+    lost = sorted(s for s, n in all_sessions.items()
+                  if n and not kept_per_session.get(s, 0) and s not in named)
+    if not lost:
+        return
+    raise SystemExit(
+        f"ERROR: {len(lost)} session(s) contributed ZERO frames and were never "
+        f"named in the frame selection:\n"
+        f"    {', '.join(lost)}\n\n"
+        f"Their export was loaded, so dropping them entirely is almost "
+        f"certainly not what you meant. The usual cause is a REPEATED "
+        f"'INCLUDE_FRAMES' key in the CONFIG dict - Python keeps only the "
+        f"last one, silently.\n\n"
+        f"Fix it by putting every session in ONE spec string:\n"
+        f"    \"INCLUDE_FRAMES\": \"{lost[0]}:*,<other_session>:1-27\"\n"
+        f"or, to drop them on purpose, remove their DATUMARO_ROOT / name them "
+        f"explicitly in EXCLUDE_FRAMES.")
+
+
 def list_frames(datumaro_root, contract=None):
     """Print the numbered frame table, then stop.
 
@@ -401,6 +441,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # block the build over frames that are not part of the dataset.
     if include_frames or exclude_frames:
         before = len(frames)
+        all_sessions = Counter(f.session_id or "" for f in frames)
         frames, discarded = select_frames(frames, include_frames, exclude_frames)
         if not frames:
             raise SystemExit(
@@ -415,7 +456,18 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         kept_ids = sorted(keep_ids)
         print(f"  SELECTED {len(frames)} of {before} frame(s); discarded "
               f"{len(discarded)}.")
+
+        # Per session, not just a total. A single "discarded 399" line reads as
+        # "the SAM-only frames I meant to drop" even when it silently includes
+        # every frame of a whole export.
+        kept_per_session = Counter(f.session_id or "" for f in frames)
+        for sess in sorted(all_sessions):
+            print(f"      {sess}: kept {kept_per_session.get(sess, 0)} "
+                  f"of {all_sessions[sess]}")
         print(f"      kept: {kept_ids[0]} .. {kept_ids[-1]}")
+
+        _reject_silently_dropped_sessions(all_sessions, kept_per_session,
+                                          include_frames, exclude_frames)
 
     # The same frame annotated in two CVAT tasks would be counted twice and
     # could land in two splits, which is exactly the leakage this pipeline
@@ -607,9 +659,18 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                           for i in f.instances],
             "ignore_regions": [[round(float(v), 2) for v in p]
                                for p in f.ignore_regions]})
+    # dataset_kind and split_strategy travel WITH the manifest, not only in
+    # dataset_report.json: the trainer logs them as run parameters, and a run
+    # against a frame_block split is not comparable with one against a held-out
+    # session. Months later the experiment table is the only record of which
+    # was which, and "unknown" there is worse than useless.
     (out / "seg_manifest.json").write_text(
         json.dumps({"images_root": [r.as_posix() for r in img_roots],
                     "classes": list(active_classes),
+                    "dataset_kind": ("segmentation_only" if seg_only
+                                     else "multitask"),
+                    "split_strategy": split_mode,
+                    "sessions": sorted({f.session_id for f in frames}),
                     "n_frames": len(seg_frames), "frames": seg_frames}, indent=2),
         encoding="utf-8")
 
@@ -619,6 +680,9 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         r["split"] = where.get(r["item_id"], "unassigned")
     (out / "lep_manifest.json").write_text(
         json.dumps({"images_root": [r.as_posix() for r in img_roots],
+                    "dataset_kind": ("segmentation_only" if seg_only
+                                     else "multitask"),
+                    "split_strategy": split_mode,
                     "n_rows": len(rows), "rows": rows}, indent=2),
         encoding="utf-8")
 

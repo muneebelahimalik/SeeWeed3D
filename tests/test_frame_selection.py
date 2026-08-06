@@ -329,3 +329,95 @@ def test_a_windows_path_in_a_list_file_is_not_read_as_a_session_scope(tmp_path):
     f.write_text("E:/frames/frame_0003.png\nframe_0005\n")
     g = pd.parse_frame_spec(f"@{f}")
     assert set(g) == {None}, "a drive letter must not become a session scope"
+
+
+# --------------------------------------------------------------------------- #
+# A whole session dropped without being asked for
+# --------------------------------------------------------------------------- #
+def _two_session_export(tmp_path, n_a=6, n_b=4):
+    """Two sessions in the SAME export tree, as two merged CVAT tasks."""
+    import cv2
+    import numpy as np
+    roots = []
+    for name, sess, n, label in (("a", "weed_s", n_a, 0), ("b", "onion_s", n_b, 5)):
+        items = [{
+            "id": f"{sess}_{i:06d}",
+            "media": {"path": f"{sess}_{i:06d}.png"},
+            "image": {"size": [200, 200]},
+            "annotations": [{"id": i, "type": "polygon", "label_id": label,
+                             "group": i,
+                             "points": [10, 10, 60, 10, 60, 60, 10, 60],
+                             "attributes": {}}],
+        } for i in range(1, n + 1)]
+        ann = tmp_path / "exports" / name / "annotations"
+        ann.mkdir(parents=True)
+        (ann / "default.json").write_text(json.dumps(
+            {"info": {}, "categories": {"label": {"labels": [
+                {"name": c} for c in pd.CLASSES]}}, "items": items}))
+        sdir = tmp_path / "sessions" / sess / "rgb"
+        sdir.mkdir(parents=True)
+        for i in range(1, n + 1):
+            cv2.imwrite(str(sdir / f"{sess}_{i:06d}.png"),
+                        np.zeros((200, 200, 3), np.uint8))
+        roots.append(ann.parent)
+    return roots, tmp_path / "sessions"
+
+
+def test_a_whole_unnamed_session_dropped_is_an_error(tmp_path):
+    """The duplicate-CONFIG-key failure: a repeated INCLUDE_FRAMES key means
+    Python keeps only the last, one export contributes nothing, and training
+    succeeds having silently never seen the crop class."""
+    roots, imgs = _two_session_export(tmp_path)
+    with pytest.raises(SystemExit, match="ZERO frames"):
+        pd.build(roots, imgs, tmp_path / "ds",
+                 include_frames="weed_s:1-3", strict=False)
+
+
+def test_that_error_names_the_lost_session_and_the_likely_cause(tmp_path):
+    roots, imgs = _two_session_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        pd.build(roots, imgs, tmp_path / "ds",
+                 include_frames="weed_s:1-3", strict=False)
+    msg = str(e.value)
+    assert "onion_s" in msg
+    assert "INCLUDE_FRAMES" in msg and "last one" in msg
+
+
+def test_naming_every_session_builds_normally(tmp_path):
+    roots, imgs = _two_session_export(tmp_path)
+    pd.build(roots, imgs, tmp_path / "ds",
+             include_frames="weed_s:1-3,onion_s:*",
+             val_fraction=0.0, test_fraction=0.0, strict=False)
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert {f["session_id"] for f in man["frames"]} == {"weed_s", "onion_s"}
+
+
+def test_dropping_a_session_on_purpose_via_exclude_is_allowed(tmp_path):
+    """Naming it in EITHER spec counts as asking for it."""
+    roots, imgs = _two_session_export(tmp_path)
+    pd.build(roots, imgs, tmp_path / "ds",
+             include_frames="weed_s:*,onion_s:*", exclude_frames="onion_s:*",
+             val_fraction=0.0, test_fraction=0.0, strict=False)
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert {f["session_id"] for f in man["frames"]} == {"weed_s"}
+
+
+def test_no_selection_at_all_is_unaffected(tmp_path):
+    roots, imgs = _two_session_export(tmp_path)
+    pd.build(roots, imgs, tmp_path / "ds", val_fraction=0.0,
+             test_fraction=0.0, strict=False)
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert len(man["frames"]) == 10
+
+
+def test_the_manifest_records_kind_strategy_and_sessions(tmp_path):
+    """These reach the experiment tracker as run parameters; 'unknown' there
+    makes two runs indistinguishable months later."""
+    roots, imgs = _two_session_export(tmp_path)
+    pd.build(roots, imgs, tmp_path / "ds",
+             include_frames="weed_s:*,onion_s:*",
+             val_fraction=0.0, test_fraction=0.0, strict=False)
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert man["dataset_kind"] == "segmentation_only"
+    assert man["split_strategy"] in ("session", "frame_block")
+    assert sorted(man["sessions"]) == ["onion_s", "weed_s"]
