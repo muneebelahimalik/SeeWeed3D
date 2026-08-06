@@ -75,7 +75,7 @@ from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
 # ##   ONLY_SESSIONS  -  MUST list your WEED-ONLY sessions                   ##
 # #############################################################################
 
-DATASET_ROOT   = r"E:\Dataset_Vidalia"
+DATASET_ROOT   = r"E:\Dataset_Vidalia\Weeds_3_good"
 SAM_VERSION    = "sam3"
 SAM_CHECKPOINT = r"E:\Models\sam3.pt"
 
@@ -291,7 +291,7 @@ CONFIG = {
     "POLY_ALL_PARTS": False,
 
     # -- Run control -----------------------------------------------------------
-    "LIMIT_PER_SESSION": 20,         # start small; set None for the full pool
+    "LIMIT_PER_SESSION": None,         # start small; set None for the full pool
     "SAVE_PREVIEWS": True,
     "PREVIEW_SCALE": 0.5,
 }

@@ -89,22 +89,33 @@ CONFIG = {
     #   sessions). Images are never copied; manifests point at these files.
     "SOURCES": [
         {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\CVAT_exports\vid2_20260108_122731",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\auto_labels_onion_5_final\vid3_20260108_132749",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\sessions",
         },
-        # {
-        #     "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Onion_only\CVAT_exports\vid3_20260108_132749",
-        #     "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Onion_only\sessions",
-        # },
+        {
+             "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\auto_labels_weeds\vid2_20260108_122731",
+             "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+        },
     ],
+    # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
+    # `annotations/default.json`. May also be one PARENT folder holding several
+    # unzipped exports; they are merged.
+    #
+    # NOT the SAM 3 output folder (auto_labels_weeds/<session>/). That holds
+    # COCO, which is the format you IMPORT into CVAT, not the one you export.
+    #"DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\auto_labels_weeds\vid2_20260108_122731",
+
+    # The sessions root from extract_sessions.py - the folder whose children are
+    # session ids. Images are never copied; manifests point at these files.
+    #"IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
-    "OUT_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\training\subset45",
+    "OUT_DIR": r"E:\Dataset_Vidalia\training1",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
     # False = build the dataset.
-    "LIST_FRAMES": True,
+    "LIST_FRAMES": False,
 
     # -- Which frames are actually yours --------------------------------------
     # 1-based POSITIONS in the table LIST_FRAMES prints. Also accepts a literal
@@ -121,7 +132,8 @@ CONFIG = {
     #    vid2_20260108_122731:51-60,onion1_20260115_090000:*"
     # `<session>:*` keeps all of that session. With exactly one session across
     # every source, a bare "1-27,29-36,51-60" is still fine.
-    "INCLUDE_FRAMES": "1-27,29-36,51-60",
+    "INCLUDE_FRAMES": "vid2_20260108_122731:1-27,vid2_20260108_122731:29-37,"
+                  "vid2_20260108_122731:51-60,vid3_20260108_132749:1-36",
 
     # Applied after INCLUDE_FRAMES. Same syntax. Usually left empty.
     "EXCLUDE_FRAMES": "",
@@ -131,7 +143,7 @@ CONFIG = {
     # class returns automatically once you have real examples of it. A class
     # with 0-2 instances across the whole set is not learnable and only
     # pollutes the metrics.
-    "DROP_CLASSES": ["wild_radish"],
+    "DROP_CLASSES": ["wild_radish", "weed_cluster"],
 
     # -- Splits ----------------------------------------------------------------
     # With ONE session these become contiguous FRAME BLOCKS separated by a

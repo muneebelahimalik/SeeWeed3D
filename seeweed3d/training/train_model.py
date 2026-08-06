@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 CONFIG = {
     # -- Where things are ------------------------------------------------------
     # OUT_DIR from make_dataset.py (the folder holding seg_manifest.json).
-    "DATASET_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\training\subset45",
+    "DATASET_DIR": r"E:\Dataset_Vidalia\training1",
 
     # The sessions root(s) - a single path, or a LIST of them if make_dataset.py
     # merged sources under more than one parent folder (e.g. a weed sessions
@@ -46,7 +46,7 @@ CONFIG = {
 
     # Where checkpoints, curves and metrics go. One folder per run - do not
     # reuse it, or you lose the comparison.
-    "RUN_DIR": r"E:\Dataset_Vidalia\Weeds_3_good\runs\seg_v1",
+    "RUN_DIR": r"E:\Dataset_Vidalia\training1\run2",
 
     # -- Training --------------------------------------------------------------
     "DEVICE": "cuda",          # "cuda", or "cpu" if you have no GPU (very slow)
