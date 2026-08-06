@@ -26,6 +26,10 @@ on PATH.
 | [9. Inference](#9-run-inference) | full RGB-D pipeline | yes (practically) |
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
+**Related:** [experiment tracking](experiment_tracking.md) ·
+[edge model research](edge_model_research.md) ·
+[LEP localization explained](lep_localization_explained.md)
+
 ---
 
 ## 0. Install
@@ -357,10 +361,34 @@ python -m seeweed3d.training.train_seg_torchvision `
     --dataset     E:/Dataset_Vidalia/training/mixed_v1 `
     --images-root E:/Dataset_Vidalia/sessions `
     --out         E:/Dataset_Vidalia/runs/seg_v1 `
-    --epochs 20 --batch 2 --device cuda
+    --epochs 20 --batch 2 --device cuda `
+    --track all --preview-every 5
 ```
 
-Produces `runs/seg_v1/best.pt`, `last.pt`, `history.json`.
+Produces `runs/seg_v1/best.pt`, `last.pt`, `history.json`, `params.json`.
+
+### Watching the run
+
+`--track` enables **local** experiment tracking — nothing is uploaded and no
+account is needed. `auto` (the default) uses whatever is installed and never
+fails; `all` requires both and errors if either is missing.
+
+```powershell
+python -m pip install tensorboard mlflow
+
+tensorboard --logdir E:/Dataset_Vidalia/runs/seg_v1/tb
+mlflow ui --backend-store-uri E:/Dataset_Vidalia/runs/mlruns
+```
+
+| Flag | Effect |
+|---|---|
+| `--preview-every N` | **GT-vs-prediction overlay panels** every N epochs on a fixed sample of val frames |
+| `--eval-every N` | val `mAP@50`, `mAP@50:95` and `missed_onion_fraction` every N epochs (slow — a full pass over val) |
+
+The preview panels are the highest-value signal on a small dataset. A loss curve
+cannot tell you that every mask is one plant too large, or that the model calls
+every onion a weed; ten seconds looking at the overlays will. Full rationale and
+the tools that were rejected: [experiment tracking](experiment_tracking.md).
 
 ### Choosing a different backend
 
@@ -368,13 +396,22 @@ Produces `runs/seg_v1/best.pt`, `last.pt`, `history.json`.
 |---|---|---|---|
 | **`maskrcnn`** (default) | **BSD-3** | no | **prototyping — start here** |
 | `rfdetr` | **Apache-2.0** | **yes** | the real-time upgrade, ships commercially |
-| `rtmdet` | Apache-2.0 | yes | if you already use OpenMMLab |
 | `ultralytics` | **AGPL-3.0** | yes | research only — see below |
+
+`rtmdet` is **not** implemented. RTMDet-Ins is a credible Apache-2.0 alternative
+on paper, but mmcv's CUDA build is a recurring problem on Jetson, so it was not
+wired up. Don't pass `backend="rtmdet"` expecting it to work.
 
 ```powershell
 # Real-time upgrade once the prototype works (Apache-2.0, no obligation)
 python -m pip install rfdetr
 ```
+
+RF-DETR-Seg's full Nano..2XL family shipped January 2026 — DINOv2 ViT backbone,
+MaskDINO-style mask head, no NMS, ONNX/TensorRT export. Sizing, the licence
+caveat on the XL variants, the resolution problem for small weeds, and why
+**INT8 is the wrong move on Orin for a transformer**:
+[edge model research](edge_model_research.md).
 
 > **Ultralytics is AGPL-3.0.** Commercial or proprietary use requires an
 > Ultralytics Enterprise Licence — they state this applies even to internal

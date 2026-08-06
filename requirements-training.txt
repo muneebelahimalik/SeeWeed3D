@@ -39,6 +39,17 @@ datumaro>=1.5.0
 # than silently producing an empty mask.
 # pycocotools>=2.0.7
 
+# -- Experiment tracking (optional, LOCAL ONLY) -------------------------------
+# Both are Apache-2.0 and write to a local directory. Nothing is uploaded and
+# neither needs an account, which is why they were chosen over W&B: field
+# imagery and a customer's row geometry are not data to hand to a vendor's
+# cloud for a nicer chart. See docs/experiment_tracking.md.
+#
+# Training runs fine without them (--track auto degrades to a no-op); install
+# for loss curves, GT-vs-prediction preview panels, and a run-comparison table.
+tensorboard>=2.16
+mlflow>=2.14
+
 # -- Export / deployment verification ----------------------------------------
 onnx>=1.16
 onnxruntime>=1.18
@@ -53,13 +64,23 @@ onnxruntime>=1.18
 #   ------------   ------------   ------------------------------------------
 #   maskrcnn       BSD-3-Clause   (none - torchvision, already above) DEFAULT
 #   rfdetr         Apache-2.0     python -m pip install rfdetr
-#   rtmdet         Apache-2.0     python -m pip install mmdet mmengine mmcv
 #   ultralytics    AGPL-3.0 (!)   python -m pip install ultralytics
 #
-# RF-DETR-Seg (Roboflow, Apache-2.0) is the recommended real-time upgrade once
-# the prototype works: nano..2XL, TensorRT FP16, built for fine-tuning, and no
-# licensing obligation. Uncomment to install.
+# RF-DETR-Seg (Roboflow) is the recommended real-time upgrade once the prototype
+# works. The full Nano..2XL segmentation family shipped January 2026: DINOv2 ViT
+# backbone, MaskDINO-style mask head, no NMS, ONNX and TensorRT export. Seg-M is
+# 45.3 COCO AP50:95 at 5.9 ms on a T4 with TensorRT FP16 (vendor figure, not
+# measured here - build the engine ON the Orin and time it).
+#
+# LICENCE: the package and the Nano..Large checkpoints are Apache-2.0. Sources
+# conflict on Seg-XL/2XL, which may fall under Roboflow's Platform Model License
+# 1.0 - verify the licence of the specific checkpoint before shipping. The
+# smaller variants are the ones worth using here regardless.
 # rfdetr>=1.4
+#
+# RTMDet-Ins (MMDetection, Apache-2.0) is a credible alternative - 52.8 AP at
+# 300+ FPS on a 3090 - but it is NOT wired up as a backend, because mmcv's CUDA
+# build is a recurring problem on Jetson. Do not assume `backend="rtmdet"` works.
 #
 # ULTRALYTICS IS AGPL-3.0 AND IS *NOT* INSTALLED BY DEFAULT.
 # Commercial or proprietary use requires an Ultralytics Enterprise Licence;

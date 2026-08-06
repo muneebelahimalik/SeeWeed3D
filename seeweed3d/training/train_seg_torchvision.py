@@ -23,8 +23,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES  # noqa: E402
 
 
+def _preview_frames(doc, images_root, n=6):
+    """A stable sample of val frames for the prediction overlays.
+
+    Evenly spaced rather than random so the same ground is compared across
+    epochs and across runs - a preview panel that changes frames every epoch
+    cannot show you whether anything improved."""
+    va = [f for f in doc["frames"] if f.get("split") == "val"]
+    if not va:
+        return []
+    step = max(1, len(va) // n)
+    return va[::step][:n]
+
+
 def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
-          device="cpu", workers=0, seed=1234, pretrained=True, min_area_px=16):
+          device="cpu", workers=0, seed=1234, pretrained=True, min_area_px=16,
+          track="auto", preview_every=5, eval_every=0):
     try:
         import torch
     except ImportError:
@@ -61,6 +75,19 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
                          "See splits/splits_summary.json.")
     print(f"train={len(tr)} val={len(va)} frames | {len(classes)} classes "
           f"{classes} | backend=maskrcnn (BSD-3-Clause)")
+
+    from training.tracking import Tracker
+    trk = Tracker(track, out_dir=out, run_name=out.name)
+    trk.log_params({
+        "backend": "maskrcnn", "dataset": str(dataset_dir),
+        "epochs": epochs, "batch": batch, "lr": lr, "device": device,
+        "seed": seed, "pretrained": pretrained, "min_area_px": min_area_px,
+        "n_train": len(tr), "n_val": len(va), "classes": classes,
+        "dataset_kind": doc.get("dataset_kind", "unknown"),
+        "split_strategy": doc.get("split_strategy", "unknown"),
+    })
+    print(trk.hint())
+    previews = _preview_frames(doc, images_root) if preview_every else []
 
     dl = DataLoader(tr, batch_size=batch, shuffle=True, num_workers=workers,
                     collate_fn=collate)
@@ -106,15 +133,94 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
                 best = row["val_loss"]
                 torch.save({"model": model.state_dict(), "classes": list(classes),
                             "backend": "maskrcnn"}, out / "best.pt")
+        row["lr"] = float(opt.param_groups[0]["lr"])
+
+        last_ep = (ep == epochs - 1)
+        if eval_every and (last_ep or (ep + 1) % eval_every == 0) \
+                and (out / "best.pt").exists():
+            # mAP on the current BEST checkpoint, not the live weights: the
+            # curve should track the model you would actually ship.
+            try:
+                from evaluation.eval_seg import evaluate
+                res = evaluate(out / "best.pt", dataset_dir, images_root,
+                               "val", device)
+                row["val_map50"] = res["summary"]["map50"]
+                row["val_map50_95"] = res["summary"]["map50_95"]
+                miss = res["crop_safety"].get("missed_onion_fraction")
+                if miss is not None:
+                    row["missed_onion_fraction"] = miss
+            except Exception as e:                      # never kill a run for a metric
+                print(f"  [warn] mid-training eval failed: {e}")
+
+        if previews and (last_ep or (ep + 1) % preview_every == 0):
+            _log_previews(trk, model, previews, images_root, classes, device,
+                          min_area_px, ep)
+
         history.append(row)
+        trk.log_metrics(row, step=ep)
         print(f"  epoch {ep:3d} " + " ".join(f"{k}={v}" for k, v in row.items()
                                              if k != "epoch"))
 
     torch.save({"model": model.state_dict(), "classes": list(classes),
                 "backend": "maskrcnn"}, out / "last.pt")
     (out / "history.json").write_text(json.dumps(history, indent=2))
+    for f in ("best.pt", "history.json", "params.json"):
+        trk.log_artifact(out / f)
+    trk.close()
     print(f"-> {out}")
+    print(trk.hint())
     return history
+
+
+def _log_previews(trk, model, records, images_root, classes, device,
+                  min_area_px, step):
+    """GT-vs-prediction overlays on fixed val frames."""
+    import cv2
+    import numpy as np
+    import torch
+    from common.ontology import CROP_CLASS
+    from training.seg_dataset import polygons_to_mask
+    from training.tracking import overlay_masks, side_by_side
+
+    root = Path(images_root)
+    was_training = model.training
+    model.eval()
+    try:
+        for k, rec in enumerate(records):
+            p = Path(rec["image_path"])
+            path = p if p.is_absolute() and p.exists() else root / p
+            if not path.exists():
+                hits = list(root.rglob(p.name))
+                if not hits:
+                    continue
+                path = hits[0]
+            bgr = cv2.imread(str(path))
+            if bgr is None:
+                continue
+            h, w = bgr.shape[:2]
+
+            gt_m, gt_n = [], []
+            for inst in rec["instances"]:
+                m = polygons_to_mask(inst["polygons"], h, w).astype(bool)
+                if int(m.sum()) >= min_area_px:
+                    gt_m.append(m); gt_n.append(inst["class_name"])
+
+            t = torch.from_numpy(bgr[:, :, ::-1].copy().astype(np.float32)
+                                 / 255.0).permute(2, 0, 1).to(device)
+            with torch.no_grad():
+                o = model([t])[0]
+            keep = o["scores"] >= 0.5
+            pm = (o["masks"][keep][:, 0] >= 0.5).cpu().numpy()
+            pn = [classes[int(i) - 1] for i in o["labels"][keep].cpu().numpy()]
+
+            panel = side_by_side(overlay_masks(bgr, gt_m, gt_n, CROP_CLASS),
+                                 overlay_masks(bgr, pm, pn, CROP_CLASS))
+            trk.log_image(f"preview/{k:02d}", panel[:, :, ::-1], step)
+    except Exception as e:
+        print(f"  [warn] preview rendering failed: {e}")
+    finally:
+        if was_training:
+            model.train()
 
 
 def main(argv=None):
@@ -131,9 +237,17 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--no-pretrained", action="store_true",
                    help="skip COCO-pretrained weights (needs network access)")
+    p.add_argument("--track", default="auto",
+                   choices=["auto", "none", "tensorboard", "mlflow", "all"],
+                   help="local experiment tracking; nothing is uploaded")
+    p.add_argument("--preview-every", type=int, default=5,
+                   help="log GT-vs-prediction overlays every N epochs (0=off)")
+    p.add_argument("--eval-every", type=int, default=0,
+                   help="compute val mAP every N epochs (0=off; it is slow)")
     a = p.parse_args(argv)
     train(a.dataset, a.images_root, a.out, a.epochs, a.batch, a.lr, a.device,
-          a.workers, a.seed, pretrained=not a.no_pretrained)
+          a.workers, a.seed, pretrained=not a.no_pretrained, track=a.track,
+          preview_every=a.preview_every, eval_every=a.eval_every)
 
 
 if __name__ == "__main__":
