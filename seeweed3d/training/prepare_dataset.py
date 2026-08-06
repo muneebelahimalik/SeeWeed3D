@@ -558,41 +558,79 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                             class_counts=report.per_session.get(s, {}))
              for s, n in sorted(per_session.items()) if s]
 
-    split_mode = "session"
-    frame_split = None
+    # A session-level split is the ONLY one that measures generalisation, so it
+    # is tried first - but it is not always possible or even safe, and both
+    # failure modes are silent unless checked. `reason` stays None while the
+    # session split remains usable.
+    split_mode, frame_split, split_map, reason = "session", None, None, None
     if len(infos) < 2:
-        # A single recording cannot be split by session. Rather than silently
-        # producing empty val/test (which trains blind), fall back to
-        # contiguous frame blocks and say plainly what that costs.
-        split_mode = "frame_block"
-        ordered = sorted(frames, key=lambda f: f.item_id)
-        frame_split = sp.assign_frame_blocks(
-            [f.item_id for f in ordered], val_fraction, test_fraction,
-            gap_frames=gap_frames)
-        split_map = {"train": [i.session_id for i in infos], "val": [], "test": []}
-        where = {}
-        for split in ("train", "val", "test"):
-            for item in frame_split[split]:
-                where[item] = split
-        print(f"\n  [!] ONLY ONE SESSION ({infos[0].session_id if infos else '?'}).")
-        print(f"      A session-level split is impossible, so the frames were "
-              f"split into CONTIGUOUS BLOCKS with a {gap_frames}-frame gap:")
-        print(f"        train={len(frame_split['train'])} "
-              f"val={len(frame_split['val'])} test={len(frame_split['test'])} "
-              f"(dropped as buffer: {len(frame_split['_dropped_gap'])})")
-        print(f"      These val/test frames share the session's lighting, soil, "
-              f"growth stage and often the same individual plants.")
-        print(f"      Treat the scores as a SANITY CHECK that training works, "
-              f"NOT as evidence of generalisation.")
-        print(f"      Annotate a SECOND session to get a real held-out test.\n")
+        reason = (f"only one session "
+                  f"({infos[0].session_id if infos else '?'}) - there is "
+                  f"nothing to hold out")
     else:
         split_map = sp.assign_splits(infos, val_fraction, test_fraction, seed,
                                      holdout_val=holdout_val,
                                      holdout_test=holdout_test)
+        # Whole sessions are indivisible, so a fraction that rounds below one
+        # session yields an EMPTY val: training then runs blind, saves no
+        # checkpoint and reports no metric, hours later.
+        empty = [s for s, frac in (("val", val_fraction),
+                                   ("test", test_fraction))
+                 if frac > 0 and not split_map.get(s)]
+        if empty:
+            reason = (f"{len(infos)} sessions cannot fill {', '.join(empty)} at "
+                      f"val={val_fraction}/test={test_fraction} - whole "
+                      f"sessions are indivisible, so the fraction rounds to "
+                      f"zero sessions and training would run with no "
+                      f"validation set at all")
+        else:
+            # The subtler failure: the split is non-empty but a class lives
+            # entirely in a held-out session. Training then never sees it. When
+            # that class is the crop, the model reports an empty crop mask -
+            # downstream, indistinguishable from "looked and found no crop".
+            lost = sp.missing_from_train(split_map, report.per_session)
+            if lost:
+                reason = (f"holding out whole sessions would remove "
+                          f"{', '.join(lost)} from TRAINING entirely - "
+                          f"that class exists only in a held-out session")
+
+    if reason is None:
         sp.check_no_leakage(split_map, {f.item_id: f.session_id for f in frames
                                         if f.session_id})
         session_where = {s: k for k, v in split_map.items() for s in v}
         where = {f.item_id: session_where.get(f.session_id) for f in frames}
+    else:
+        # Blocks WITHIN each session, so every session - and therefore every
+        # class - is represented in train and in val.
+        split_mode = "frame_block"
+        by_session = {}
+        for f in sorted(frames, key=lambda f: f.item_id):
+            by_session.setdefault(f.session_id, []).append(f.item_id)
+        frame_split = sp.assign_frame_blocks_per_session(
+            by_session, val_fraction, test_fraction, gap_frames=gap_frames)
+        split_map = {"train": [i.session_id for i in infos], "val": [],
+                     "test": []}
+        where = {}
+        for split in ("train", "val", "test"):
+            for item in frame_split[split]:
+                where[item] = split
+        print(f"\n  [!] SESSION-LEVEL SPLIT NOT USED: {reason}.")
+        print(f"      Falling back to CONTIGUOUS FRAME BLOCKS within each "
+              f"session, with a {gap_frames}-frame gap at each boundary:")
+        print(f"        train={len(frame_split['train'])} "
+              f"val={len(frame_split['val'])} test={len(frame_split['test'])} "
+              f"(dropped as buffer: {len(frame_split['_dropped_gap'])})")
+        if frame_split.get("_train_only_sessions"):
+            print(f"      Too short to block-split, so wholly in train: "
+                  f"{', '.join(frame_split['_train_only_sessions'])}")
+        print(f"      Every session contributes to both splits, so no class is "
+              f"missing from training.")
+        print(f"      But val now shares each session's lighting, soil, growth "
+              f"stage and often its individual plants.")
+        print(f"      Treat the scores as a SANITY CHECK that training works, "
+              f"NOT as evidence of generalisation.")
+        print(f"      A real held-out test needs a session whose CLASSES also "
+              f"appear in the training sessions.\n")
 
     frames_by_session = {}
     for f in frames:

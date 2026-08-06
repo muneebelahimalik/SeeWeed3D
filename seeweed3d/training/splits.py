@@ -161,6 +161,60 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
     return out
 
 
+#: A session with fewer frames than this cannot be block-split at all, so it
+#: goes wholly to train rather than aborting a build over one short recording.
+MIN_FRAMES_FOR_BLOCKS = 5
+
+
+def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
+                                    test_fraction=0.2, gap_frames=2):
+    """Contiguous frame blocks WITHIN each session, merged across sessions.
+
+    USE WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE OR HARMFUL. Splitting by whole
+    session is the only way to measure generalisation, but it requires that no
+    class lives in just one session. When a weed-only recording and an
+    onion-only recording are the whole dataset, holding out either removes an
+    entire class from training - and a crop-safety model that never saw the
+    crop is the exact failure this pipeline exists to prevent.
+
+    Blocking within each session instead keeps every class present in every
+    split. What it costs is stated plainly by the caller: val then shares each
+    session's lighting, soil and often its individual plants, so the scores are
+    a sanity check, not evidence of generalisation.
+
+    Returns {split: [frame_id]} plus `_train_only_sessions`: sessions too short
+    to block-split, which went wholly to train."""
+    out = {"train": [], "val": [], "test": [], "_dropped_gap": [],
+           "_train_only_sessions": []}
+    for sess in sorted(frame_ids_by_session):
+        ids = list(frame_ids_by_session[sess])
+        if len(ids) < MIN_FRAMES_FOR_BLOCKS:
+            out["train"].extend(ids)
+            out["_train_only_sessions"].append(sess)
+            continue
+        part = assign_frame_blocks(ids, val_fraction, test_fraction,
+                                   gap_frames=gap_frames)
+        for key in ("train", "val", "test", "_dropped_gap"):
+            out[key].extend(part[key])
+    return out
+
+
+def missing_from_train(split_map, class_counts_by_session):
+    """Classes present in the dataset but absent from every TRAIN session.
+
+    A class the model never sees in training is one it can never predict, and
+    when that class is the crop the resulting model reports an empty crop mask
+    - indistinguishable, downstream, from 'looked and found no crop'."""
+    everywhere, in_train = set(), set()
+    train_sessions = set(split_map.get("train", []))
+    for sess, counts in class_counts_by_session.items():
+        present = {c for c, n in counts.items() if n}
+        everywhere |= present
+        if sess in train_sessions:
+            in_train |= present
+    return sorted(everywhere - in_train)
+
+
 def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
                         gap_frames=2):
     """Split ONE session into contiguous frame blocks, with a discarded buffer.
