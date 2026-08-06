@@ -38,7 +38,10 @@ def _preview_frames(doc, images_root, n=6):
 
 def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
           device="cpu", workers=0, seed=1234, pretrained=True, min_area_px=16,
-          track="auto", preview_every=5, eval_every=0):
+          track="auto", preview_every=5, eval_every=0, select_by="val_loss"):
+    if select_by not in ("val_loss", "map50", "map50_95"):
+        raise SystemExit(f"ERROR: select_by must be one of val_loss, map50, "
+                         f"map50_95; got {select_by!r}")
     try:
         import torch
     except ImportError:
@@ -85,6 +88,8 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
         "n_train": len(tr), "n_val": len(va), "classes": classes,
         "dataset_kind": doc.get("dataset_kind", "unknown"),
         "split_strategy": doc.get("split_strategy", "unknown"),
+        "sessions": doc.get("sessions", []),
+        "select_by": select_by,
     })
     print(trk.hint())
     previews = _preview_frames(doc, images_root) if preview_every else []
@@ -99,7 +104,16 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     opt = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=5e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
 
-    best, history = float("inf"), []
+    def _save(path):
+        torch.save({"model": model.state_dict(), "classes": list(classes),
+                    "backend": "maskrcnn"}, path)
+
+    # mAP-based selection has to look at the CURRENT weights, so it needs an
+    # eval cadence even if the caller did not ask for one.
+    if select_by != "val_loss" and not eval_every:
+        eval_every = 1
+
+    best, best_epoch, history = None, None, []
     for ep in range(epochs):
         model.train(); tot = n = 0; t0 = time.perf_counter()
         for imgs, targets in dl:
@@ -129,28 +143,41 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
                         continue
                     vt += float(sum(model(imgs, targets).values())); vn += 1
             row["val_loss"] = vt / max(1, vn)
-            if row["val_loss"] < best:
-                best = row["val_loss"]
-                torch.save({"model": model.state_dict(), "classes": list(classes),
-                            "backend": "maskrcnn"}, out / "best.pt")
         row["lr"] = float(opt.param_groups[0]["lr"])
 
         last_ep = (ep == epochs - 1)
-        if eval_every and (last_ep or (ep + 1) % eval_every == 0) \
-                and (out / "best.pt").exists():
-            # mAP on the current BEST checkpoint, not the live weights: the
-            # curve should track the model you would actually ship.
+        if eval_every and (last_ep or (ep + 1) % eval_every == 0):
+            # The CURRENT weights, not the current best checkpoint. Evaluating
+            # the best one is circular - it cannot tell you whether this epoch
+            # is an improvement, which is exactly what selection needs.
             try:
                 from evaluation.eval_seg import evaluate
-                res = evaluate(out / "best.pt", dataset_dir, images_root,
-                               "val", device)
+                tmp = out / "_current.pt"
+                _save(tmp)
+                res = evaluate(tmp, dataset_dir, images_root, "val", device)
                 row["val_map50"] = res["summary"]["map50"]
                 row["val_map50_95"] = res["summary"]["map50_95"]
                 miss = res["crop_safety"].get("missed_onion_fraction")
                 if miss is not None:
                     row["missed_onion_fraction"] = miss
+                if device.startswith("cuda"):
+                    torch.cuda.empty_cache()   # the eval built a second model
             except Exception as e:                      # never kill a run for a metric
                 print(f"  [warn] mid-training eval failed: {e}")
+
+        # --- checkpoint selection ------------------------------------------
+        # val_loss is the default only because it is free. It is a poor proxy
+        # for a detector: it sums classification, box and mask terms whose
+        # scales are unrelated to whether a plant was found. Select on mAP when
+        # you can afford the eval.
+        score = row.get("val_map50_95" if select_by == "map50_95" else
+                        "val_map50" if select_by == "map50" else "val_loss")
+        if score is not None:
+            improved = (best is None or
+                        (score < best if select_by == "val_loss" else score > best))
+            if improved:
+                best, best_epoch = score, ep
+                _save(out / "best.pt")
 
         if previews and (last_ep or (ep + 1) % preview_every == 0):
             _log_previews(trk, model, previews, images_root, classes, device,
@@ -161,12 +188,23 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
         print(f"  epoch {ep:3d} " + " ".join(f"{k}={v}" for k, v in row.items()
                                              if k != "epoch"))
 
-    torch.save({"model": model.state_dict(), "classes": list(classes),
-                "backend": "maskrcnn"}, out / "last.pt")
+    _save(out / "last.pt")
+    (out / "_current.pt").unlink(missing_ok=True)
     (out / "history.json").write_text(json.dumps(history, indent=2))
     for f in ("best.pt", "history.json", "params.json"):
         trk.log_artifact(out / f)
     trk.close()
+
+    if best_epoch is not None:
+        print(f"\nbest.pt = epoch {best_epoch} ({select_by}={best:.4f}) "
+              f"of {epochs}")
+        # An early peak means the remaining epochs only overfit. Saying so is
+        # cheap; noticing it by eye in a 60-row loss table is not.
+        if epochs >= 10 and best_epoch < epochs * 0.4:
+            print(f"  [!] The best epoch is in the first {100 * best_epoch // epochs}% "
+                  f"of the run - everything after it overfit.\n"
+                  f"      More epochs will not help. More DATA, or stronger "
+                  f"augmentation, will.")
     print(f"-> {out}")
     print(trk.hint())
     return history
@@ -241,12 +279,18 @@ def main(argv=None):
                    help="local experiment tracking; nothing is uploaded")
     p.add_argument("--preview-every", type=int, default=5,
                    help="log GT-vs-prediction overlays every N epochs (0=off)")
+    p.add_argument("--select-by", default="val_loss",
+                   choices=["val_loss", "map50", "map50_95"],
+                   help="what best.pt is chosen on. val_loss is free but a "
+                        "poor proxy for a detector; map50_95 forces a val "
+                        "evaluation every --eval-every epochs (default 1)")
     p.add_argument("--eval-every", type=int, default=0,
                    help="compute val mAP every N epochs (0=off; it is slow)")
     a = p.parse_args(argv)
     train(a.dataset, a.images_root, a.out, a.epochs, a.batch, a.lr, a.device,
           a.workers, a.seed, pretrained=not a.no_pretrained, track=a.track,
-          preview_every=a.preview_every, eval_every=a.eval_every)
+          preview_every=a.preview_every, eval_every=a.eval_every,
+          select_by=a.select_by)
 
 
 if __name__ == "__main__":

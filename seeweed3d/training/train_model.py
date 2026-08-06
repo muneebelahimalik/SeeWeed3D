@@ -85,9 +85,20 @@ CONFIG = {
     # GT-vs-prediction overlay panels every N epochs. 0 disables.
     "PREVIEW_EVERY": 5,
 
-    # Val mAP every N epochs. 0 disables. Slow - a full pass over val - so this
-    # is off by default; the final evaluation below runs regardless.
+    # Val mAP every N epochs. 0 disables. A full pass over val, so it costs
+    # real time on a large val split; the final evaluation below runs
+    # regardless. Forced to 1 if SELECT_BY needs mAP and this is 0.
     "EVAL_EVERY": 0,
+
+    # What best.pt is chosen on: "val_loss" | "map50" | "map50_95".
+    #
+    # val_loss is the default only because it is free. It is a poor proxy for a
+    # detector - it sums classification, box and mask terms whose scales have
+    # nothing to do with whether a plant was found - and on a small set it
+    # often bottoms out long before detection quality peaks. If your run
+    # reports a best epoch early in the schedule, switch to "map50_95" and
+    # compare: it selects on the number you actually report.
+    "SELECT_BY": "val_loss",
 
     # -- Evaluation ------------------------------------------------------------
     "EVALUATE_AFTER": True,
@@ -151,7 +162,8 @@ def main(cfg=None):
           epochs=c["EPOCHS"], batch=c["BATCH"], lr=c["LR"],
           device=c["DEVICE"], workers=c["WORKERS"], seed=c["SEED"],
           pretrained=c["PRETRAINED"], track=c["TRACK"],
-          preview_every=c["PREVIEW_EVERY"], eval_every=c["EVAL_EVERY"])
+          preview_every=c["PREVIEW_EVERY"], eval_every=c["EVAL_EVERY"],
+          select_by=c.get("SELECT_BY", "val_loss"))
 
     if not c["EVALUATE_AFTER"]:
         return
