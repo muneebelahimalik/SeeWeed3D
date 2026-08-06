@@ -22,6 +22,7 @@ posix-style and resolved against --images-root).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from collections import Counter
@@ -69,7 +70,7 @@ def find_annotation_files(roots):
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
-          drop_classes=(), keep_empty_frames=False):
+          drop_classes=(), keep_empty_frames=False, require_lep="auto"):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -87,6 +88,19 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         A `class_mapping.json` records ontology name -> training index, so a
         model trained on the reduced set can still be interpreted against the
         full ontology.
+
+    require_lep: "auto" (default) | True | False. Whether a visible, targetable
+        weed must carry a grouped LEP point.
+
+        "auto" decides from the export itself, because the two situations need
+        opposite treatment and are trivially distinguishable:
+
+          * ZERO LEPs in the whole export -> you annotated masks only. That is
+            a legitimate SEGMENTATION-ONLY dataset (Stage A needs no LEPs at
+            all), so the requirement is lifted and no errors are raised. Stage B
+            simply cannot be trained from it.
+          * SOME but not all -> you started placing LEPs and stopped. That IS a
+            real gap in the contract and every missing one is reported.
 
     keep_empty_frames: by default a frame with ZERO annotations is EXCLUDED.
         In an export from a task you annotated by hand, an empty frame is
@@ -130,8 +144,32 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                              f"{', '.join(sources)}. Keep exactly one, or the "
                              f"frame is trained on twice and may span splits.")
 
+    # -- segmentation-only vs multitask -------------------------------------
+    n_lep = sum(1 for f in frames for i in f.instances if i.lep is not None)
+    n_weeds = sum(1 for f in frames for i in f.instances if not i.is_crop)
+    seg_only = False
+    if require_lep == "auto":
+        seg_only = (n_lep == 0 and n_weeds > 0)
+    elif require_lep is False:
+        seg_only = True
+    if seg_only:
+        # Lift the requirement rather than emit one identical error per weed.
+        contract = dataclasses.replace(contract, visibility_requiring_lep=())
+
     report = dmm.validate_frames(frames, contract, report)
     print(f"  merged {len(ann_files)} annotation file(s) -> {len(frames)} frames")
+    if seg_only:
+        print(f"\n  [i] SEGMENTATION-ONLY dataset: {n_weeds} weed instance(s) "
+              f"and {n_lep} LEP point(s).")
+        print(f"      Stage A (crop-vs-weed segmentation) trains from this "
+              f"normally - it needs no LEPs.")
+        print(f"      Stage B (LEPRoiNet) CANNOT be trained from it. Until you "
+              f"annotate LEPs, the pipeline uses the hand-engineered estimator "
+              f"in perception/lep.py, which needs no training.\n")
+    elif n_lep and n_lep < n_weeds:
+        print(f"  [!] {n_lep} LEP(s) for {n_weeds} weed instance(s) - PARTIAL. "
+              f"Missing ones are reported as errors; finish them or set "
+              f"--no-require-lep to build segmentation-only.")
 
     # -- drop classes for THIS build (ontology untouched) --------------------
     if drop:
@@ -310,6 +348,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     rep["splits"] = summary
     rep["n_yolo_label_files"] = n_labels
     rep["n_lep_rows"] = len(rows)
+    rep["dataset_kind"] = "segmentation_only" if seg_only else "multitask"
     rep["lep_rows_per_split"] = dict(Counter(r["split"] for r in rows))
     (out / "dataset_report.json").write_text(json.dumps(rep, indent=2),
                                              encoding="utf-8")
@@ -352,6 +391,10 @@ def main(argv=None):
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--test-fraction", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--no-require-lep", action="store_true",
+                   help="build a SEGMENTATION-ONLY dataset even if some LEPs "
+                        "exist. Not normally needed: an export with no LEPs at "
+                        "all is detected automatically.")
     p.add_argument("--drop-classes", nargs="*", default=[],
                    help="exclude these ontology classes from THIS build "
                         "(e.g. --drop-classes wild_radish weed_cluster). "
@@ -375,7 +418,8 @@ def main(argv=None):
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
-          keep_empty_frames=a.keep_empty_frames)
+          keep_empty_frames=a.keep_empty_frames,
+          require_lep=False if a.no_require_lep else "auto")
 
 
 if __name__ == "__main__":
