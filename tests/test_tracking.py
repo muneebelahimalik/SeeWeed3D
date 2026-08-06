@@ -213,3 +213,48 @@ def test_environment_params_omits_what_it_cannot_determine(tmp_path):
     is indistinguishable from one genuinely set to the string."""
     p = tk.environment_params(tmp_path)
     assert None not in p.values()
+
+
+# --------------------------------------------------------------------------- #
+# mlflow backend: it must never take the training run with it
+# --------------------------------------------------------------------------- #
+def test_a_broken_mlflow_backend_disables_itself_instead_of_raising(
+        tmp_path, monkeypatch):
+    """MLflow 3 refuses the old './mlruns' file store outright. Whatever the
+    cause, a backend that cannot start must not end a 3-hour training run."""
+    import types
+    fake = types.SimpleNamespace(
+        set_tracking_uri=lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("store in maintenance mode")),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "mlflow", fake)
+    t = tk.Tracker("mlflow", out_dir=tmp_path)   # explicitly requested
+    assert "mlflow" not in t.active              # disabled, not fatal
+    t.log_metrics({"loss": 1.0}, step=0)         # still a working no-op
+    t.close()
+
+
+def test_a_missing_mlflow_is_still_fatal_when_explicitly_requested(
+        tmp_path, monkeypatch):
+    """The one case that must stay loud: silently no-op'ing a backend you
+    named would let a run finish while you believed it was logged."""
+    import builtins
+    real = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name == "mlflow":
+            raise ImportError("blocked")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(SystemExit, match="pip install mlflow"):
+        tk.Tracker("mlflow", out_dir=tmp_path)
+
+
+def test_the_hint_prints_the_uri_the_run_was_written_to(tmp_path):
+    """Printing the DIRECTORY would send you to a store mlflow 3 refuses."""
+    t = tk.Tracker("none", out_dir=tmp_path)
+    t.active.append("mlflow")
+    t._uri = "sqlite:////x/mlruns/mlflow.db"
+    assert "sqlite:////x/mlruns/mlflow.db" in t.hint()
+    t.close()

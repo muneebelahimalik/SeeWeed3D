@@ -49,6 +49,15 @@ datumaro>=1.5.0
 # for loss curves, GT-vs-prediction preview panels, and a run-comparison table.
 tensorboard>=2.16
 mlflow>=2.14
+# MLflow's system-metrics sampling (GPU/CPU/RAM/disk during a run) needs these.
+# Without them MLflow still logs everything else - the run is not lost - but
+# you cannot tell a model-bound epoch from one where the dataloader is starving
+# the GPU, which is the first thing worth knowing when an epoch is slow.
+psutil>=5.9
+# nvidia-ml-py, NOT pynvml: it provides the same `pynvml` module and is the
+# maintained package - torch emits a deprecation warning if the old one is
+# installed. Skipped on aarch64 (Jetson), where NVML ships with JetPack.
+nvidia-ml-py>=12.535 ; platform_machine != "aarch64"
 
 # -- Export / deployment verification ----------------------------------------
 onnx>=1.16
