@@ -79,9 +79,14 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     print(f"train={len(tr)} val={len(va)} frames | {len(classes)} classes "
           f"{classes} | backend=maskrcnn (BSD-3-Clause)")
 
-    from training.tracking import Tracker
+    from training.tracking import Tracker, environment_params
     trk = Tracker(track, out_dir=out, run_name=out.name)
     trk.log_params({
+        # Code state, versions, GPU and a hash of the exact manifest. Without
+        # these a run table records what you asked for but not what actually
+        # ran, and OUT_DIR is reused between rebuilds so a path is not an
+        # identity.
+        **environment_params(dataset_dir),
         "backend": "maskrcnn", "dataset": str(dataset_dir),
         "epochs": epochs, "batch": batch, "lr": lr, "device": device,
         "seed": seed, "pretrained": pretrained, "min_area_px": min_area_px,

@@ -647,7 +647,36 @@ and is excluded from the mean, rather than counted as zero.
 
 Writes `metrics_<split>.json` next to the checkpoint.
 
-### 8.2 Everything else
+### 8.2 The visual report — look at this before changing anything
+
+Numbers say how good the model is. They say nothing about **which** plants it
+gets wrong, and on a small agricultural dataset that is the only question that
+tells you what to annotate next.
+
+```powershell
+python -m seeweed3d.evaluation.report `
+    --checkpoint  E:/Dataset_Vidalia/runs/seg_v1/best.pt `
+    --dataset     E:/Dataset_Vidalia/training/subset45 `
+    --split val --device cuda --conf 0.5
+```
+
+One self-contained HTML file (images embedded — open it, mail it, no sidecar
+folder) plus the per-frame JSON behind it. Four sections:
+
+| Section | What it answers |
+|---|---|
+| **Recall by instance size** | where the small-weed cliff actually is. `small_weed_recall = 0.28` is a fact; this table says whether it falls off below 250 px or below 2000 px, which are different problems |
+| **Missed weeds, smallest first** | tight crops of each plant the model failed to find. Too few pixels? genuinely ambiguous? a labelling error? Three different fixes, and only the image distinguishes them |
+| **Frames, worst first** | ground truth beside prediction, coloured by **outcome** — <span>green = matched, **red = missed**, magenta = false positive</span>, orange = crop. Sorted by miss count, so the informative frames are on the first screen |
+| **Crop safety** | separate and never averaged in. No onion ground truth reports **UNMEASURED, not passing** |
+
+Instances are coloured by outcome rather than by class deliberately: with class
+colours a missed primrose and a correct primrose look identical, which is
+exactly the comparison you are trying to make.
+
+`--max-frames` / `--max-crops` bound the page size (defaults 24 / 48).
+
+### 8.3 Everything else
 
 Metrics live in `seeweed3d/evaluation/metrics.py` and are computed from stored
 results, so you can re-evaluate without re-running inference.

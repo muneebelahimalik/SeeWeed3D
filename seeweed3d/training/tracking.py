@@ -111,7 +111,15 @@ class Tracker:
             uri = store.as_uri()
         mlflow.set_tracking_uri(uri)
         mlflow.set_experiment(self.experiment)
-        mlflow.start_run(run_name=self.run_name)
+        # log_system_metrics samples GPU/CPU/RAM/disk during the run, which is
+        # what distinguishes "the model is slow" from "the dataloader is
+        # starving the GPU" - the two have completely different fixes and are
+        # indistinguishable from a loss curve. Older mlflow builds do not
+        # accept the argument, so fall back rather than lose the run.
+        try:
+            mlflow.start_run(run_name=self.run_name, log_system_metrics=True)
+        except TypeError:
+            mlflow.start_run(run_name=self.run_name)
         self.active.append("mlflow")
         return mlflow
 
@@ -186,6 +194,87 @@ class Tracker:
             return ("tracking: none active (pip install tensorboard mlflow "
                     "to get curves and a run-comparison table)")
         return "tracking active:\n" + "\n".join(lines)
+
+
+def git_commit(repo_root=None):
+    """Current commit, with '-dirty' when the tree has uncommitted changes.
+
+    The dirty flag is the important half: a commit hash alone claims a run is
+    reproducible, and if the working tree differed from that commit it is
+    not."""
+    import subprocess
+    root = str(repo_root or Path(__file__).resolve().parents[2])
+    def _run(args):
+        return subprocess.run(args, cwd=root, capture_output=True, text=True,
+                              timeout=10)
+    try:
+        r = _run(["git", "rev-parse", "HEAD"])
+        if r.returncode != 0:
+            return None
+        sha = r.stdout.strip()
+        d = _run(["git", "status", "--porcelain"])
+        if d.returncode == 0 and d.stdout.strip():
+            sha += "-dirty"
+        return sha
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def file_digest(path, chunk=1 << 20):
+    """SHA-256 of a file, or None. Used on the dataset manifest so a run is
+    tied to the EXACT dataset it saw - a path plus a date is not enough, since
+    rebuilding into the same OUT_DIR silently changes what a path refers to."""
+    import hashlib
+    p = Path(path)
+    if not p.exists():
+        return None
+    h = hashlib.sha256()
+    try:
+        with p.open("rb") as f:
+            for block in iter(lambda: f.read(chunk), b""):
+                h.update(block)
+    except OSError:
+        return None
+    return h.hexdigest()[:16]
+
+
+def environment_params(dataset_dir=None):
+    """Versions, hardware and code state - everything needed to explain a
+    number months later that is not a hyperparameter.
+
+    Every field is best-effort: a missing CUDA build or no git binary must
+    never stop a training run."""
+    import platform
+    out = {
+        "git_commit": git_commit(),
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+    }
+    try:
+        import torch
+        out["torch_version"] = torch.__version__
+        out["cuda_available"] = bool(torch.cuda.is_available())
+        out["cuda_version"] = torch.version.cuda
+        out["cudnn_version"] = (torch.backends.cudnn.version()
+                                if torch.backends.cudnn.is_available() else None)
+        if torch.cuda.is_available():
+            out["gpu_name"] = torch.cuda.get_device_name(0)
+            out["gpu_count"] = torch.cuda.device_count()
+            props = torch.cuda.get_device_properties(0)
+            out["gpu_memory_gb"] = round(props.total_memory / 1e9, 1)
+    except Exception:
+        pass
+    try:
+        import torchvision
+        out["torchvision_version"] = torchvision.__version__
+    except Exception:
+        pass
+    if dataset_dir:
+        d = Path(dataset_dir)
+        out["dataset_dir"] = str(d)
+        out["seg_manifest_sha256"] = file_digest(d / "seg_manifest.json")
+        out["class_mapping_sha256"] = file_digest(d / "class_mapping.json")
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def _available(mod):
