@@ -61,6 +61,35 @@ only thing that will remember which was which.
 Also written to `<run>/params.json`, so the record survives even with
 `--track none`.
 
+### Provenance, once — what makes a number explainable later
+
+Logged automatically by `tracking.environment_params()`:
+
+| Field | Why |
+|---|---|
+| `git_commit` | with **`-dirty`** appended when the working tree had uncommitted changes. The flag is the important half: a bare hash *claims* the run is reproducible, and if the tree differed from that commit it is a false claim |
+| `seg_manifest_sha256`, `class_mapping_sha256` | `OUT_DIR` is reused between rebuilds, so a dataset **path** is not an identity. The hash ties a run to the exact dataset it saw |
+| `torch_version`, `torchvision_version`, `cuda_version`, `cudnn_version` | a latency or accuracy change after an environment upgrade is otherwise unattributable |
+| `gpu_name`, `gpu_count`, `gpu_memory_gb` | desktop-vs-Jetson comparisons are meaningless without it |
+| `python_version`, `platform` | |
+
+Every field is best-effort. No git binary, no CUDA build, no repo — none of it
+stops a training run. Fields that cannot be determined are **omitted**, not
+logged as `None`, because a parameter reading `"None"` is indistinguishable
+from one genuinely set to that string.
+
+### System metrics — is it the model or the dataloader?
+
+MLflow runs start with `log_system_metrics=True`, sampling GPU utilisation, GPU
+memory, CPU, RAM and disk throughout the run.
+
+This answers a question a loss curve cannot: **"the epoch is slow"** has
+completely different fixes depending on whether the GPU is pinned at 100% (the
+model is the bottleneck — smaller backbone, lower resolution, AMP) or idling at
+20% (the dataloader is starving it — more workers, smaller decode, cached
+frames). Guessing wrong costs a day. Older MLflow builds that reject the
+argument fall back rather than losing the run.
+
 ### Prediction previews — the part that actually helps
 Every `--preview-every` epochs, a **side-by-side GT vs prediction** panel on a
 fixed sample of val frames. Crop instances are outlined thicker than weeds.
@@ -107,6 +136,35 @@ mlflow ui --backend-store-uri E:/Dataset_Vidalia/runs/mlruns
 | `--track none` | no-op; `params.json` and `history.json` are still written |
 | `--preview-every N` | overlay panels every N epochs (`0` disables) |
 | `--eval-every N` | val mAP every N epochs (`0` disables — it is slow; a full pass over val) |
+| `--select-by` | what `best.pt` is chosen on: `val_loss` (default), `map50`, `map50_95` |
+
+`val_loss` is the default only because it is free. It is a poor proxy for a
+detector — it sums classification, box and mask terms whose scales have nothing
+to do with whether a plant was found — and on a small set it often bottoms out
+long before detection quality peaks. Training now prints which epoch won and
+flags an early peak; if the winner is in the first 40% of the schedule, switch
+to `map50_95` and compare.
+
+---
+
+## 7. Where this stops, and what replaces it
+
+Experiment tracking answers *"which training run was best?"*. It cannot answer
+*"is the deployed model now seeing field conditions unlike its training data?"*
+— a different question needing a different tool ([Evidently](https://www.evidentlyai.com/),
+Apache-2.0, also self-hostable).
+
+That is deliberately **not** installed yet. Drift monitoring needs a trained
+model, a locked test set, a repeatable inference pipeline and several field
+sessions to compare against a reference distribution. With one annotated
+session there is no reference distribution to drift from, so it would produce
+confident-looking output with nothing behind it. Revisit after the first real
+field deployment.
+
+Note the shape of the eventual integration when you get there: drift on raw
+pixels is meaningless, so the comparison runs over derived per-frame features —
+brightness, ExG distribution, blur score, depth-valid fraction, weed density,
+abstention rate, p95 latency — most of which this pipeline already computes.
 
 ---
 

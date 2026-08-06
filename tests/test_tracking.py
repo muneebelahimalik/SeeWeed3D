@@ -118,3 +118,98 @@ def test_side_by_side_downscales_a_wide_pair():
     a = np.zeros((100, 2000, 3), np.uint8)
     p = tk.side_by_side(a, a, max_width=800)
     assert p.shape[1] == 800
+
+
+# --------------------------------------------------------------------------- #
+# provenance: what makes a run explainable months later
+# --------------------------------------------------------------------------- #
+def test_git_commit_flags_a_dirty_tree(tmp_path, monkeypatch):
+    """A bare hash claims reproducibility. If the tree differed from that
+    commit, it is a false claim."""
+    import subprocess
+    calls = {"n": 0}
+
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    def fake_run(args, **kw):
+        calls["n"] += 1
+        if "rev-parse" in args:
+            return R("abc123\n")
+        return R(" M some_file.py\n")     # porcelain: uncommitted changes
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert tk.git_commit(tmp_path) == "abc123-dirty"
+
+
+def test_git_commit_is_clean_when_nothing_is_modified(tmp_path, monkeypatch):
+    import subprocess
+
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda args, **kw: R("abc123\n" if "rev-parse" in args
+                                             else ""))
+    assert tk.git_commit(tmp_path) == "abc123"
+
+
+def test_git_commit_returns_none_outside_a_repo(tmp_path, monkeypatch):
+    import subprocess
+
+    class R:
+        def __init__(self):
+            self.stdout, self.returncode = "", 128
+
+    monkeypatch.setattr(subprocess, "run", lambda args, **kw: R())
+    assert tk.git_commit(tmp_path) is None
+
+
+def test_git_commit_survives_git_being_absent(tmp_path, monkeypatch):
+    import subprocess
+
+    def boom(*a, **k):
+        raise FileNotFoundError("no git")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert tk.git_commit(tmp_path) is None
+
+
+def test_file_digest_changes_when_the_file_changes(tmp_path):
+    """OUT_DIR is reused between rebuilds, so a path is not an identity."""
+    f = tmp_path / "seg_manifest.json"
+    f.write_text('{"frames": []}')
+    a = tk.file_digest(f)
+    f.write_text('{"frames": [1]}')
+    assert a != tk.file_digest(f)
+
+
+def test_file_digest_is_stable_for_identical_content(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.write_text("same"); b.write_text("same")
+    assert tk.file_digest(a) == tk.file_digest(b)
+
+
+def test_file_digest_of_a_missing_file_is_none(tmp_path):
+    assert tk.file_digest(tmp_path / "nope.json") is None
+
+
+def test_environment_params_records_code_and_runtime():
+    p = tk.environment_params()
+    assert "python_version" in p and "platform" in p
+
+
+def test_environment_params_hashes_the_dataset_manifest(tmp_path):
+    (tmp_path / "seg_manifest.json").write_text('{"frames": []}')
+    p = tk.environment_params(tmp_path)
+    assert p["seg_manifest_sha256"]
+    assert p["dataset_dir"] == str(tmp_path)
+
+
+def test_environment_params_omits_what_it_cannot_determine(tmp_path):
+    """None values are dropped rather than logged - a param reading 'None'
+    is indistinguishable from one genuinely set to the string."""
+    p = tk.environment_params(tmp_path)
+    assert None not in p.values()
