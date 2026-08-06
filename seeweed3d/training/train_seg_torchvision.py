@@ -42,6 +42,13 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     if select_by not in ("val_loss", "map50", "map50_95"):
         raise SystemExit(f"ERROR: select_by must be one of val_loss, map50, "
                          f"map50_95; got {select_by!r}")
+    # BEFORE the dataset loads, the tracker opens a run, or pretrained weights
+    # download. A CPU-only torch otherwise fails inside Module.to() half a
+    # minute later, with an AssertionError that names neither the cause nor the
+    # fix and leaves a stranded tracking run behind.
+    from common.torch_utils import require_device
+    device = require_device(device)
+
     try:
         import torch
     except ImportError:
