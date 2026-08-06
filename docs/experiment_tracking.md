@@ -48,8 +48,9 @@ augmentation, the second question is the one that eats the time.
 `train_loss`, `val_loss`, `lr`, and — when `--eval-every` is on — `val_map50`,
 `val_map50_95`, `missed_onion_fraction`.
 
-The mAP metrics are computed on the current **best** checkpoint rather than the
-live weights, so the curve tracks the model you would actually ship.
+The mAP metrics are computed on the **current weights**, not on the current
+best checkpoint. Evaluating the best one is circular: it cannot say whether
+*this* epoch improved, which is exactly what `--select-by map50_95` needs.
 
 ### Parameters, once
 Learning rate, batch, epochs, seed, class list, train/val counts, plus
@@ -81,14 +82,41 @@ from one genuinely set to that string.
 ### System metrics — is it the model or the dataloader?
 
 MLflow runs start with `log_system_metrics=True`, sampling GPU utilisation, GPU
-memory, CPU, RAM and disk throughout the run.
+memory, CPU, RAM, disk and network throughout the run.
 
 This answers a question a loss curve cannot: **"the epoch is slow"** has
 completely different fixes depending on whether the GPU is pinned at 100% (the
 model is the bottleneck — smaller backbone, lower resolution, AMP) or idling at
 20% (the dataloader is starving it — more workers, smaller decode, cached
-frames). Guessing wrong costs a day. Older MLflow builds that reject the
-argument fall back rather than losing the run.
+frames). Guessing wrong costs a day.
+
+Needs `psutil` (CPU/RAM/disk) and `nvidia-ml-py` (GPU), both in
+`requirements-training.txt`. Their absence is **checked before** the run
+starts, not caught afterwards: MLflow creates the run in the store and only
+then launches the metrics monitor, so a failure there strands an orphan run
+that `mlflow.active_run()` no longer reports and nothing can delete — an empty
+row in exactly the comparison table MLflow is here for. Without them everything
+else is still logged and a warning names the install command.
+
+### Storage: SQLite, not `./mlruns`
+
+**MLflow 3 refuses the plain filesystem backend** — `FileStore` raises *"in
+maintenance mode"* on start. The tracking URI is therefore
+`sqlite:///<runs>/mlruns/mlflow.db`, with artifacts under
+`<runs>/mlruns/artifacts/`. Still one local folder, still no server, still
+nothing uploaded.
+
+Two consequences worth knowing:
+
+- The `mlflow ui` command printed at the end of training passes that **URI**.
+  Pointing `--backend-store-uri` at the *directory* opens a store MLflow
+  refuses.
+- With a database backend the artifact root is not implied by the tracking URI.
+  Left unset it resolves to `./mlruns` relative to your **working directory**,
+  so preview images would land wherever you happened to run `python` from. The
+  experiment is created with an explicit `artifact_location` to prevent that.
+
+`MLFLOW_TRACKING_URI` still overrides everything if you want a shared server.
 
 ### Prediction previews — the part that actually helps
 Every `--preview-every` epochs, a **side-by-side GT vs prediction** panel on a
@@ -112,7 +140,7 @@ a single mask of a third colour — which is exactly the case you are looking fo
 ## 4. Usage
 
 ```powershell
-python -m pip install tensorboard mlflow
+python -m pip install tensorboard mlflow psutil nvidia-ml-py
 
 python -m seeweed3d.training.train_seg_torchvision `
     --dataset     E:/Dataset_Vidalia/training/subset45 `
@@ -126,7 +154,8 @@ Then, in a second terminal:
 
 ```powershell
 tensorboard --logdir E:/Dataset_Vidalia/runs/seg_v1/tb
-mlflow ui --backend-store-uri E:/Dataset_Vidalia/runs/mlruns
+# the URI, not the directory - training prints the exact line to use
+mlflow ui --backend-store-uri sqlite:///E:/Dataset_Vidalia/runs/mlruns/mlflow.db
 ```
 
 | Flag | Meaning |

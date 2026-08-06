@@ -60,6 +60,8 @@ class Tracker:
         self._tb = None
         self._mlflow = None
         self._closed = False
+        self._uri = None
+        self.system_metrics = False
 
         if backend not in BACKENDS + ("auto",):
             raise ValueError(f"backend must be one of {BACKENDS + ('auto',)}, "
@@ -102,24 +104,71 @@ class Tracker:
                     "ERROR: --track mlflow requested but mlflow is not "
                     "installed:\n    python -m pip install mlflow")
             return None
-        # A local file store under the run's parent, so `mlflow ui` in that
-        # folder sees every run of this project and nothing is uploaded.
+        try:
+            return self._start_mlflow_inner(mlflow)
+        except SystemExit:
+            raise
+        except Exception as e:
+            # Anything else - an unreadable store, a locked database, a backend
+            # the installed mlflow refuses - must not take the training run
+            # with it. Only a MISSING explicitly-requested backend is fatal;
+            # a broken one degrades to a warning, because losing three hours of
+            # training to a charting library is never the right trade.
+            print(f"  [warn] mlflow disabled: {type(e).__name__}: {e}")
+            return None
+
+    def _start_mlflow_inner(self, mlflow):
         uri = os.environ.get("MLFLOW_TRACKING_URI")
+        artifacts = None
         if not uri:
+            # SQLite, NOT the bare './mlruns' file store. MLflow 3 refuses the
+            # filesystem backend outright ("in maintenance mode"), so the
+            # obvious local choice raises on start. SQLite is a plain file
+            # alongside it, needs no server, and is what `mlflow migrate-
+            # filestore` targets - so this stays local with nothing uploaded.
             store = (self.out_dir.parent / "mlruns").resolve()
             store.mkdir(parents=True, exist_ok=True)
-            uri = store.as_uri()
+            uri = "sqlite:///" + store.joinpath("mlflow.db").as_posix()
+            artifacts = store / "artifacts"
+            artifacts.mkdir(parents=True, exist_ok=True)
         mlflow.set_tracking_uri(uri)
+
+        # With a database backend the artifact root is NOT implied by the
+        # tracking URI; left unset it resolves to ./mlruns relative to the
+        # working directory, so preview images would land wherever you
+        # happened to run python from.
+        exp = mlflow.get_experiment_by_name(self.experiment)
+        if exp is None and artifacts is not None:
+            mlflow.create_experiment(self.experiment,
+                                     artifact_location=artifacts.as_uri())
         mlflow.set_experiment(self.experiment)
+
         # log_system_metrics samples GPU/CPU/RAM/disk during the run, which is
         # what distinguishes "the model is slow" from "the dataloader is
         # starving the GPU" - the two have completely different fixes and are
-        # indistinguishable from a loss curve. Older mlflow builds do not
-        # accept the argument, so fall back rather than lose the run.
+        # indistinguishable from a loss curve.
+        #
+        # It is an ENHANCEMENT, so its failure must cost only itself. The
+        # dependency is CHECKED UP FRONT rather than caught: mlflow creates the
+        # run in the store and only then starts the metrics monitor, so a
+        # failure there leaves an orphan run that mlflow.active_run() no longer
+        # reports and nothing can clean up - an empty row in exactly the
+        # comparison table MLflow is here for. Not asking for what cannot work
+        # is the only way to avoid it.
+        want_sys = _available("psutil")
+        if not want_sys:
+            print("  [warn] mlflow system metrics off (psutil missing). "
+                  "Everything else is still logged; `python -m pip install "
+                  "psutil pynvml` enables GPU/CPU/RAM sampling.")
         try:
-            mlflow.start_run(run_name=self.run_name, log_system_metrics=True)
+            mlflow.start_run(run_name=self.run_name,
+                             log_system_metrics=True if want_sys else None)
+            self.system_metrics = want_sys
         except TypeError:
+            # An mlflow too old to know the argument at all.
             mlflow.start_run(run_name=self.run_name)
+            self.system_metrics = False
+        self._uri = uri
         self.active.append("mlflow")
         return mlflow
 
@@ -188,8 +237,9 @@ class Tracker:
         if "tensorboard" in self.active:
             lines.append(f"  tensorboard --logdir {self.out_dir / 'tb'}")
         if "mlflow" in self.active:
-            lines.append(f"  mlflow ui --backend-store-uri "
-                         f"{(self.out_dir.parent / 'mlruns').resolve()}")
+            # The exact URI the run was written to. Printing the DIRECTORY
+            # instead would send you to a store mlflow 3 refuses to open.
+            lines.append(f"  mlflow ui --backend-store-uri {self._uri}")
         if not lines:
             return ("tracking: none active (pip install tensorboard mlflow "
                     "to get curves and a run-comparison table)")

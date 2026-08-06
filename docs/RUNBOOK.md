@@ -540,10 +540,11 @@ account is needed. `auto` (the default) uses whatever is installed and never
 fails; `all` requires both and errors if either is missing.
 
 ```powershell
-python -m pip install tensorboard mlflow
+python -m pip install tensorboard mlflow psutil nvidia-ml-py
 
 tensorboard --logdir E:/Dataset_Vidalia/runs/seg_v1/tb
-mlflow ui --backend-store-uri E:/Dataset_Vidalia/runs/mlruns
+# the URI, not the directory - training prints the exact line to use
+mlflow ui --backend-store-uri sqlite:///E:/Dataset_Vidalia/runs/mlruns/mlflow.db
 ```
 
 | Flag | Effect |
