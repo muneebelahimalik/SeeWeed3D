@@ -174,7 +174,7 @@ for coloured dots on bare ground — if you see them, the vegetation prior is
 false-positiving on your substrate and you should tighten
 `RECOVER_MIN_VEG_SCORE` / leave `RECOVER_MISSED_PLANTS` off.
 
-**Produces** per session:
+**Produces** per session, under `auto_labels_weeds/<session>/`:
 
 | Item | Use |
 |---|---|
@@ -188,11 +188,30 @@ false-positiving on your substrate and you should tighten
 > `vegetation == onion` only in **onion-only** ones. Never point a prelabeler at
 > a mixed scene.
 
-If you change the ontology later, you do **not** need to re-run SAM 3:
+**The onion prelabeler does not write its own label file.** It produces
+`cvat_ready/`, `instances_default.json`, `preview/` and `flagged_rgb/` under
+`auto_labels_onion/<session>/`, same as above, but the label JSON to paste comes
+from `annotation/cvat_roundtrip.ONION_CVAT_LABELS` — get it either way:
 
 ```powershell
-python seeweed3d/annotation/regen_cvat_labels.py    # rewrites label JSONs in seconds
+python seeweed3d/annotation/regen_cvat_labels.py
+# -> auto_labels_onion/<session>/onion_cvat_labels.json
 ```
+
+or in Python: `from annotation.cvat_roundtrip import write_labels`.
+
+**⚠️ Do not reuse an old hand-copied label file.** `common/ontology.py` fixed
+every class name to `lower_snake_case` (`onion_plant`, `ignore_region`, …). A
+schema from before that rename (`"onion plant"` with a space, sometimes found
+copied out of the now-superseded `extraction/select_batches.py`) will not match
+what the SAM 3 prelabeler's own COCO category name uses, so the import creates
+a **second, duplicate label** instead of filling the one already prelabelled —
+and a Datumaro export under that old name fails with `unknown label`. Always
+regenerate rather than reuse a saved copy.
+
+If you change the ontology later, you do **not** need to re-run SAM 3 — the
+same command above refreshes every existing session's label file in seconds
+without touching any mask, preview, or `instances_default.json`.
 
 ---
 

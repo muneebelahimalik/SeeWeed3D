@@ -60,12 +60,21 @@ CONFIG = {
 }
 
 # CVAT label schema for onion verification (paste into the Raw label editor).
+#
+# type: "polygon", matching the weeds schema (common/ontology.py::cvat_labels),
+# not "mask". A CVAT "mask" label uses the brush tool and typically exports as
+# RLE; COMPRESSED RLE needs pycocotools to decode (see
+# datumaro_multitask._decode_rle) and uncompressed RLE is not what CVAT emits
+# by default. "polygon" is what the working weeds pipeline round-trips import
+# -> correct -> Datumaro export -> prepare_dataset without any extra
+# dependency, so onion tasks use the same shape type rather than risking that
+# failure mode for no benefit.
 ONION_CVAT_LABELS = [
-    {"name": "onion_plant", "type": "mask", "color": "#33ddff", "attributes": [
+    {"name": "onion_plant", "type": "polygon", "color": "#33ddff", "attributes": [
         {"name": "difficulty", "input_type": "select", "mutable": True,
          "values": ["normal", "overlapping", "blurred", "shadowed", "wet", "truncated"],
          "default_value": "normal"}]},
-    {"name": "ignore_region", "type": "mask", "color": "#000000", "attributes": [
+    {"name": "ignore_region", "type": "polygon", "color": "#000000", "attributes": [
         {"name": "reason", "input_type": "select", "mutable": False,
          "values": ["severe_blur", "ambiguity", "labeling_uncertainty", "out_of_range"],
          "default_value": "ambiguity"}]},

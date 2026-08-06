@@ -1,5 +1,13 @@
 # Onion prelabeling with SAM 3 (`annotation/prelabel_onions_sam3.py`)
 
+> **CVAT label schema:** use `docs/RUNBOOK.md`'s §4, importing
+> `annotation/cvat_roundtrip.ONION_CVAT_LABELS` (`onion_plant` /
+> `ignore_region`, snake_case). This page's earlier examples referenced
+> `select_batches.py`'s `cvat_labels.json`, which predates the ontology's
+> snake_case rule ("onion plant" with a space) and will not match what
+> `prepare_dataset.py` and the SAM 3 prelabeler's own COCO category name
+> ("onion_plant") expect.
+
 Auto-generates a high-recall onion **safety mask** for every pooled frame and
 writes it as CVAT-importable COCO, so annotators **verify** masks instead of
 drawing them. For **onion-only** recordings only.
