@@ -19,9 +19,12 @@ BACKENDS AND THEIR LICENCES
                                   FP16, nano..2XL, built for fine-tuning.
                                   The upgrade path once the prototype works.
     rtmdet         Apache-2.0     OpenMMLab RTMDet-Ins. Real-time, long
-                                  TensorRT track record; pulls in the
-                                  mmengine/mmcv stack, which is
-                                  version-fragile.
+                                  TensorRT track record. NOT IMPLEMENTED here -
+                                  documented as a viable option only. Adding it
+                                  means one adapter class returning Detections;
+                                  the mmengine/mmcv stack is version-fragile,
+                                  which is why rfdetr is the recommended
+                                  real-time route instead.
     ultralytics    AGPL-3.0 (!)   YOLO26-seg. Strong, but AGPL: commercial
                                   or proprietary use needs an Ultralytics
                                   Enterprise Licence, and AGPL otherwise
@@ -310,7 +313,11 @@ BACKENDS = {
     "ultralytics": (UltralyticsSegmenter, "AGPL-3.0"),
 }
 DEFAULT_BACKEND = "maskrcnn"
-PERMISSIVE_BACKENDS = ("maskrcnn", "rfdetr", "rtmdet")
+# DERIVED from the registry, never hand-written: a hand-maintained list drifted
+# once already, naming a backend that had no implementation, so build_segmenter
+# would have raised "unknown backend" on something the docs advertised.
+PERMISSIVE_BACKENDS = tuple(k for k, (_, lic) in BACKENDS.items()
+                            if "AGPL" not in lic and "GPL" not in lic)
 
 
 def build_segmenter(backend=DEFAULT_BACKEND, weights=None, **kw):

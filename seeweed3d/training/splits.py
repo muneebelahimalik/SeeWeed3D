@@ -161,6 +161,66 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
     return out
 
 
+def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
+                        gap_frames=2):
+    """Split ONE session into contiguous frame blocks, with a discarded buffer.
+
+    USE ONLY WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE (a single recording). It
+    is strictly weaker than splitting by session and the caller must say so.
+
+    Why blocks and not a random frame split: adjacent video frames are
+    near-identical, so a random split puts a frame and its near-duplicate on
+    both sides of the boundary and the score measures memorisation. Contiguous
+    blocks put train, val and test in *different parts of the drive*, so at
+    least they see different ground.
+
+    Why a gap: the frames either side of a block boundary still overlap
+    heavily. `gap_frames` at each boundary are dropped from every split rather
+    than assigned, which is the cheapest way to buy real separation.
+
+    What this still cannot give you: the val/test frames come from the same
+    recording, so the same lighting, the same soil, the same plants at the same
+    growth stage, and often the same individual plants seen again. Treat the
+    resulting numbers as a sanity check that training is working - NOT as
+    evidence the model generalises. Only a held-out SESSION can support that.
+
+    Returns {split: [frame_id]} preserving the input order.
+    """
+    ids = list(frame_ids)
+    n = len(ids)
+    if n < 5:
+        raise SplitError(
+            f"only {n} frames; a within-session split needs at least 5 to leave "
+            f"anything in each block. Annotate more frames.")
+    if val_fraction + test_fraction >= 1.0:
+        raise SplitError("val_fraction + test_fraction must be < 1.0")
+
+    n_test = int(round(test_fraction * n))
+    n_val = int(round(val_fraction * n))
+    gap = max(0, int(gap_frames))
+
+    # Layout: [ train | gap | val | gap | test ]
+    # Test last so it sits at one end of the drive, furthest from training.
+    need = n_val + n_test + 2 * gap
+    if need >= n:
+        gap = 0                                    # too small to afford buffers
+        need = n_val + n_test
+    if need >= n:
+        raise SplitError(
+            f"{n} frames cannot be split into train/val/test at "
+            f"val={val_fraction}, test={test_fraction}. Lower the fractions or "
+            f"annotate more frames.")
+
+    n_train = n - need
+    i = 0
+    train = ids[i:i + n_train]; i += n_train + gap
+    val = ids[i:i + n_val]; i += n_val + gap
+    test = ids[i:i + n_test]
+    return {"train": train, "val": val, "test": test,
+            "_dropped_gap": [f for f in ids
+                             if f not in set(train) | set(val) | set(test)]}
+
+
 def check_no_leakage(split_map, frame_sessions):
     """Raise if any session, or any frame, appears in more than one split.
 

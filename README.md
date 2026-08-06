@@ -37,6 +37,7 @@ seeweed3d/
                 losses.py                  multitask LEP losses
                 lep_dataset.py             torch Dataset driven by the LEP manifest
                 prepare_dataset.py         entry point: export -> trainable dataset
+                active_learning.py         rank the unlabelled pool: what to annotate NEXT
                 seg_dataset.py             torchvision-format instance segmentation dataset
                 train_seg_torchvision.py   Stage A training, BSD-3 backend (default)
                 train_seg.py / train_lep.py  Ultralytics (AGPL, opt-in) / LEP training
@@ -48,6 +49,7 @@ seeweed3d/
                 vegetation.py              shared ExG vegetation prior + white balance
                 depth_utils.py             canonical depth reader + robust 3D point sampling
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream
+                diagnose_blur.py           is blur MOTION or OPTICS? (decides from the frames)
 docs/           pipeline, capture, and prelabeling guides
 legacy/         superseded scripts, kept for provenance
 tests/          synthetic end-to-end checks for the extraction + prelabel logic
@@ -74,6 +76,10 @@ python seeweed3d/extraction/select_batches.py
 # 5. (onion-only scenes) Prelabel onions with SAM 3, then verify in CVAT
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
+
+**→ [`docs/lep_localization_explained.md`](docs/lep_localization_explained.md)** explains LEP
+localization in full technical detail — biology, both estimators, the math,
+uncertainty, 3D conversion and the safety rules.
 
 **→ [`docs/RUNBOOK.md`](docs/RUNBOOK.md) is the complete end-to-end guide**: every
 step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging

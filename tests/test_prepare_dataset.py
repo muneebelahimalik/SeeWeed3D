@@ -9,6 +9,7 @@ from conftest import load_script
 
 prep = load_script("training/prepare_dataset.py")
 met = load_script("evaluation/metrics.py")
+sp = load_script("training/splits.py")
 
 from common.ontology import CLASSES, CROP_CLASS  # noqa: E402
 
@@ -338,8 +339,10 @@ def test_merging_resolves_labels_by_NAME_not_by_index(tmp_path):
 def test_the_same_frame_in_two_exports_is_reported(tmp_path):
     """Duplicate frames would be trained on twice and could span two splits -
     exactly the leakage the session rule exists to prevent."""
-    a = _one_session_export(tmp_path, "sessX", "taskA")
-    b = _one_session_export(tmp_path, "sessX", "taskB")     # same session again
+    # Enough frames that the single-session fallback split is viable; this test
+    # is about duplicate detection, not about splitting.
+    a = _one_session_export(tmp_path, "sessX", "taskA", frames_per=6)
+    b = _one_session_export(tmp_path, "sessX", "taskB", frames_per=6)  # same session
     report, _, _ = prep.build([a, b], tmp_path / "images", tmp_path / "out",
                               val_fraction=0.0, test_fraction=0.0, seed=1,
                               strict=False)
@@ -361,3 +364,204 @@ def test_seg_manifest_is_written_for_the_permissive_backend(tmp_path):
     assert f["split"] in ("train", "val", "test")
     assert {i["class_name"] for i in f["instances"]} == {"wild_radish", CROP_CLASS}
     assert f["instances"][0]["polygons"]
+
+
+# --------------------------------------------------------------------------- #
+# Single-session fallback (35 frames from one recording - the real case)
+# --------------------------------------------------------------------------- #
+def test_single_session_falls_back_to_frame_blocks_not_empty_splits(tmp_path):
+    """One recording cannot be split by session. Silently producing empty
+    val/test would mean training blind with no signal that it is learning."""
+    root = _one_session_export(tmp_path, "vid3_20260108_103135", "task0",
+                               frames_per=35)
+    out = tmp_path / "out"
+    report, split_map, rows = prep.build(root, tmp_path / "images", out,
+                                         val_fraction=0.2, test_fraction=0.2,
+                                         seed=1, strict=False)
+    summary = json.loads((out / "splits" / "splits_summary.json").read_text())
+    assert summary["split_mode"] == "frame_block"
+    assert "warning" in summary and "generalisation" in summary["warning"]
+
+    blocks = summary["frame_blocks"]
+    assert len(blocks["train"]) > 0
+    assert len(blocks["val"]) > 0
+    assert len(blocks["test"]) > 0
+
+    # Every split must actually receive rows. Frames in the discarded gap
+    # legitimately have no split - that is the buffer doing its job.
+    counts = {s: sum(1 for r in rows if r["split"] == s)
+              for s in ("train", "val", "test")}
+    assert all(v > 0 for v in counts.values()), counts
+    n_gap = sum(1 for r in rows if r["split"] == "unassigned")
+    assert n_gap == len(blocks["_dropped_gap"])
+    assert n_gap > 0, "the temporal buffer should have excluded some frames"
+
+
+def test_frame_blocks_are_contiguous_and_gap_separated():
+    """Blocks, not a random frame split: adjacent frames are near-identical, so
+    a random split scores memorisation. The gap buys real separation."""
+    ids = [f"s_{i:06d}" for i in range(40)]
+    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=3)
+
+    for split in ("train", "val", "test"):
+        idx = [ids.index(f) for f in out[split]]
+        assert idx == list(range(idx[0], idx[-1] + 1)), f"{split} is not contiguous"
+
+    assert max(ids.index(f) for f in out["train"]) < min(ids.index(f)
+                                                         for f in out["val"])
+    assert max(ids.index(f) for f in out["val"]) < min(ids.index(f)
+                                                       for f in out["test"])
+    assert len(out["_dropped_gap"]) == 6            # two 3-frame buffers
+
+    everything = out["train"] + out["val"] + out["test"] + out["_dropped_gap"]
+    assert sorted(everything) == sorted(ids)        # nothing invented or lost
+    assert len(set(everything)) == len(ids)         # nothing in two blocks
+
+
+def test_frame_block_split_refuses_when_there_are_too_few_frames():
+    with pytest.raises(sp.SplitError) as e:
+        sp.assign_frame_blocks([f"f{i}" for i in range(4)], 0.2, 0.2)
+    assert "at least 5" in str(e.value)
+
+
+def test_class_counts_are_reported_so_imbalance_is_visible(tmp_path):
+    """A class with zero instances cannot be learned, and a model that never
+    sees it will silently never predict it. per_class must show exactly what
+    was annotated so the gap is obvious before training, not after."""
+    root = _one_session_export(tmp_path, "sessOnly", "t", frames_per=8)
+    report, _, _ = prep.build(root, tmp_path / "images", tmp_path / "out",
+                              val_fraction=0.2, test_fraction=0.2, seed=1,
+                              strict=False)
+    # This export contains only wild_radish and onion_plant, so every other
+    # ontology class must be absent from the counts.
+    assert set(report.per_class) == {"wild_radish", CROP_CLASS}
+    missing = [c for c in CLASSES if c not in report.per_class]
+    assert "grass_weed" in missing and "weed_cluster" in missing
+
+
+# --------------------------------------------------------------------------- #
+# Dropping classes for one build, and excluding un-annotated frames
+# --------------------------------------------------------------------------- #
+def _mixed_export(tmp_path, name="mixed", frames_per=10, n_empty=0):
+    """Frames with wild_radish + grass_weed, plus optionally some with no
+    annotations at all (the un-annotated case)."""
+    items = []
+    for f in range(frames_per):
+        anns = [
+            {"id": 1, "type": "polygon", "label_id": L["wild_radish"],
+             "group": 1, "points": _sq(20, 20, 60), "z_order": 0,
+             "attributes": {"lep_visibility": "visible", "targetable": "yes"}},
+            {"id": 2, "type": "points", "label_id": L["weed_LEP"], "group": 1,
+             "points": [50.0, 50.0], "z_order": 0, "attributes": {}},
+            {"id": 3, "type": "polygon", "label_id": L["grass_weed"],
+             "group": 2, "points": _sq(200, 20, 60), "z_order": 0,
+             "attributes": {"lep_visibility": "visible", "targetable": "yes"}},
+            {"id": 4, "type": "points", "label_id": L["weed_LEP"], "group": 2,
+             "points": [230.0, 50.0], "z_order": 0, "attributes": {}},
+        ]
+        items.append({"id": f"sessM_{f:06d}", "annotations": anns,
+                      "image": {"path": f"sessM_{f:06d}.png", "size": [480, 640]}})
+    for e in range(n_empty):
+        i = frames_per + e
+        items.append({"id": f"sessM_{i:06d}", "annotations": [],
+                      "image": {"path": f"sessM_{i:06d}.png", "size": [480, 640]}})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []} for n in LABELS],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / name
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_dropped_classes_leave_the_ontology_untouched(tmp_path):
+    """The ontology fixes COCO ids, the CVAT schema and every file already
+    exported. Dropping must be local to the build so a future dataset that DOES
+    contain the class still merges with this one."""
+    root = _mixed_export(tmp_path)
+    out = tmp_path / "out"
+    report, _, rows = prep.build(root, tmp_path / "images", out,
+                                 val_fraction=0.2, test_fraction=0.2, seed=1,
+                                 strict=False, drop_classes=["wild_radish"])
+
+    assert "wild_radish" not in report.per_class
+    assert report.per_class.get("grass_weed", 0) > 0
+    assert all(r["class_name"] != "wild_radish" for r in rows)
+
+    from common.ontology import CLASSES as LIVE
+    assert "wild_radish" in LIVE, "the ontology must NOT be mutated"
+
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["dropped"] == ["wild_radish"]
+    assert "wild_radish" not in mapping["active_classes"]
+    assert mapping["ontology"] == list(LIVE)
+
+
+def test_dropping_keeps_training_indices_contiguous(tmp_path):
+    """A gap in the label indices would silently shift every class above it."""
+    root = _mixed_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               drop_classes=["wild_radish", "weed_cluster"])
+
+    active = json.loads((out / "seg_manifest.json").read_text())["classes"]
+    assert "wild_radish" not in active and "weed_cluster" not in active
+    assert len(active) == len(CLASSES) - 2
+
+    y = (out / "data.yaml").read_text()
+    assert f"nc: {len(active)}" in y
+    for i, n in enumerate(active):
+        assert f"  {i}: {n}" in y
+
+    # Every YOLO label index must be inside the reduced, contiguous range.
+    for txt in (out / "labels").rglob("*.txt"):
+        for line in txt.read_text().split("\n"):
+            if line.strip():
+                assert 0 <= int(line.split()[0]) < len(active)
+
+    # And the per-instance index in the manifest agrees with that list.
+    for f in json.loads((out / "seg_manifest.json").read_text())["frames"]:
+        for inst in f["instances"]:
+            assert active[inst["class_index"]] == inst["class_name"]
+
+
+def test_unannotated_frames_are_excluded_by_default(tmp_path):
+    """An empty frame in a hand-annotated export is almost always one you did
+    not reach. Training on it teaches the model that plants are background."""
+    root = _mixed_export(tmp_path, frames_per=10, n_empty=4)
+    out = tmp_path / "out"
+    report, _, _ = prep.build(root, tmp_path / "images", out,
+                              val_fraction=0.2, test_fraction=0.2, seed=1,
+                              strict=False)
+    assert report.n_frames == 14                 # all 14 were read...
+    seg = json.loads((out / "seg_manifest.json").read_text())
+    # ...the 4 un-annotated ones were excluded, and the single-session
+    # frame-block split additionally discards its gap frames as a buffer.
+    assert 0 < seg["n_frames"] <= 10
+    kept = {f["item_id"] for f in seg["frames"]}
+    assert not any(int(i.rsplit("_", 1)[1]) >= 10 for i in kept), \
+        "an un-annotated frame reached the training set"
+    for txt in (out / "labels").rglob("*.txt"):
+        assert txt.read_text().strip(), f"{txt.name} is an empty label file"
+
+
+def test_empty_frames_can_be_kept_deliberately(tmp_path):
+    """Genuinely bare ground is a legitimate negative example - but it has to
+    be an explicit choice."""
+    root = _mixed_export(tmp_path, frames_per=10, n_empty=4)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False, keep_empty_frames=True)
+    labels = list((out / "labels").rglob("*.txt"))
+    assert any(not t.read_text().strip() for t in labels)
+
+
+def test_unknown_drop_class_fails_clearly(tmp_path):
+    root = _mixed_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        prep.build(root, tmp_path / "images", tmp_path / "out",
+                   drop_classes=["nonexistent_weed"], strict=False)
+    assert "nonexistent_weed" in str(e.value)

@@ -48,6 +48,7 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
             f"ERROR: {manifest} contains no annotated frames. Check "
             f"annotations_needing_correction.json next to it.")
 
+    classes = list(doc.get("classes") or CLASSES)
     torch.manual_seed(seed)
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
 
@@ -58,15 +59,15 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     if len(tr) == 0:
         raise SystemExit("ERROR: the training split has no annotated frames. "
                          "See splits/splits_summary.json.")
-    print(f"train={len(tr)} val={len(va)} frames | {len(CLASSES)} classes "
-          f"| backend=maskrcnn (BSD-3-Clause)")
+    print(f"train={len(tr)} val={len(va)} frames | {len(classes)} classes "
+          f"{classes} | backend=maskrcnn (BSD-3-Clause)")
 
     dl = DataLoader(tr, batch_size=batch, shuffle=True, num_workers=workers,
                     collate_fn=collate)
     vdl = (DataLoader(va, batch_size=batch, num_workers=workers,
                       collate_fn=collate) if len(va) else None)
 
-    model = MaskRCNNSegmenter.build(len(CLASSES), pretrained=pretrained).to(device)
+    model = MaskRCNNSegmenter.build(len(classes), pretrained=pretrained).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=5e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
@@ -103,13 +104,13 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
             row["val_loss"] = vt / max(1, vn)
             if row["val_loss"] < best:
                 best = row["val_loss"]
-                torch.save({"model": model.state_dict(), "classes": list(CLASSES),
+                torch.save({"model": model.state_dict(), "classes": list(classes),
                             "backend": "maskrcnn"}, out / "best.pt")
         history.append(row)
         print(f"  epoch {ep:3d} " + " ".join(f"{k}={v}" for k, v in row.items()
                                              if k != "epoch"))
 
-    torch.save({"model": model.state_dict(), "classes": list(CLASSES),
+    torch.save({"model": model.state_dict(), "classes": list(classes),
                 "backend": "maskrcnn"}, out / "last.pt")
     (out / "history.json").write_text(json.dumps(history, indent=2))
     print(f"-> {out}")

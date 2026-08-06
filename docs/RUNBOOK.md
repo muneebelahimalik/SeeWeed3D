@@ -224,7 +224,8 @@ For every plant:
    question that shape cannot answer — those are always yours to assign.
 2. **Fix the mask boundary** where it is wrong.
 3. **Place the `weed_LEP` point** at the centre of the youngest emerging tissue
-   (the crown / apical meristem).
+   (the crown / apical meristem). *Optional on a first pass — see
+   "LEPs are optional" below.*
 4. **⚠️ GROUP the LEP with its weed mask.** Select both shapes → press **`G`**.
 
 > **Grouping is the single most important step.** The mask↔LEP link is carried
@@ -248,6 +249,31 @@ For every plant:
 
 Use `ignore_region` for areas that should be excluded from training entirely
 (severe blur, glare, the rig in frame).
+
+### LEPs are optional — you can annotate masks first
+
+**Stage A (crop-vs-weed segmentation) does not use LEPs at all.** It trains from
+masks and classes only. Stage B (`LEPRoiNet`) is the only thing that needs them,
+and until it exists the pipeline uses the hand-engineered estimator in
+`perception/lep.py`, which needs no training data whatsoever.
+
+So a mask-only annotation round is a legitimate, complete deliverable.
+`prepare_dataset.py` detects it automatically:
+
+| LEP points in the export | What happens |
+|---|---|
+| **zero**, with weeds present | `dataset_kind: segmentation_only`. The LEP requirement is lifted, no `missing_lep` errors, no `lep_manifest.json`. Stage A trains normally. |
+| **some but not all** | A real contract gap — every weed still missing one is reported in `annotations_needing_correction.json`. Half-labelled is worse than not labelled, because Stage B would learn from a biased subset. |
+| **all of them** | `dataset_kind: multitask`. Both stages train. |
+
+Pass `--no-require-lep` to force segmentation-only even when a few LEPs exist
+(they are kept in the records, just not required).
+
+> **Note on prelabels:** the SAM 3 prelabeler estimates an LEP per weed, but the
+> CVAT import in §4.2 is **COCO**, and COCO has no point annotation type — so
+> those proposals do not reach CVAT and every LEP placed there is placed by hand.
+> That is why deferring them is reasonable: do the masks now, and add LEPs in a
+> later pass on the frames you actually intend to train Stage B on.
 
 ### 4.4 Export
 
@@ -305,7 +331,7 @@ would be trained on twice and could land in two splits.
 | File | Purpose |
 |---|---|
 | `seg_manifest.json` | Stage A training (permissive backend) |
-| `lep_manifest.json` | Stage B training |
+| `lep_manifest.json` | Stage B training — **omitted for a segmentation-only dataset** |
 | `data.yaml` + `labels/` | Stage A training (Ultralytics backend only) |
 | `splits/{train,val,test}_sessions.txt` | which session went where |
 | `splits/splits_summary.json` | per-split session/class counts |
@@ -360,6 +386,11 @@ python -m pip install rfdetr
 ---
 
 ## 7. Train Stage B (LEP)
+
+> **Skip this section if your dataset is `segmentation_only`.** With no LEP
+> annotations there is nothing to fit, and `perception/lep.py` supplies growth
+> points at inference time without any training. Come back here after an
+> annotation round that places LEPs.
 
 ```powershell
 python -m seeweed3d.training.train_lep `
@@ -510,7 +541,7 @@ python -m seeweed3d.deploy.benchmark --checkpoint <run>/best.pt --device cuda
 |---|---|
 | `no Datumaro JSON found` | Exported as COCO instead of Datumaro 1.0, or didn't unzip. |
 | `ungrouped_lep` errors | LEP points not grouped with their masks in CVAT — select both, press **G**. |
-| `missing_lep` errors | A `visible`+`targetable` weed has no LEP. Add one, or set `lep_visibility=not_visible`. |
+| `missing_lep` errors | Some weeds have LEPs and some don't. Finish the pass, or pass `--no-require-lep` to build a segmentation-only dataset. (A dataset with *zero* LEPs never raises this.) |
 | `unknown label 'X'` | CVAT schema drifted from `common/ontology.py`. Run `regen_cvat_labels.py` and re-paste. |
 | `duplicate_frame_across_exports` | The same frame is in two CVAT tasks. Delete one. |
 | `compressed RLE ... needs pycocotools` | `python -m pip install pycocotools`, or re-export with polygons. |
