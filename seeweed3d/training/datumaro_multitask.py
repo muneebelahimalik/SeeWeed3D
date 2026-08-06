@@ -299,13 +299,21 @@ def _session_of(item_id, image_path, session_from):
     return ""
 
 
-def load_datumaro(json_path, contract=None, session_from=None, report=None):
+def load_datumaro(json_path, contract=None, session_from=None, report=None,
+                  only_items=None):
     """Parse one Datumaro 1.0 annotation file into FrameRecords.
 
     Returns (frames, report). The report carries every integrity finding; the
     caller decides whether to proceed. Structural problems (bad file, unknown
     label under a strict contract) raise instead, because they mean the export
-    itself is wrong."""
+    itself is wrong.
+
+    only_items: if given, a set of item ids to parse; every other item is
+    skipped entirely, so it contributes neither frames nor findings. Used to
+    re-read an export after a frame selection, so the report describes the
+    dataset being built rather than the export it came from. Note that label
+    schema validation above still runs over the WHOLE file - an unknown label
+    is a broken export regardless of which frames you selected."""
     contract = contract or AnnotationContract()
     report = report or MultitaskDatasetReport()
     path = Path(json_path)
@@ -329,6 +337,8 @@ def load_datumaro(json_path, contract=None, session_from=None, report=None):
 
     frames = []
     for item in items:
+        if only_items is not None and str(item.get("id", "")) not in only_items:
+            continue
         frames.append(_parse_item(item, names, path, contract, session_from,
                                   report))
     return frames, report
