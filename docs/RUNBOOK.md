@@ -209,6 +209,23 @@ a **second, duplicate label** instead of filling the one already prelabelled —
 and a Datumaro export under that old name fails with `unknown label`. Always
 regenerate rather than reuse a saved copy.
 
+**The same rename can bite an old `instances_default.json` itself**, not just
+the label file — a SAM 3 onion prelabeling run from before the rename wrote
+`"category_id"` entries named `"onion plant"`. That is invisible until CVAT
+silently creates a duplicate label on import. Check it before uploading:
+
+```powershell
+python -m seeweed3d.annotation.fix_coco_categories `
+    --in  auto_labels_onion/<session>/instances_default.json `
+    --out auto_labels_onion/<session>/instances_default.json `
+    --dry-run
+```
+
+Drop `--dry-run` to write the fix. It only ever touches `categories[*].name`;
+every mask, box and image reference is untouched. It refuses to write if any
+category name is neither current nor a known pre-rename alias, rather than
+guessing — extend `KNOWN_RENAMES` in the script if a genuinely new one turns up.
+
 If you change the ontology later, you do **not** need to re-run SAM 3 — the
 same command above refreshes every existing session's label file in seconds
 without touching any mask, preview, or `instances_default.json`.
