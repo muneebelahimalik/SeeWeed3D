@@ -497,3 +497,51 @@ def test_a_genuine_session_split_is_still_preferred(tmp_path, capsys):
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
     assert man["split_strategy"] == "session"
     assert "SESSION-LEVEL SPLIT NOT USED" not in capsys.readouterr().out
+
+
+def test_the_summary_line_reports_frames_not_sessions(tmp_path, capsys):
+    """It read 'val=0' while sixteen val frames existed - session counts are
+    meaningless under the frame_block fallback, where every session is listed
+    under train. That is the wrong thing to tell someone about to train."""
+    roots, imgs = _two_session_export(tmp_path, n_a=10, n_b=10)
+    pd.build(roots, imgs, tmp_path / "ds",
+             include_frames="weed_s:*,onion_s:*",
+             val_fraction=0.2, test_fraction=0.0, strict=False)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.strip().startswith("splits"))
+    assert "val=0 " not in line and not line.rstrip().endswith("val=0")
+    assert "frames" in line
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    n_val = sum(1 for f in man["frames"] if f["split"] == "val")
+    assert f"val={n_val}" in line, "the summary must match the manifest"
+
+
+def test_the_summary_still_shows_sessions_for_a_real_session_split(tmp_path,
+                                                                   capsys):
+    import cv2
+    import numpy as np
+    roots = []
+    for name, sess in (("a", "s_one"), ("b", "s_two"), ("c", "s_three")):
+        items = [{
+            "id": f"{sess}_{i:06d}", "media": {"path": f"{sess}_{i:06d}.png"},
+            "image": {"size": [200, 200]},
+            "annotations": [{"id": i, "type": "polygon", "label_id": 0,
+                             "group": i,
+                             "points": [10, 10, 60, 10, 60, 60, 10, 60],
+                             "attributes": {}}]} for i in range(1, 7)]
+        ann = tmp_path / "exports" / name / "annotations"
+        ann.mkdir(parents=True)
+        (ann / "default.json").write_text(json.dumps(
+            {"info": {}, "categories": {"label": {"labels": [
+                {"name": c} for c in pd.CLASSES]}}, "items": items}))
+        d = tmp_path / "sessions" / sess / "rgb"
+        d.mkdir(parents=True)
+        for i in range(1, 7):
+            cv2.imwrite(str(d / f"{sess}_{i:06d}.png"),
+                        np.zeros((200, 200, 3), np.uint8))
+        roots.append(ann.parent)
+    pd.build(roots, tmp_path / "sessions", tmp_path / "ds",
+             val_fraction=0.34, test_fraction=0.0, strict=False)
+    line = next(l for l in capsys.readouterr().out.splitlines()
+                if l.strip().startswith("splits"))
+    assert "by session" in line
