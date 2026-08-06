@@ -182,13 +182,12 @@ def _log_previews(trk, model, records, images_root, classes, device,
     from training.seg_dataset import polygons_to_mask, resolve_image
     from training.tracking import overlay_masks, side_by_side
 
-    root = Path(images_root)
     was_training = model.training
     model.eval()
     try:
         for k, rec in enumerate(records):
             try:
-                path = resolve_image(rec["image_path"], root,
+                path = resolve_image(rec["image_path"], images_root,
                                      rec.get("session_id"))
             except FileNotFoundError:
                 continue
@@ -225,7 +224,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", required=True, help="prepare_dataset output dir")
-    p.add_argument("--images-root", required=True)
+    p.add_argument("--images-root", required=True, nargs="+",
+                   help="sessions root(s); more than one if the datasets were "
+                        "not captured under a common parent")
     p.add_argument("--out", required=True)
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch", type=int, default=2)

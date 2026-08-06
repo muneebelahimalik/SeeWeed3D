@@ -16,62 +16,84 @@ tm = load_script("training/train_model.py")
 pd = load_script("training/prepare_dataset.py")
 
 
-def _export(tmp_path, n=8):
+def _export(tmp_path, name="export", session="sess_a", n=8, label_id=0,
+           img_dir=None):
+    """A minimal Datumaro export plus the session folder its images live
+    under. `img_dir` lets a second export share (or not share) a sessions
+    root with the first, to exercise the multi-source case.
+
+    Filenames follow the REAL extractor convention `<session>_<index>.png`,
+    flat with no directory component in the CVAT media path (CVAT tasks are
+    flat uploads) - `_session_of` in datumaro_multitask.py derives the session
+    from those trailing digits, not from any path prefix, so a fixture using a
+    directory to distinguish sessions instead would silently collapse every
+    session to the same wrong id."""
     items = []
     for i in range(1, n + 1):
+        fname = f"{session}_{i:06d}.png"
         items.append({
-            "id": f"sess_a/frame_{i:04d}",
-            "media": {"path": f"sess_a/frame_{i:04d}.png"},
+            "id": f"{session}_{i:06d}",
+            "media": {"path": fname},
             "image": {"size": [200, 200]},
             "annotations": [{
-                "id": i, "type": "polygon", "label_id": 0, "group": i,
+                "id": i, "type": "polygon", "label_id": label_id, "group": i,
                 "points": [10, 10, 60, 10, 60, 60, 10, 60], "attributes": {},
             }],
         })
     doc = {"info": {}, "categories": {"label": {"labels": [
         {"name": c} for c in pd.CLASSES]}}, "items": items}
-    ann = tmp_path / "export" / "annotations"
+    ann = tmp_path / name / "annotations"
     ann.mkdir(parents=True)
     (ann / "default.json").write_text(json.dumps(doc))
-    imgs = tmp_path / "sessions" / "sess_a"
-    imgs.mkdir(parents=True)
+
+    imgs_root = img_dir or (tmp_path / f"{name}_sessions")
+    sdir = imgs_root / session / "rgb"
+    sdir.mkdir(parents=True, exist_ok=True)
     import cv2
     for i in range(1, n + 1):
-        cv2.imwrite(str(imgs / f"frame_{i:04d}.png"),
+        cv2.imwrite(str(sdir / f"{session}_{i:06d}.png"),
                     np.zeros((200, 200, 3), np.uint8))
-    return tmp_path / "export", tmp_path / "sessions"
+    return tmp_path / name, imgs_root
 
 
-def _cfg(tmp_path, **over):
-    exp, imgs = _export(tmp_path)
+def _cfg(tmp_path, sources=None, **over):
+    if sources is None:
+        exp, imgs = _export(tmp_path)
+        sources = [{"DATUMARO_ROOT": str(exp), "IMAGES_ROOT": str(imgs)}]
     c = dict(md.CONFIG)
-    c.update({"DATUMARO_ROOT": str(exp), "IMAGES_ROOT": str(imgs),
-              "OUT_DIR": str(tmp_path / "ds"), "LIST_FRAMES": False,
-              "INCLUDE_FRAMES": "", "DROP_CLASSES": [],
+    c.update({"SOURCES": sources, "OUT_DIR": str(tmp_path / "ds"),
+              "LIST_FRAMES": False, "INCLUDE_FRAMES": "", "DROP_CLASSES": [],
               "VAL_FRACTION": 0.0, "TEST_FRACTION": 0.0})
     c.update(over)
     return c
 
 
 # --------------------------------------------------------------------------- #
-# make_dataset guard rails
+# make_dataset guard rails - single source
 # --------------------------------------------------------------------------- #
-def test_empty_config_path_names_the_key(tmp_path):
-    c = _cfg(tmp_path, DATUMARO_ROOT="  ")
-    with pytest.raises(SystemExit, match="DATUMARO_ROOT"):
-        md.main(c)
+def test_empty_sources_is_reported(tmp_path):
+    with pytest.raises(SystemExit, match="SOURCES"):
+        md.main(_cfg(tmp_path, sources=[]))
+
+
+def test_empty_datumaro_root_in_a_source_names_it(tmp_path):
+    with pytest.raises(SystemExit, match=r"SOURCES\[1\]\['DATUMARO_ROOT'\]"):
+        md.main(_cfg(tmp_path, sources=[{"DATUMARO_ROOT": "  ",
+                                         "IMAGES_ROOT": str(tmp_path)}]))
 
 
 def test_missing_datumaro_root_says_what_to_point_at(tmp_path):
-    c = _cfg(tmp_path, DATUMARO_ROOT=str(tmp_path / "nope"))
     with pytest.raises(SystemExit, match="does not exist"):
-        md.main(c)
+        md.main(_cfg(tmp_path, sources=[
+            {"DATUMARO_ROOT": str(tmp_path / "nope"),
+             "IMAGES_ROOT": str(tmp_path)}]))
 
 
 def test_missing_images_root_is_reported_separately(tmp_path):
-    c = _cfg(tmp_path, IMAGES_ROOT=str(tmp_path / "nope"))
-    with pytest.raises(SystemExit, match="IMAGES_ROOT"):
-        md.main(c)
+    exp, _ = _export(tmp_path)
+    with pytest.raises(SystemExit, match=r"SOURCES\[1\]\['IMAGES_ROOT'\]"):
+        md.main(_cfg(tmp_path, sources=[
+            {"DATUMARO_ROOT": str(exp), "IMAGES_ROOT": str(tmp_path / "nope")}]))
 
 
 def test_listing_pass_writes_nothing(tmp_path, capsys):
@@ -80,12 +102,11 @@ def test_listing_pass_writes_nothing(tmp_path, capsys):
     assert not (tmp_path / "ds").exists()
     out = capsys.readouterr().out
     assert "NOTHING WAS WRITTEN" in out
-    assert "frame_0001" in out
+    assert "sess_a_000001" in out
 
 
 def test_build_pass_writes_the_manifest(tmp_path):
-    c = _cfg(tmp_path)
-    md.main(c)
+    md.main(_cfg(tmp_path))
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
     assert len(man["frames"]) == 8
 
@@ -100,6 +121,74 @@ def test_include_frames_is_honoured_through_the_runner(tmp_path):
     md.main(_cfg(tmp_path, INCLUDE_FRAMES="1-5"))
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
     assert len(man["frames"]) == 5
+
+
+# --------------------------------------------------------------------------- #
+# make_dataset: multiple sources, the feature this session added
+# --------------------------------------------------------------------------- #
+def test_two_sources_under_different_parents_both_resolve(tmp_path):
+    """The real case: a weed capture set and a separately-recorded onion set,
+    each with its own sessions folder."""
+    weed_exp, weed_imgs = _export(tmp_path, name="weed", session="vid2_weed",
+                                  n=6, label_id=0)
+    onion_exp, onion_imgs = _export(tmp_path, name="onion",
+                                    session="onion1", n=4, label_id=5)
+    assert weed_imgs != onion_imgs, "the fixture must actually use two roots"
+
+    md.main(_cfg(tmp_path, sources=[
+        {"DATUMARO_ROOT": str(weed_exp), "IMAGES_ROOT": str(weed_imgs)},
+        {"DATUMARO_ROOT": str(onion_exp), "IMAGES_ROOT": str(onion_imgs)},
+    ], INCLUDE_FRAMES="", VAL_FRACTION=0.2, TEST_FRACTION=0.0))
+
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert len(man["frames"]) == 10
+    assert sorted(man["images_root"]) == sorted(
+        [str(weed_imgs), str(onion_imgs)])
+    sessions = {f["session_id"] for f in man["frames"]}
+    assert sessions == {"vid2_weed", "onion1"}
+
+
+def test_two_sources_sharing_one_images_root_are_not_duplicated(tmp_path):
+    shared = tmp_path / "shared_sessions"
+    exp1, _ = _export(tmp_path, name="s1", session="sess_1", n=3,
+                      img_dir=shared)
+    exp2, _ = _export(tmp_path, name="s2", session="sess_2", n=3,
+                      img_dir=shared)
+    md.main(_cfg(tmp_path, sources=[
+        {"DATUMARO_ROOT": str(exp1), "IMAGES_ROOT": str(shared)},
+        {"DATUMARO_ROOT": str(exp2), "IMAGES_ROOT": str(shared)},
+    ], INCLUDE_FRAMES=""))
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert man["images_root"] == [str(shared)], "one root, not repeated"
+    assert len(man["frames"]) == 6
+
+
+def test_include_frames_scoped_per_session_across_two_sources(tmp_path):
+    weed_exp, weed_imgs = _export(tmp_path, name="weed", session="vid2_weed",
+                                  n=6)
+    onion_exp, onion_imgs = _export(tmp_path, name="onion", session="onion1",
+                                    n=4, label_id=5)
+    md.main(_cfg(tmp_path, sources=[
+        {"DATUMARO_ROOT": str(weed_exp), "IMAGES_ROOT": str(weed_imgs)},
+        {"DATUMARO_ROOT": str(onion_exp), "IMAGES_ROOT": str(onion_imgs)},
+    ], INCLUDE_FRAMES="vid2_weed:1-3,onion1:*"))
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    ids = {f["item_id"] for f in man["frames"]}
+    assert ids == ({f"vid2_weed_{i:06d}" for i in (1, 2, 3)}
+                  | {f"onion1_{i:06d}" for i in range(1, 5)})
+
+
+def test_listing_pass_covers_every_source(tmp_path, capsys):
+    weed_exp, weed_imgs = _export(tmp_path, name="weed", session="vid2_weed",
+                                  n=3)
+    onion_exp, onion_imgs = _export(tmp_path, name="onion", session="onion1",
+                                    n=2, label_id=5)
+    md.main(_cfg(tmp_path, sources=[
+        {"DATUMARO_ROOT": str(weed_exp), "IMAGES_ROOT": str(weed_imgs)},
+        {"DATUMARO_ROOT": str(onion_exp), "IMAGES_ROOT": str(onion_imgs)},
+    ], LIST_FRAMES=True))
+    out = capsys.readouterr().out
+    assert "vid2_weed" in out and "onion1" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -167,3 +256,33 @@ def test_training_with_a_missing_images_root_is_caught_before_the_loop(tmp_path)
     c.update({"DATASET_DIR": str(ds), "IMAGES_ROOT": str(tmp_path / "nope")})
     with pytest.raises(SystemExit, match="IMAGES_ROOT"):
         tm.main(c)
+
+
+def test_empty_images_root_falls_back_to_the_manifests_own_value(tmp_path):
+    """The DRY path: make_dataset.py already recorded the roots, so
+    train_model.py should not need them typed out a second time."""
+    real_root = tmp_path / "sessions"
+    real_root.mkdir()
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "seg_manifest.json").write_text(json.dumps(
+        {"frames": [], "images_root": [str(real_root)]}))
+    resolved = tm._resolve_images_root({"IMAGES_ROOT": ""},
+                                       ds / "seg_manifest.json")
+    assert resolved == str(real_root)
+
+
+def test_empty_images_root_with_nothing_recorded_fails_clearly(tmp_path):
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "seg_manifest.json").write_text(json.dumps({"frames": []}))
+    with pytest.raises(SystemExit, match="IMAGES_ROOT"):
+        tm._resolve_images_root({"IMAGES_ROOT": ""}, ds / "seg_manifest.json")
+
+
+def test_images_root_as_a_list_is_validated_per_entry(tmp_path):
+    ok = tmp_path / "ok"; ok.mkdir()
+    with pytest.raises(SystemExit, match="do not exist"):
+        tm._resolve_images_root(
+            {"IMAGES_ROOT": [str(ok), str(tmp_path / "missing")]},
+            tmp_path / "unused.json")

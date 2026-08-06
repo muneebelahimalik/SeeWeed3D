@@ -118,3 +118,76 @@ def test_pointing_at_a_session_instead_of_the_sessions_root_fails_clearly(
     # which is the case the error message exists for.
     with pytest.raises(FileNotFoundError):
         sd.resolve_image("vid9_absent_000001.png", inner)
+
+
+# --------------------------------------------------------------------------- #
+# multiple roots: sessions split across separate parent folders
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def two_roots(tmp_path):
+    """Two independent 'sessions folders' - the weed capture set and a
+    separately-recorded onion set - each holding a DIFFERENT session."""
+    root_a = tmp_path / "weed_sessions"
+    root_b = tmp_path / "onion_sessions"
+    (root_a / "vid2_weed" / "rgb").mkdir(parents=True)
+    (root_b / "onion1" / "rgb").mkdir(parents=True)
+    cv2.imwrite(str(root_a / "vid2_weed" / "rgb" / "vid2_weed_000001.png"),
+                np.full((4, 4, 3), 10, np.uint8))
+    cv2.imwrite(str(root_b / "onion1" / "rgb" / "onion1_000001.png"),
+                np.full((4, 4, 3), 20, np.uint8))
+    sd._INDEX_CACHE.clear()
+    return root_a, root_b
+
+
+def test_a_frame_resolves_under_whichever_root_actually_has_its_session(
+        two_roots):
+    root_a, root_b = two_roots
+    pa = sd.resolve_image("vid2_weed_000001.png", [root_a, root_b])
+    pb = sd.resolve_image("onion1_000001.png", [root_a, root_b])
+    assert pa.parent.parent.name == "vid2_weed"
+    assert pb.parent.parent.name == "onion1"
+
+
+def test_root_order_does_not_matter(two_roots):
+    root_a, root_b = two_roots
+    p1 = sd.resolve_image("onion1_000001.png", [root_a, root_b])
+    p2 = sd.resolve_image("onion1_000001.png", [root_b, root_a])
+    assert p1 == p2
+
+
+def test_a_missing_frame_lists_every_root_tried(two_roots):
+    root_a, root_b = two_roots
+    with pytest.raises(FileNotFoundError) as e:
+        sd.resolve_image("nope_000001.png", [root_a, root_b])
+    assert str(root_a) in str(e.value) and str(root_b) in str(e.value)
+
+
+def test_a_single_path_still_works_unchanged(sessions):
+    """The common case (one dataset) must not have to pass a list."""
+    p = sd.resolve_image("vid2_20260108_122731_000123.png", sessions)
+    assert p.exists()
+
+
+def test_as_roots_normalizes_single_and_multiple():
+    assert sd.as_roots("/a") == [sd.Path("/a")]
+    assert sd.as_roots(["/a", "/b"]) == [sd.Path("/a"), sd.Path("/b")]
+    assert sd.as_roots(("/a", "/b")) == [sd.Path("/a"), sd.Path("/b")]
+
+
+def test_a_second_root_is_not_scanned_when_the_first_answers_cheaply(
+        two_roots, monkeypatch):
+    """The cheap canonical-path check must win before ANY root pays for a
+    full recursive walk - a scan of a huge first root must not block
+    resolving a frame that is trivially found on the second."""
+    root_a, root_b = two_roots
+    calls = []
+    from pathlib import Path as P
+    real = P.rglob
+
+    def counted(self, pat):
+        calls.append(self)
+        return real(self, pat)
+
+    monkeypatch.setattr(P, "rglob", counted)
+    sd.resolve_image("onion1_000001.png", [root_a, root_b])
+    assert calls == [], "the canonical path must resolve without any scan"

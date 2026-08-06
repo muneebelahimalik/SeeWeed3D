@@ -360,6 +360,12 @@ canonical path from the session id embedded in the name
 has the identical filename, so a blind recursive search could return it as a
 training image.
 
+**More than one sessions folder is fine.** `--images-root` (and `IMAGES_ROOT`
+in the config-block form) accepts several paths. A frame is found by trying
+each one in turn, so a session need only exist under ONE of them — the ordinary
+case when a weed capture campaign and a separately-recorded onion-only campaign
+were never stored under a common parent directory.
+
 ### The easy way: edit a config block, no command line
 
 `prepare_dataset.py`'s flags are all available in a config block, the same
@@ -372,14 +378,27 @@ PowerShell and VS Code's Run button — no backticks, no quoting rules.
 
 ```
 1. Open seeweed3d/training/make_dataset.py in VS Code
-2. Set DATUMARO_ROOT, IMAGES_ROOT, OUT_DIR
-3. Leave LIST_FRAMES = True     → python seeweed3d/training/make_dataset.py
-4. Read the table, set INCLUDE_FRAMES
-5. Set LIST_FRAMES = False      → python seeweed3d/training/make_dataset.py
+2. Add one SOURCES entry per CVAT export - each names its OWN DATUMARO_ROOT
+   and IMAGES_ROOT, since they don't have to share a parent folder
+3. Set OUT_DIR
+4. Leave LIST_FRAMES = True     → python seeweed3d/training/make_dataset.py
+5. Read the table (grouped by session across every source), set INCLUDE_FRAMES
+6. Set LIST_FRAMES = False      → python seeweed3d/training/make_dataset.py
+```
+
+```python
+"SOURCES": [
+    {"DATUMARO_ROOT": r"E:\CVAT_exports\vid2_20260108_122731",
+     "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Weeds_3_good\sessions"},
+    {"DATUMARO_ROOT": r"E:\CVAT_exports\onion1_20260115_090000",
+     "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Onion_only\sessions"},   # different parent - fine
+],
 ```
 
 Then `seeweed3d/training/train_model.py` the same way — it trains and evaluates
-in one run.
+in one run. Leave its `IMAGES_ROOT` as `""` to reuse exactly what
+`make_dataset.py` already recorded in `seg_manifest.json`, so the roots are
+typed out once, not kept in sync by hand across two files.
 
 The command-line form below stays supported and takes exactly the same options.
 
@@ -404,6 +423,19 @@ python -m seeweed3d.training.prepare_dataset `
     --datumaro-root  E:/CVAT_exports/vid3_20260108_103135 `
                      E:/CVAT_exports/vid3_20260108_110444 `
     --images-root    E:/Dataset_Vidalia/sessions `
+    --out            E:/Dataset_Vidalia/training/mixed_v1
+```
+
+Both `--datumaro-root` and `--images-root` take one or more paths (`nargs="+"`).
+Pass several `--images-root` values when the sessions being merged are not all
+under one parent:
+
+```powershell
+python -m seeweed3d.training.prepare_dataset `
+    --datumaro-root  E:/CVAT_exports/vid2_20260108_122731 `
+                     E:/CVAT_exports/onion1_20260115_090000 `
+    --images-root    E:/Dataset_Vidalia/Weeds_3_good/sessions `
+                     E:/Dataset_Vidalia/Onion_only/sessions `
     --out            E:/Dataset_Vidalia/training/mixed_v1
 ```
 
