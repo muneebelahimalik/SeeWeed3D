@@ -141,11 +141,16 @@ def test_two_sources_under_different_parents_both_resolve(tmp_path):
     ], INCLUDE_FRAMES="", VAL_FRACTION=0.2, TEST_FRACTION=0.0))
 
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
-    assert len(man["frames"]) == 10
     assert sorted(man["images_root"]) == sorted(
         [str(weed_imgs), str(onion_imgs)])
+    # Both sources' frames resolved and reached the manifest. Not an exact
+    # count: a per-session block split legitimately discards gap-buffer frames
+    # at each boundary, so asserting 10 would be asserting the absence of a
+    # feature.
     sessions = {f["session_id"] for f in man["frames"]}
     assert sessions == {"vid2_weed", "onion1"}
+    assert 0 < len(man["frames"]) <= 10
+    assert any(f["split"] == "val" for f in man["frames"])
 
 
 def test_two_sources_sharing_one_images_root_are_not_duplicated(tmp_path):
