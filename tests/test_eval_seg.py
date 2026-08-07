@@ -470,3 +470,95 @@ def test_the_cli_prints_without_a_hand_built_result(tmp_path, monkeypatch,
     out = capsys.readouterr().out
     assert "CONFIDENCE SWEEP" in out
     assert "conf=" in out
+
+
+# --------------------------------------------------------------------------- #
+# IoU at ZED resolution
+#
+# A naive full-frame AND/OR costs ~4 ms per pair. 300 RF-DETR detections
+# against 20 ground-truth instances, over 10 IoU thresholds and 16 frames, is
+# an HOUR of numpy - evaluation stalled there, not in the model. The matrix
+# below is an optimisation ONLY: every value must equal what mask_iou returns,
+# or the speedup has quietly changed the metric.
+# --------------------------------------------------------------------------- #
+import seeweed3d.evaluation.metrics as _M                     # noqa: E402
+
+
+def _disc(h, w, cy, cx, r):
+    yy, xx = np.mgrid[0:h, 0:w]
+    return ((yy - cy) ** 2 + (xx - cx) ** 2) < r * r
+
+
+def test_the_matrix_matches_mask_iou_exactly():
+    rng = np.random.default_rng(7)
+    preds = [_disc(160, 200, *rng.integers(30, 130, 2), int(rng.integers(5, 40)))
+             for _ in range(12)]
+    gts = [_disc(160, 200, *rng.integers(30, 130, 2), int(rng.integers(5, 40)))
+           for _ in range(7)]
+    m = _M.mask_iou_matrix(preds, gts)
+    for i in range(len(preds)):
+        for j in range(len(gts)):
+            assert m[i, j] == pytest.approx(_M.mask_iou(preds[i], gts[j]),
+                                            abs=1e-12)
+
+
+def test_disjoint_masks_score_zero_without_touching_pixels():
+    """The bbox pre-filter is what makes this tractable; it must not change
+    the answer for the pairs it skips."""
+    a = _disc(100, 100, 20, 20, 8)
+    b = _disc(100, 100, 80, 80, 8)
+    assert _M.mask_iou_matrix([a], [b])[0, 0] == 0.0
+    assert _M.mask_iou(a, b) == 0.0
+
+
+def test_identical_masks_score_one():
+    a = _disc(100, 100, 50, 50, 20)
+    assert _M.mask_iou_matrix([a], [a])[0, 0] == pytest.approx(1.0)
+
+
+def test_an_empty_mask_scores_zero_rather_than_dividing_by_zero():
+    z = np.zeros((60, 60), bool)
+    a = _disc(60, 60, 30, 30, 10)
+    m = _M.mask_iou_matrix([z, a], [z, a])
+    assert m[0, 0] == 0.0 and m[0, 1] == 0.0 and m[1, 0] == 0.0
+    assert m[1, 1] == pytest.approx(1.0)
+
+
+def test_touching_but_not_overlapping_boxes_score_zero():
+    """Bounding boxes can intersect while the masks do not - the pre-filter
+    must not be mistaken for the answer."""
+    a = np.zeros((50, 50), bool); a[10:20, 10:20] = True
+    b = np.zeros((50, 50), bool); b[15:25, 25:35] = True
+    assert _M.mask_iou_matrix([a], [b])[0, 0] == 0.0
+
+
+def test_an_empty_side_gives_an_empty_matrix():
+    a = _disc(40, 40, 20, 20, 5)
+    assert _M.mask_iou_matrix([], [a]).shape == (0, 1)
+    assert _M.mask_iou_matrix([a], []).shape == (1, 0)
+
+
+def test_mask_extent_reports_the_tight_box_and_area():
+    m = np.zeros((50, 60), bool)
+    m[10:20, 5:25] = True
+    y0, y1, x0, x1, area = _M.mask_extent(m)
+    assert (y0, y1, x0, x1) == (10, 19, 5, 24)
+    assert area == 200
+    assert _M.mask_extent(np.zeros((5, 5), bool)) is None
+
+
+def test_a_precomputed_matrix_gives_the_same_matches():
+    """match_for_ap and match_instances must not diverge from their own
+    recompute path - that is the only thing making reuse safe."""
+    preds = [_disc(120, 120, 40, 40, 15), _disc(120, 120, 80, 80, 15)]
+    gts = [_disc(120, 120, 42, 42, 15), _disc(120, 120, 80, 80, 14)]
+    m = _M.mask_iou_matrix(preds, gts)
+    a = ev.match_for_ap(preds, [0.9, 0.8], gts, 0.5)
+    b = ev.match_for_ap(preds, [0.9, 0.8], gts, 0.5, iou=m)
+    assert a.tolist() == b.tolist()
+
+    names = ["grass_weed", "grass_weed"]
+    ma, _, _ = _M.match_instances(preds, names, gts, names, 0.5)
+    mb, _, _ = _M.match_instances(preds, names, gts, names, 0.5, iou=m)
+    assert [(x["pred"], x["gt"]) for x in ma] == \
+        [(x["pred"], x["gt"]) for x in mb]

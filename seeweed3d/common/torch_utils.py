@@ -33,6 +33,16 @@ def require_device(device):
     Called before model construction, dataset loading or tracker start-up, so
     the failure costs seconds rather than the whole setup."""
     dev = str(device or "cpu")
+    # Reject a device string nothing understands BEFORE it reaches a backend.
+    # A truncated paste ('--device c' instead of 'cuda' - a real occurrence)
+    # otherwise surfaces as a pydantic ValidationError from deep inside rfdetr,
+    # minutes later and pointing at a config class rather than the command.
+    head = dev.split(":")[0]
+    if head not in ("cpu", "cuda", "mps", "xpu", "meta"):
+        raise SystemExit(
+            f"ERROR: device={dev!r} is not a device. Expected 'cuda', 'cpu', "
+            f"or an indexed form such as 'cuda:1'.\n"
+            f"    (a truncated '--device cuda' looks exactly like this)")
     if not dev.startswith("cuda"):
         return dev
     try:
