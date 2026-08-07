@@ -35,6 +35,64 @@ def mask_iou(a, b):
     return float((a & b).sum() / union) if union else 0.0
 
 
+def mask_extent(m):
+    """(y0, y1, x0, x1, area) for a mask, or None if it is empty.
+
+    Two full-array reductions and then a sum over the bounding box only, so the
+    cost is linear in the frame rather than in the frame times the number of
+    pairs it will be compared against."""
+    m = np.asarray(m, bool)
+    rows = m.any(1)
+    if not rows.any():
+        return None
+    y = np.flatnonzero(rows)
+    x = np.flatnonzero(m.any(0))
+    y0, y1, x0, x1 = int(y[0]), int(y[-1]), int(x[0]), int(x[-1])
+    return y0, y1, x0, x1, int(m[y0:y1 + 1, x0:x1 + 1].sum())
+
+
+def mask_iou_matrix(pred_masks, gt_masks):
+    """(P, G) IoU matrix. EXACT - the same numbers mask_iou would give.
+
+    The pairwise loop is what makes evaluation tractable at ZED resolution.
+    A naive P x G x 2208 x 1242 boolean AND/OR costs about 4 ms per pair, so
+    300 RF-DETR detections against 20 ground-truth instances across 10 IoU
+    thresholds and 16 frames is an HOUR of pure numpy - which is where this
+    evaluation was actually stalling, not in the model.
+
+    Two exact savings, no approximation:
+      * bounding boxes that do not intersect cannot have overlapping masks, so
+        the pair is skipped without touching a pixel. Most pairs are this.
+      * for the rest, the AND is computed over the intersection BOX rather than
+        the frame - a few hundred pixels instead of 2.7 million.
+    """
+    P, G = len(pred_masks), len(gt_masks)
+    out = np.zeros((P, G), float)
+    if not P or not G:
+        return out
+    pe = [mask_extent(m) for m in pred_masks]
+    ge = [mask_extent(m) for m in gt_masks]
+    for i, pi_ in enumerate(pe):
+        if pi_ is None:
+            continue
+        py0, py1, px0, px1, pa = pi_
+        a = np.asarray(pred_masks[i], bool)
+        for j, gj in enumerate(ge):
+            if gj is None:
+                continue
+            gy0, gy1, gx0, gx1, ga = gj
+            y0, y1 = max(py0, gy0), min(py1, gy1)
+            x0, x1 = max(px0, gx0), min(px1, gx1)
+            if y0 > y1 or x0 > x1:
+                continue                      # boxes disjoint -> IoU 0
+            b = np.asarray(gt_masks[j], bool)
+            inter = int(np.count_nonzero(a[y0:y1 + 1, x0:x1 + 1]
+                                         & b[y0:y1 + 1, x0:x1 + 1]))
+            if inter:
+                out[i, j] = inter / (pa + ga - inter)
+    return out
+
+
 def mask_dice(a, b):
     a, b = a.astype(bool), b.astype(bool)
     denom = int(a.sum() + b.sum())
@@ -66,24 +124,31 @@ def boundary_f_score(pred, gt, tolerance_px=2):
 
 
 def match_instances(pred_masks, pred_classes, gt_masks, gt_classes,
-                    iou_threshold=0.5):
+                    iou_threshold=0.5, iou=None):
     """Greedy, highest-IoU-first, class-aware matching. Returns
-    (matches, unmatched_pred, unmatched_gt)."""
+    (matches, unmatched_pred, unmatched_gt).
+
+    `iou` accepts a precomputed (P, G) matrix from mask_iou_matrix. Callers
+    that match the same masks at several thresholds or confidences should pass
+    one: the matrix is the entire cost, and recomputing it per threshold is the
+    difference between seconds and an hour."""
+    if iou is None:
+        iou = mask_iou_matrix(pred_masks, gt_masks)
     pairs = []
-    for i, pm in enumerate(pred_masks):
-        for j, gm in enumerate(gt_masks):
+    for i in range(len(pred_masks)):
+        for j in range(len(gt_masks)):
             if pred_classes[i] != gt_classes[j]:
                 continue
-            iou = mask_iou(pm, gm)
-            if iou >= iou_threshold:
-                pairs.append((iou, i, j))
+            v = float(iou[i, j])
+            if v >= iou_threshold:
+                pairs.append((v, i, j))
     pairs.sort(reverse=True)
     used_p, used_g, matches = set(), set(), []
-    for iou, i, j in pairs:
+    for v, i, j in pairs:
         if i in used_p or j in used_g:
             continue
         used_p.add(i); used_g.add(j)
-        matches.append({"pred": i, "gt": j, "iou": float(iou)})
+        matches.append({"pred": i, "gt": j, "iou": float(v)})
     return (matches,
             [i for i in range(len(pred_masks)) if i not in used_p],
             [j for j in range(len(gt_masks)) if j not in used_g])

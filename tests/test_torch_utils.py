@@ -105,3 +105,20 @@ def test_missing_torch_is_reported_before_anything_else(monkeypatch):
 def test_describe_interpreter_includes_the_environment_name():
     d = tu.describe_interpreter()
     assert sys.executable in d and "environment:" in d
+
+
+def test_a_truncated_device_string_is_caught_before_a_backend_sees_it():
+    """'--device c' is what a truncated paste of '--device cuda' looks like.
+    Left alone it surfaces as a pydantic ValidationError from inside rfdetr,
+    minutes into a run and naming a config class rather than the command."""
+    import pytest
+    with pytest.raises(SystemExit, match="is not a device"):
+        tu.require_device("c")
+    with pytest.raises(SystemExit, match="cuda"):
+        tu.require_device("gpu")
+
+
+def test_the_ordinary_device_strings_still_pass():
+    assert tu.require_device("cpu") == "cpu"
+    assert tu.require_device(None) == "cpu"
+    assert tu.require_device("mps") == "mps"

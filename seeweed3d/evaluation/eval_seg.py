@@ -36,7 +36,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES, CROP_CLASS  # noqa: E402
-from evaluation.metrics import (mask_iou, boundary_f_score,  # noqa: E402
+from evaluation.metrics import (mask_iou, mask_iou_matrix,  # noqa: E402
+                                boundary_f_score,
                                 match_instances)
 
 #: Confidences reported by a bare --sweep. Spans the range where a small
@@ -73,11 +74,17 @@ def average_precision(scores, is_tp, n_gt):
     return float(sampled.mean())
 
 
-def match_for_ap(pred_masks, pred_scores, gt_masks, iou_threshold):
+def match_for_ap(pred_masks, pred_scores, gt_masks, iou_threshold, iou=None):
     """Score-descending greedy matching within ONE class and ONE frame.
 
     Returns a bool per prediction. Highest-scoring prediction claims the best
-    remaining ground truth, which is the COCO rule."""
+    remaining ground truth, which is the COCO rule.
+
+    `iou` takes a precomputed (P, G) matrix. Pass one: this is called once per
+    IoU THRESHOLD over the same masks, so recomputing it inside would do the
+    identical work ten times."""
+    if iou is None:
+        iou = mask_iou_matrix(pred_masks, gt_masks)
     order = np.argsort(-np.asarray(pred_scores, float))
     taken, is_tp = set(), np.zeros(len(pred_scores), bool)
     for i in order:
@@ -85,7 +92,7 @@ def match_for_ap(pred_masks, pred_scores, gt_masks, iou_threshold):
         for j in range(len(gt_masks)):
             if j in taken:
                 continue
-            v = mask_iou(pred_masks[i], gt_masks[j])
+            v = float(iou[i, j])
             if v >= best_iou:
                 best_j, best_iou = j, v
         if best_j is not None:
@@ -106,12 +113,18 @@ def _new_accumulator(classes):
 
 
 def _accumulate_at_conf(a, conf, det, pred_masks, pred_names, pred_scores,
-                        gt_masks, gt_names, classes, small_area_px, h, w):
+                        gt_masks, gt_names, classes, small_area_px, h, w,
+                        iou_all=None):
     """One frame's contribution to the operating point at `conf`."""
     keep = [i for i in range(len(det)) if pred_scores[i] >= conf]
     op_masks = [pred_masks[i] for i in keep]
     op_names = [pred_names[i] for i in keep]
-    m50, _, _ = match_instances(op_masks, op_names, gt_masks, gt_names, 0.5)
+    # The frame's IoU matrix, sliced to the kept predictions - the sweep calls
+    # this once per confidence over the same masks.
+    sub = (iou_all[keep, :] if iou_all is not None and keep and len(gt_masks)
+           else None)
+    m50, _, _ = match_instances(op_masks, op_names, gt_masks, gt_names, 0.5,
+                                iou=sub)
     matched_gt = {x["gt"] for x in m50}
     for c in classes:
         a["op"][c]["n_gt"] += sum(1 for n in gt_names if n == c)
@@ -303,24 +316,31 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
         pred_scores = [float(det.scores[i]) for i in range(len(det))]
         n_frames += 1
 
+        # ONE IoU matrix per frame, reused by all 10 AP thresholds and every
+        # confidence in the sweep. It is the whole cost of evaluation: at ZED
+        # resolution a naive recompute is ~4 ms per pair, which for 300 DETR
+        # detections is an hour of numpy for a 16-frame split.
+        iou_all = mask_iou_matrix(pred_masks, gt_masks)
+
         for c in classes:
             gi = [k for k, n in enumerate(gt_names) if n == c]
             pi = [k for k, n in enumerate(pred_names) if n == c]
             gm = [gt_masks[k] for k in gi]
             pm = [pred_masks[k] for k in pi]
             ps = [pred_scores[k] for k in pi]
+            sub = iou_all[np.ix_(pi, gi)] if (pi and gi) else None
             for t in IOU_THRESHOLDS:
                 b = per_class_ap[c][t]
                 b["n_gt"] += len(gm)
                 if pm:
-                    tp = match_for_ap(pm, ps, gm, t)
+                    tp = match_for_ap(pm, ps, gm, t, iou=sub)
                     b["scores"].extend(ps)
                     b["is_tp"].extend(tp.tolist())
 
         for t in confs:
             _accumulate_at_conf(acc[t], t, det, pred_masks, pred_names,
                                 pred_scores, gt_masks, gt_names, classes,
-                                small_area_px, h, w)
+                                small_area_px, h, w, iou_all)
 
     detection = {}
     for c in classes:
