@@ -6,6 +6,8 @@ indices into a REDUCED list. Dropping any class below onion_plant made
 onion_safety_mask() return an empty mask and weed_indices() hand every onion to
 the targeting stage.
 """
+import json
+
 import numpy as np
 import pytest
 
@@ -128,3 +130,118 @@ def test_each_prediction_claims_a_different_ground_truth():
     gt = [_blob(20, 20, 0, 5, 0, 5), _blob(20, 20, 10, 15, 10, 15)]
     pred = [_blob(20, 20, 0, 5, 0, 5), _blob(20, 20, 10, 15, 10, 15)]
     assert ev.match_for_ap(pred, [0.9, 0.8], gt, 0.5).tolist() == [True, True]
+
+
+# --------------------------------------------------------------------------- #
+# crop safety: "did not see the onion" vs "aimed at the onion"
+#
+# missed_onion_fraction alone scores a model that ignores onions the same as one
+# that classifies them as weeds. Only the second fires a 60 W laser into the
+# crop, so the two must be reported separately or the metric cannot distinguish
+# latent risk from damage.
+# --------------------------------------------------------------------------- #
+EVAL_CLASSES = ["grass_weed", CROP_CLASS]
+
+
+def _crop_safety_dataset(tmp_path):
+    """One 20x20 frame whose top half (200 px) is ground-truth onion."""
+    import cv2
+    root = tmp_path / "sessions" / "s1" / "rgb"
+    root.mkdir(parents=True)
+    cv2.imwrite(str(root / "f.png"), np.zeros((20, 20, 3), np.uint8))
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "seg_manifest.json").write_text(json.dumps({
+        "images_root": [str(tmp_path / "sessions")],
+        "classes": EVAL_CLASSES,
+        "frames": [{"session_id": "s1", "item_id": "f", "image_path": "f.png",
+                    "width": 20, "height": 20, "split": "val",
+                    "instances": [{"class_name": CROP_CLASS,
+                                   "polygons": [[0, 0, 19, 0, 19, 9, 0, 9]]}]}],
+    }))
+    return ds
+
+
+def _run_with_predictions(tmp_path, monkeypatch, specs):
+    """specs: [(class_name, (y0, y1))] - each becomes a full-width band."""
+    masks, cls = [], []
+    for name, (y0, y1) in specs:
+        m = np.zeros((20, 20), bool)
+        m[y0:y1, :] = True
+        masks.append(m)
+        cls.append(EVAL_CLASSES.index(name))
+    n = len(specs)
+    det = seg.Detections(
+        np.asarray(masks, bool) if n else np.zeros((0, 20, 20), bool),
+        np.zeros((n, 4)), np.asarray(cls, int), np.ones(n), 20, 20,
+        names=list(EVAL_CLASSES))
+
+    class _Fake:
+        classes = list(EVAL_CLASSES)
+        def load(self): return self
+        def __call__(self, _bgr): return det
+
+    # evaluate() imports build_segmenter at call time, so the module has to
+    # exist before it can be patched.
+    import perception.segmenter as _ps
+    monkeypatch.setattr(_ps, "build_segmenter", lambda *a, **k: _Fake())
+    return ev.evaluate("unused.pt", _crop_safety_dataset(tmp_path), None,
+                       split="val", device="cpu")["crop_safety"]
+
+
+def test_onion_the_model_ignores_is_risk_but_not_damage(tmp_path, monkeypatch):
+    """No prediction at all over the onion: every crop pixel is 'missed', but
+    the laser has no target there, so nothing is fired at."""
+    c = _run_with_predictions(tmp_path, monkeypatch, [])
+    assert c["missed_onion_px"] == 200
+    assert c["weed_on_crop_px"] == 0
+    assert c["frames_with_burn"] == 0
+
+
+def test_onion_the_model_calls_weed_is_counted_as_damage(tmp_path, monkeypatch):
+    """A weed mask over half the onion. missed_onion_px is unchanged - it
+    cannot tell these two cases apart, which is exactly why the second number
+    exists."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (0, 5))])
+    assert c["missed_onion_px"] == 200          # identical to the case above
+    assert c["weed_on_crop_px"] == 100          # 5 rows x 20 - and this is not
+    assert c["weed_on_crop_fraction"] == pytest.approx(0.5)
+    assert c["frames_with_burn"] == 1
+
+
+def test_a_weed_overlapping_a_predicted_onion_is_not_a_burn(tmp_path,
+                                                            monkeypatch):
+    """The pipeline's onion-conflict check suppresses a shot whose weed mask
+    overlaps predicted crop, so scoring it as damage would report a burn the
+    robot would never fire."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (0, 5)), (CROP_CLASS, (0, 10))])
+    assert c["weed_on_crop_px"] == 0
+    assert c["missed_onion_px"] == 0
+
+
+def test_the_burn_is_a_subset_of_the_missed_pixels(tmp_path, monkeypatch):
+    """Onion the model both fails to see AND aims at is counted in both, and
+    can never exceed what it failed to see."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (0, 5)), (CROP_CLASS, (5, 10))])
+    assert c["missed_onion_px"] == 100
+    assert c["weed_on_crop_px"] == 100
+    assert c["weed_on_crop_px"] <= c["missed_onion_px"]
+
+
+def test_the_table_names_the_burn_rather_than_burying_it(tmp_path, monkeypatch):
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (0, 5))])
+    txt = ev.format_report({"summary": {"split": "val", "n_frames": 1,
+                                        "classes": [],
+                                        "map50": None, "map50_95": None,
+                                        "classes_without_ground_truth": []},
+                            "detection": {},
+                            "operating_point": {"conf": 0.5,
+                                                "small_weed_recall": None,
+                                                "small_weed_n": 0},
+                            "crop_safety": c})
+    assert "ONION CALLED WEED" in txt
+    assert "100" in txt

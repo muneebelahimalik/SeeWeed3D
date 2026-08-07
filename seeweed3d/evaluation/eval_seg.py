@@ -136,8 +136,9 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
                         for t in IOU_THRESHOLDS} for c in classes}
     op = {c: {"tp": 0, "n_pred": 0, "n_gt": 0, "ious": []} for c in classes}
     small_total = small_hit = 0
-    crop_gt_px = crop_missed_px = 0
+    crop_gt_px = crop_missed_px = crop_weed_px = 0
     crop_boundary_f, crop_frames = [], 0
+    crop_burn_frames = 0
     n_frames = 0
 
     for rec in frames:
@@ -201,17 +202,40 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
         # Crop safety at the operating point, in PIXELS. Instance recall would
         # score a barely-overlapping onion detection as a save; the laser aims
         # at pixels, so pixels are what is counted.
+        #
+        # TWO different failures live here and they are not equally bad:
+        #
+        #   missed_onion_px   crop the model did not label as crop. The laser
+        #                     has no reason to aim there, so most of this is
+        #                     latent risk, not damage.
+        #   weed_on_crop_px   crop the model labelled as WEED. This is the
+        #                     laser firing into the onion. It is the only
+        #                     number on this page that describes damage rather
+        #                     than the possibility of it, and it is a strict
+        #                     subset of missed_onion_px.
+        #
+        # Reporting only the first makes a model that ignores onions look the
+        # same as one that shoots them.
         gt_crop = np.zeros((h, w), bool)
         for j, m in enumerate(gt_masks):
             if gt_names[j] == CROP_CLASS:
                 gt_crop |= m
         if gt_crop.any():
             pred_crop = np.zeros((h, w), bool)
+            pred_weed = np.zeros((h, w), bool)
             for i in keep:
                 if pred_names[i] == CROP_CLASS:
                     pred_crop |= pred_masks[i]
+                else:
+                    pred_weed |= pred_masks[i]
+            # A pixel claimed by BOTH a crop and a weed prediction is not
+            # counted as a burn: the pipeline's onion-conflict check suppresses
+            # that shot. Only crop the model believes is purely weed burns.
+            burn = gt_crop & pred_weed & ~pred_crop
             crop_gt_px += int(gt_crop.sum())
             crop_missed_px += int((gt_crop & ~pred_crop).sum())
+            crop_weed_px += int(burn.sum())
+            crop_burn_frames += int(burn.any())
             crop_boundary_f.append(boundary_f_score(pred_crop, gt_crop))
             crop_frames += 1
 
@@ -260,6 +284,11 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
         "missed_onion_px": crop_missed_px,
         "missed_onion_fraction": (float(crop_missed_px / crop_gt_px)
                                   if crop_gt_px else None),
+        # The burn: onion the model called weed and nothing called crop.
+        "weed_on_crop_px": crop_weed_px,
+        "weed_on_crop_fraction": (float(crop_weed_px / crop_gt_px)
+                                  if crop_gt_px else None),
+        "frames_with_burn": crop_burn_frames,
         "onion_boundary_f": (float(np.mean(crop_boundary_f))
                              if crop_boundary_f else None),
     }
@@ -298,11 +327,16 @@ def format_report(res):
     if "note" in c:
         L.append(f"  {c['note']}")
     else:
-        L.append(f"  missed onion pixels: {c['missed_onion_px']} / "
+        L.append(f"  missed onion pixels:  {c['missed_onion_px']} / "
                  f"{c['onion_gt_px']}  ({f(c['missed_onion_fraction'], 4)})")
-        L.append(f"  onion boundary F:    {f(c['onion_boundary_f'])}")
-        L.append("  Missed onion pixels are pixels the system believes are "
-                 "safe to fire at.")
+        L.append(f"  ONION CALLED WEED:    {c['weed_on_crop_px']} / "
+                 f"{c['onion_gt_px']}  ({f(c['weed_on_crop_fraction'], 4)})"
+                 f"   in {c['frames_with_burn']}/{c['frames_with_onion']} "
+                 f"frames")
+        L.append(f"  onion boundary F:     {f(c['onion_boundary_f'])}")
+        L.append("  Missed onion pixels are onion the system does not know is")
+        L.append("  there. ONION CALLED WEED is onion it would aim at - the")
+        L.append("  subset that is actual crop damage, not latent risk.")
     return "\n".join(L)
 
 

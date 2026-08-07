@@ -412,7 +412,25 @@ def build_html(records, classes, metrics, split, checkpoint, max_frames=24,
         H.append(f'<div class="{box}">Missed onion pixels: '
                  f'<b>{cs["missed_onion_px"]}</b> of {cs["onion_gt_px"]} '
                  f'({"&ndash;" if frac is None else f"{frac:.4f}"}). These are '
-                 f'crop pixels the system believes are safe to fire at.</div>')
+                 f'crop pixels the system does not know are crop.</div>')
+        # The subset that is damage rather than latent risk. Older
+        # metrics_val.json files predate this field; say so rather than
+        # printing a zero that would read as a clean bill of health.
+        if "weed_on_crop_px" in cs:
+            bfrac = cs.get("weed_on_crop_fraction")
+            bbox = "ok" if (bfrac is not None and bfrac < 0.002) else "bad"
+            H.append(f'<div class="{bbox}">Onion the model called <b>weed</b>: '
+                     f'<b>{cs["weed_on_crop_px"]}</b> of {cs["onion_gt_px"]} '
+                     f'({"&ndash;" if bfrac is None else f"{bfrac:.4f}"}), in '
+                     f'{cs.get("frames_with_burn", 0)} of '
+                     f'{cs["frames_with_onion"]} frames. This is the laser '
+                     f'firing into the crop &mdash; the only number here that '
+                     f'is damage rather than the possibility of it.</div>')
+        else:
+            H.append('<div class="warn">This <code>metrics_val.json</code> '
+                     'predates the <code>weed_on_crop_px</code> measurement, so '
+                     'how much onion would actually be fired at is unknown '
+                     'here. Re-run <code>eval_seg</code> to get it.</div>')
 
     # -- missed gallery ----------------------------------------------------
     import cv2
