@@ -381,3 +381,92 @@ def test_weed_recall_pools_classes_rather_than_averaging_them():
     assert pooled > per_class_mean          # the rare class no longer dominates
     # and the crop is excluded from a WEED figure
     assert ev._weed_precision(o, classes) == pytest.approx(90 / 96)
+
+
+# --------------------------------------------------------------------------- #
+# evaluate() -> format_report(), end to end
+#
+# Every format_report test until now fed it a HAND-BUILT dict, so the printer
+# and the thing it prints were never checked against each other. That let
+# _summarise drop the "conf" key and ship: the unit tests passed, and the CLI
+# raised KeyError on the first real run.
+# --------------------------------------------------------------------------- #
+def test_a_real_result_can_be_printed(tmp_path, monkeypatch):
+    res = _run_with_predictions(tmp_path, monkeypatch,
+                                [("grass_weed", (10, 20)),
+                                 (CROP_CLASS, (0, 10))],
+                                full=True, weed_gt=True)
+    txt = ev.format_report(res)              # must not raise
+    assert "CROP SAFETY" in txt
+    assert "conf=" in txt
+
+
+def test_a_real_swept_result_can_be_printed(tmp_path, monkeypatch):
+    res = _run_with_predictions(tmp_path, monkeypatch,
+                                [("grass_weed", (10, 20)),
+                                 (CROP_CLASS, (0, 10))],
+                                full=True, weed_gt=True, sweep=[0.25, 0.5])
+    txt = ev.format_report(res)
+    assert "CONFIDENCE SWEEP" in txt
+
+
+def test_a_result_with_no_crop_ground_truth_can_be_printed(tmp_path,
+                                                           monkeypatch):
+    """The UNMEASURED branch of the printer, on real output rather than a
+    dict written to match it."""
+    import perception.segmenter as _ps
+    import cv2
+    root = tmp_path / "sessions" / "s1" / "rgb"
+    root.mkdir(parents=True)
+    cv2.imwrite(str(root / "f.png"), np.zeros((20, 20, 3), np.uint8))
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "seg_manifest.json").write_text(json.dumps({
+        "images_root": [str(tmp_path / "sessions")], "classes": EVAL_CLASSES,
+        "frames": [{"session_id": "s1", "item_id": "f", "image_path": "f.png",
+                    "width": 20, "height": 20, "split": "val",
+                    "instances": [{"class_name": "grass_weed",
+                                   "polygons": [[0, 0, 19, 0, 19, 9, 0, 9]]}]}],
+    }))
+
+    class _Fake:
+        classes = list(EVAL_CLASSES)
+        def load(self): return self
+        def __call__(self, _bgr):
+            return seg.Detections(np.zeros((0, 20, 20), bool), np.zeros((0, 4)),
+                                  np.zeros(0, int), np.zeros(0), 20, 20,
+                                  names=list(EVAL_CLASSES))
+
+    monkeypatch.setattr(_ps, "build_segmenter", lambda *a, **k: _Fake())
+    res = ev.evaluate("unused.pt", ds, None, split="val", device="cpu")
+    assert "UNMEASURED" in ev.format_report(res)
+
+
+def test_the_reported_conf_is_the_one_that_was_asked_for(tmp_path,
+                                                         monkeypatch):
+    res = _run_with_predictions(tmp_path, monkeypatch,
+                                [("grass_weed", (10, 20))], full=True)
+    assert res["operating_point"]["conf"] == 0.5
+    assert "conf=0.5" in ev.format_report(res)
+
+
+def test_the_cli_prints_without_a_hand_built_result(tmp_path, monkeypatch,
+                                                    capsys):
+    """What the user actually runs: main() -> evaluate() -> format_report()."""
+    import perception.segmenter as _ps
+    det = seg.Detections(np.zeros((0, 20, 20), bool), np.zeros((0, 4)),
+                         np.zeros(0, int), np.zeros(0), 20, 20,
+                         names=list(EVAL_CLASSES))
+
+    class _Fake:
+        classes = list(EVAL_CLASSES)
+        def load(self): return self
+        def __call__(self, _bgr): return det
+
+    monkeypatch.setattr(_ps, "build_segmenter", lambda *a, **k: _Fake())
+    ds = _crop_safety_dataset(tmp_path, with_weed_gt=True)
+    ev.main(["--checkpoint", str(tmp_path / "c.pt"), "--dataset", str(ds),
+             "--out", str(tmp_path / "m.json"), "--sweep"])
+    out = capsys.readouterr().out
+    assert "CONFIDENCE SWEEP" in out
+    assert "conf=" in out

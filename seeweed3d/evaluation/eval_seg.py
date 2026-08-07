@@ -350,6 +350,11 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
 
     operating = _summarise(acc[round(float(conf), 4)], classes)
     crop = operating.pop("_crop")
+    # The threshold every P/R/IoU in this block was measured at. Consumers -
+    # format_report, report.py, anything reading metrics_val.json later - need
+    # it to describe their own numbers, and a table that does not say which
+    # confidence produced it is not interpretable at all.
+    operating["conf"] = float(conf)
     sweep_rows = []
     for t in confs:
         o = _summarise(acc[t], classes)
