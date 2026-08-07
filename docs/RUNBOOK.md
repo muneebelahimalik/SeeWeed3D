@@ -724,12 +724,31 @@ Three tables, deliberately not combined into one score:
 |---|---|
 | **detection** | `mAP@50`, `mAP@50:95` per class — score-ranked, 101-point interpolated, so comparable with published numbers |
 | **operating point** | precision/recall/IoU at the confidence you would actually deploy at. mAP is threshold-free; a robot is not |
-| **crop safety** | **missed onion pixels** — crop pixels the system believes are safe to fire at |
+| **crop safety** | **missed onion pixels** and **onion called weed** — see below |
 
 Crop safety is reported separately on purpose. A model can post excellent mAP and
 still miss the one onion that matters, and averaging that into a headline number
 hides it. A class with no ground truth in the split reports AP as `-` (undefined)
 and is excluded from the mean, rather than counted as zero.
+
+The crop-safety block reports **two different failures, and they are not equally
+bad**:
+
+| Number | Meaning | Consequence |
+|---|---|---|
+| `missed_onion_fraction` | crop the model did not label as crop | the laser has no reason to aim there — mostly **latent risk** |
+| `weed_on_crop_fraction` | crop the model labelled as **weed** | the laser **fires into the onion** — actual **damage** |
+
+`weed_on_crop_px` is a strict subset of `missed_onion_px`. Reporting only the
+first makes a model that *ignores* onions look identical to one that *shoots*
+them. Pixels claimed by both a crop and a weed prediction are **not** counted as
+a burn — the pipeline's onion-conflict check suppresses that shot — so this
+measures what the robot would actually do, not what the raw masks overlap.
+
+Judge a run on `weed_on_crop_fraction` first. A high `missed_onion_fraction` with
+a near-zero burn fraction means the masks are too tight, which is a mask-quality
+problem; a non-zero burn fraction is a crop-loss problem and outranks every other
+metric on the page.
 
 Writes `metrics_<split>.json` next to the checkpoint.
 
