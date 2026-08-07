@@ -23,6 +23,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES  # noqa: E402
 
 
+#: One anchor per FPN level, halved from torchvision's default. The smallest
+#: default anchor is 32px; a cotyledon weed at 250px area is ~16px across and
+#: cannot reach a usable IoU with any of them, so the RPN never proposes it and
+#: no amount of training recovers it. Anchors-per-location is unchanged, so a
+#: checkpoint stays state-dict compatible.
+SMALL_ANCHORS = ((16,), (32,), (64,), (128,), (256,))
+
+
 def _preview_frames(doc, images_root, n=6):
     """A stable sample of val frames for the prediction overlays.
 
@@ -38,7 +46,9 @@ def _preview_frames(doc, images_root, n=6):
 
 def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
           device="cpu", workers=0, seed=1234, pretrained=True, min_area_px=16,
-          track="auto", preview_every=5, eval_every=0, select_by="val_loss"):
+          track="auto", preview_every=5, eval_every=0, select_by="val_loss",
+          aug_preset="standard", min_size=None, max_size=None,
+          anchor_sizes=None, patience=0):
     if select_by not in ("val_loss", "map50", "map50_95"):
         raise SystemExit(f"ERROR: select_by must be one of val_loss, map50, "
                          f"map50_95; got {select_by!r}")
@@ -77,6 +87,7 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
 
     tr = SegManifestDataset(doc, images_root, "train", min_area_px, augment=True,
+                            aug_preset=aug_preset,
                             seed=seed)
     va = SegManifestDataset(doc, images_root, "val", min_area_px, augment=False,
                             seed=seed)
@@ -111,21 +122,29 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
     vdl = (DataLoader(va, batch_size=batch, num_workers=workers,
                       collate_fn=collate) if len(va) else None)
 
-    model = MaskRCNNSegmenter.build(len(classes), pretrained=pretrained).to(device)
+    model = MaskRCNNSegmenter.build(len(classes), pretrained=pretrained,
+                                    min_size=min_size, max_size=max_size,
+                                    anchor_sizes=anchor_sizes).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=5e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
 
     def _save(path):
+        # min_size/max_size/anchor_sizes travel WITH the weights. Nothing in a
+        # state dict records them, so a checkpoint trained at full resolution
+        # and loaded at torchvision's defaults would run the backbone at 0.6x
+        # the scale it learned on - silent, and it looks like the model simply
+        # underperforming its own validation score.
         torch.save({"model": model.state_dict(), "classes": list(classes),
-                    "backend": "maskrcnn"}, path)
+                    "backend": "maskrcnn", "min_size": min_size,
+                    "max_size": max_size, "anchor_sizes": anchor_sizes}, path)
 
     # mAP-based selection has to look at the CURRENT weights, so it needs an
     # eval cadence even if the caller did not ask for one.
     if select_by != "val_loss" and not eval_every:
         eval_every = 1
 
-    best, best_epoch, history = None, None, []
+    best, best_epoch, history, stale = None, None, [], 0
     for ep in range(epochs):
         model.train(); tot = n = 0; t0 = time.perf_counter()
         for imgs, targets in dl:
@@ -190,6 +209,9 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
             if improved:
                 best, best_epoch = score, ep
                 _save(out / "best.pt")
+                stale = 0
+            else:
+                stale += 1
 
         if previews and (last_ep or (ep + 1) % preview_every == 0):
             _log_previews(trk, model, previews, images_root, classes, device,
@@ -199,6 +221,18 @@ def train(dataset_dir, images_root, out_dir, epochs=20, batch=2, lr=5e-3,
         trk.log_metrics(row, step=ep)
         print(f"  epoch {ep:3d} " + " ".join(f"{k}={v}" for k, v in row.items()
                                              if k != "epoch"))
+
+        # Early stopping. On a few dozen frames the peak arrives early and
+        # every later epoch only overfits, so this is time saved rather than
+        # quality traded - best.pt already holds the winning weights. Measured
+        # in EVALUATED epochs, not raw ones: with eval_every=2 a patience of 5
+        # means five scored checks without improvement, not five epochs.
+        if patience and stale >= patience:
+            print(f"\n  [early stop] {stale} evaluated epoch(s) without "
+                  f"improving {select_by}; stopping at epoch {ep} of {epochs}."
+                  f"\n  best.pt is epoch {best_epoch}. Set PATIENCE=0 to "
+                  f"disable.")
+            break
 
     _save(out / "last.pt")
     (out / "_current.pt").unlink(missing_ok=True)
@@ -291,6 +325,21 @@ def main(argv=None):
                    help="local experiment tracking; nothing is uploaded")
     p.add_argument("--preview-every", type=int, default=5,
                    help="log GT-vs-prediction overlays every N epochs (0=off)")
+    p.add_argument("--aug", default="standard",
+                   choices=["none", "flip", "standard", "strong"],
+                   help="augmentation preset; 'strong' when overfitting early")
+    p.add_argument("--min-size", type=int, default=None,
+                   help="shortest side fed to the backbone. torchvision's 800 "
+                        "downscales a 2208x1242 ZED frame to 1333x749, which "
+                        "shrinks a 250px weed to 91px")
+    p.add_argument("--max-size", type=int, default=None,
+                   help="longest side; raise WITH --min-size or it caps the gain")
+    p.add_argument("--small-anchors", action="store_true",
+                   help="RPN anchors (16,32,64,128,256) instead of "
+                        "(32,...,512); the default cannot match a 10-20px plant")
+    p.add_argument("--patience", type=int, default=0,
+                   help="stop after N evaluated epochs without improving "
+                        "--select-by (0 = never)")
     p.add_argument("--select-by", default="val_loss",
                    choices=["val_loss", "map50", "map50_95"],
                    help="what best.pt is chosen on. val_loss is free but a "
@@ -302,7 +351,9 @@ def main(argv=None):
     train(a.dataset, a.images_root, a.out, a.epochs, a.batch, a.lr, a.device,
           a.workers, a.seed, pretrained=not a.no_pretrained, track=a.track,
           preview_every=a.preview_every, eval_every=a.eval_every,
-          select_by=a.select_by)
+          select_by=a.select_by, aug_preset=a.aug, min_size=a.min_size,
+          max_size=a.max_size, patience=a.patience,
+          anchor_sizes=(SMALL_ANCHORS if a.small_anchors else None))
 
 
 if __name__ == "__main__":
