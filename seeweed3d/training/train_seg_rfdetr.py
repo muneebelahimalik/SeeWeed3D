@@ -200,6 +200,12 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
             cfg[key] = val
     cfg.update(extra or {})
 
+    if workers and sys.platform == "win32":
+        print(f"\n  [!] workers={workers} on Windows. If training stops right "
+              f"after the\n      model-summary table with no traceback, that "
+              f"is a lightning\n      dataloader worker failing to start - "
+              f"set WORKERS to 0 and retry.\n")
+
     print(f"\n  RF-DETR-Seg-{variant} | {n_classes} classes | "
           f"resolution {resolution} (default {dflt}) | "
           f"effective batch {batch * grad_accum}")

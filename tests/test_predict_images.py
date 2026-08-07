@@ -139,20 +139,85 @@ def test_the_crop_itself_is_never_flagged_as_a_conflict():
 # --------------------------------------------------------------------------- #
 # drawing
 # --------------------------------------------------------------------------- #
-def test_the_overlay_colours_crop_weed_and_conflict_differently():
+def test_every_class_gets_its_own_colour():
+    """Reading an overlay means telling a cutleaf from a grass weed at a
+    glance; one colour for 'weed' cannot do that."""
+    seen = [pi.class_colour(n) for n in pi.CLASS_COLOURS]
+    assert len(set(seen)) == len(seen), "two classes share a colour"
+
+
+def test_the_crop_is_the_odd_one_out():
+    from seeweed3d.common.ontology import CLASSES
+    weeds = {pi.class_colour(n) for n in CLASSES if n != CROP_CLASS}
+    assert pi.class_colour(CROP_CLASS) not in weeds
+
+
+def test_an_unknown_class_is_grey_rather_than_reusing_a_colour():
+    """A label that is not in the ontology should look wrong, not look like
+    some other plant."""
+    c = pi.class_colour("bindweed")
+    assert c == pi.C_UNKNOWN
+    assert c not in set(pi.CLASS_COLOURS.values())
+
+
+def test_two_classes_are_drawn_in_different_colours():
     bgr = np.zeros((60, 80, 3), np.uint8)
-    d = _det([("grass_weed", (0, 10, 0, 20)), (CROP_CLASS, (40, 50, 60, 79))])
-    out = pi.draw(bgr, d, conflict_idx=set(), scale=1.0)
-    assert out.shape == bgr.shape
-    assert out.any(), "nothing was drawn"
-    flagged = pi.draw(bgr, d, conflict_idx={0}, scale=1.0)
-    assert not np.array_equal(out, flagged)
+    a = pi.draw(bgr, _det([("grass_weed", (0, 20, 0, 30))]), set(), scale=1.0,
+                show_legend=False)
+    b = pi.draw(bgr, _det([(CROP_CLASS, (0, 20, 0, 30))]), set(), scale=1.0,
+                show_legend=False)
+    assert not np.array_equal(a, b)
+
+
+def test_a_crop_conflict_adds_an_outline_without_recolouring_the_weed():
+    """The class and the hazard are separate facts. Recolouring would tell you
+    a weed is on the onion while hiding WHICH weed it is."""
+    bgr = np.zeros((60, 80, 3), np.uint8)
+    d = _det([("grass_weed", (10, 30, 10, 40)), (CROP_CLASS, (40, 50, 60, 79))])
+    plain = pi.draw(bgr, d, conflict_idx=set(), scale=1.0, show_legend=False)
+    flagged = pi.draw(bgr, d, conflict_idx={0}, scale=1.0, show_legend=False)
+    assert not np.array_equal(plain, flagged)
+    # the weed interior keeps its class colour in both
+    assert tuple(plain[20, 25]) == tuple(flagged[20, 25])
+
+
+def test_the_legend_never_covers_the_frame():
+    """A key painted into a corner hides whatever was under it, and in these
+    scenes the corners hold plants."""
+    bgr = np.zeros((60, 80, 3), np.uint8)
+    d = _det([("grass_weed", (0, 10, 0, 20))])
+    bare = pi.draw(bgr, d, set(), scale=1.0, show_legend=False)
+    keyed = pi.draw(bgr, d, set(), scale=1.0, show_legend=True)
+    assert keyed.shape[0] > bare.shape[0], "legend must add canvas, not cover"
+    assert keyed.shape[1] == bare.shape[1]
+    assert np.array_equal(keyed[:bare.shape[0]], bare)
+
+
+def test_labels_can_be_turned_off_for_a_dense_frame():
+    bgr = np.zeros((200, 300, 3), np.uint8)
+    d = _det([("grass_weed", (20, 60, 20, 80))], hw=(200, 300))
+    with_text = pi.draw(bgr, d, set(), scale=1.0, labels="class_score",
+                        show_legend=False)
+    without = pi.draw(bgr, d, set(), scale=1.0, labels="none",
+                      show_legend=False)
+    assert not np.array_equal(with_text, without)
 
 
 def test_the_overlay_can_be_scaled_down():
     d = _det([("grass_weed", (0, 10, 0, 20))])
-    out = pi.draw(np.zeros((60, 80, 3), np.uint8), d, set(), scale=0.5)
+    out = pi.draw(np.zeros((60, 80, 3), np.uint8), d, set(), scale=0.5,
+                  show_legend=False)
     assert out.shape[:2] == (30, 40)
+
+
+def test_the_legend_is_drawn_after_the_downscale():
+    """Drawn before a 0.5 resize the key comes out at half the font size, which
+    is the one part of the picture you cannot zoom into."""
+    d = _det([("grass_weed", (0, 10, 0, 20))])
+    half = pi.draw(np.zeros((60, 80, 3), np.uint8), d, set(), scale=0.5)
+    full = pi.draw(np.zeros((60, 80, 3), np.uint8), d, set(), scale=1.0)
+    assert half.shape[0] - 30 == full.shape[0] - 60, \
+        "the strip should be the same height at either scale"
 
 
 # --------------------------------------------------------------------------- #

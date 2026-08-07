@@ -39,6 +39,11 @@ from common.ontology import CLASSES, CROP_CLASS  # noqa: E402
 from evaluation.metrics import (mask_iou, boundary_f_score,  # noqa: E402
                                 match_instances)
 
+#: Confidences reported by a bare --sweep. Spans the range where a small
+#: weed goes from invisible to found: run4 moved small-weed recall from
+#: 0.28 to 0.73 between 0.5 and 0.25 on unchanged weights.
+DEFAULT_SWEEP = (0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7)
+
 IOU_THRESHOLDS = [round(0.5 + 0.05 * i, 2) for i in range(10)]
 
 
@@ -89,9 +94,139 @@ def match_for_ap(pred_masks, pred_scores, gt_masks, iou_threshold):
     return is_tp
 
 
+# --------------------------------------------------------------------------- #
+# Operating point, accumulated at one or more confidence thresholds
+# --------------------------------------------------------------------------- #
+def _new_accumulator(classes):
+    return {"op": {c: {"tp": 0, "n_pred": 0, "n_gt": 0, "ious": []}
+                   for c in classes},
+            "small_total": 0, "small_hit": 0,
+            "crop_gt_px": 0, "crop_missed_px": 0, "crop_weed_px": 0,
+            "crop_frames": 0, "crop_burn_frames": 0, "crop_boundary_f": []}
+
+
+def _accumulate_at_conf(a, conf, det, pred_masks, pred_names, pred_scores,
+                        gt_masks, gt_names, classes, small_area_px, h, w):
+    """One frame's contribution to the operating point at `conf`."""
+    keep = [i for i in range(len(det)) if pred_scores[i] >= conf]
+    op_masks = [pred_masks[i] for i in keep]
+    op_names = [pred_names[i] for i in keep]
+    m50, _, _ = match_instances(op_masks, op_names, gt_masks, gt_names, 0.5)
+    matched_gt = {x["gt"] for x in m50}
+    for c in classes:
+        a["op"][c]["n_gt"] += sum(1 for n in gt_names if n == c)
+        a["op"][c]["n_pred"] += sum(1 for n in op_names if n == c)
+    for x in m50:
+        c = gt_names[x["gt"]]
+        a["op"][c]["tp"] += 1
+        a["op"][c]["ious"].append(x["iou"])
+
+    for j, m in enumerate(gt_masks):
+        if gt_names[j] != CROP_CLASS and int(m.sum()) <= small_area_px:
+            a["small_total"] += 1
+            a["small_hit"] += int(j in matched_gt)
+
+    # Crop safety at the operating point, in PIXELS. Instance recall would
+    # score a barely-overlapping onion detection as a save; the laser aims at
+    # pixels, so pixels are what is counted.
+    #
+    # TWO different failures live here and they are not equally bad:
+    #
+    #   missed_onion_px   crop the model did not label as crop. The laser has
+    #                     no reason to aim there, so most of this is latent
+    #                     risk, not damage.
+    #   weed_on_crop_px   crop the model labelled as WEED. This is the laser
+    #                     firing into the onion - the only number here that
+    #                     describes damage rather than the possibility of it,
+    #                     and a strict subset of missed_onion_px.
+    #
+    # Reporting only the first makes a model that ignores onions look the same
+    # as one that shoots them.
+    gt_crop = np.zeros((h, w), bool)
+    for j, m in enumerate(gt_masks):
+        if gt_names[j] == CROP_CLASS:
+            gt_crop |= m
+    if not gt_crop.any():
+        return
+    pred_crop = np.zeros((h, w), bool)
+    pred_weed = np.zeros((h, w), bool)
+    for i in keep:
+        if pred_names[i] == CROP_CLASS:
+            pred_crop |= pred_masks[i]
+        else:
+            pred_weed |= pred_masks[i]
+    # A pixel claimed by BOTH a crop and a weed prediction is not counted as a
+    # burn: the pipeline's onion-conflict check suppresses that shot. Only crop
+    # the model believes is purely weed burns.
+    burn = gt_crop & pred_weed & ~pred_crop
+    a["crop_gt_px"] += int(gt_crop.sum())
+    a["crop_missed_px"] += int((gt_crop & ~pred_crop).sum())
+    a["crop_weed_px"] += int(burn.sum())
+    a["crop_burn_frames"] += int(burn.any())
+    a["crop_boundary_f"].append(boundary_f_score(pred_crop, gt_crop))
+    a["crop_frames"] += 1
+
+
+def _summarise(a, classes):
+    """Accumulator -> the operating_point block, with crop safety under
+    '_crop' for the caller to lift out."""
+    out = {}
+    for c in classes:
+        d = a["op"][c]
+        out[c] = {
+            "n_gt": d["n_gt"], "n_pred": d["n_pred"], "tp": d["tp"],
+            "precision": float(d["tp"] / d["n_pred"]) if d["n_pred"] else None,
+            "recall": float(d["tp"] / d["n_gt"]) if d["n_gt"] else None,
+            "mean_iou": float(np.mean(d["ious"])) if d["ious"] else None,
+        }
+    out["small_weed_recall"] = (float(a["small_hit"] / a["small_total"])
+                                if a["small_total"] else None)
+    out["small_weed_n"] = a["small_total"]
+    g = a["crop_gt_px"]
+    out["_crop"] = {
+        "frames_with_onion": a["crop_frames"],
+        "onion_gt_px": g,
+        "missed_onion_px": a["crop_missed_px"],
+        "missed_onion_fraction": float(a["crop_missed_px"] / g) if g else None,
+        "weed_on_crop_px": a["crop_weed_px"],
+        "weed_on_crop_fraction": float(a["crop_weed_px"] / g) if g else None,
+        "frames_with_burn": a["crop_burn_frames"],
+        "onion_boundary_f": (float(np.mean(a["crop_boundary_f"]))
+                             if a["crop_boundary_f"] else None),
+    }
+    if not a["crop_frames"]:
+        out["_crop"]["note"] = ("no onion_plant ground truth in this split - "
+                                "crop safety is UNMEASURED, not passing")
+    return out
+
+
+def _weed_totals(o, classes):
+    tp = sum(o[c]["tp"] for c in classes if c != CROP_CLASS)
+    gt = sum(o[c]["n_gt"] for c in classes if c != CROP_CLASS)
+    pred = sum(o[c]["n_pred"] for c in classes if c != CROP_CLASS)
+    return tp, gt, pred
+
+
+def _weed_recall(o, classes):
+    """Recall over ALL weed classes pooled.
+
+    Pooled, not averaged per class: a rare class with three instances would
+    otherwise swing the number that decides the deployment threshold. Note
+    this still counts a weed called by the WRONG weed class as a miss, which
+    is strict - for a laser that treats every weed alike, the true figure is
+    a little better than this."""
+    tp, gt, _ = _weed_totals(o, classes)
+    return float(tp / gt) if gt else None
+
+
+def _weed_precision(o, classes):
+    tp, _, pred = _weed_totals(o, classes)
+    return float(tp / pred) if pred else None
+
+
 def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
              conf=0.5, ap_conf=0.05, small_area_px=1500, min_area_px=16,
-             mask_threshold=0.5, backend="maskrcnn"):
+             mask_threshold=0.5, backend="maskrcnn", sweep=()):
     import cv2
     from common.torch_utils import require_device
     from perception.segmenter import build_segmenter
@@ -134,11 +269,14 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
     root = images_root or doc.get("images_root") or "."
     per_class_ap = {c: {t: {"scores": [], "is_tp": [], "n_gt": 0}
                         for t in IOU_THRESHOLDS} for c in classes}
-    op = {c: {"tp": 0, "n_pred": 0, "n_gt": 0, "ious": []} for c in classes}
-    small_total = small_hit = 0
-    crop_gt_px = crop_missed_px = crop_weed_px = 0
-    crop_boundary_f, crop_frames = [], 0
-    crop_burn_frames = 0
+    # One accumulator per confidence. The model runs ONCE per frame regardless
+    # - only the thresholding and matching repeat - so a sweep costs almost
+    # nothing next to the forward pass, and it is the only way to choose an
+    # operating point from evidence instead of from habit. Recall at 0.5 and at
+    # 0.25 can differ by a factor of three on the same weights.
+    confs = sorted({round(float(conf), 4)} | {round(float(x), 4)
+                                              for x in (sweep or [])})
+    acc = {t: _new_accumulator(classes) for t in confs}
     n_frames = 0
 
     for rec in frames:
@@ -179,65 +317,10 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
                     b["scores"].extend(ps)
                     b["is_tp"].extend(tp.tolist())
 
-        # Operating point: the same greedy IoU matching used elsewhere in the
-        # codebase, applied to detections above the DEPLOYED confidence.
-        keep = [i for i in range(len(det)) if pred_scores[i] >= conf]
-        op_masks = [pred_masks[i] for i in keep]
-        op_names = [pred_names[i] for i in keep]
-        m50, _, _ = match_instances(op_masks, op_names, gt_masks, gt_names, 0.5)
-        matched_gt = {x["gt"] for x in m50}
-        for c in classes:
-            op[c]["n_gt"] += sum(1 for n in gt_names if n == c)
-            op[c]["n_pred"] += sum(1 for n in op_names if n == c)
-        for x in m50:
-            c = gt_names[x["gt"]]
-            op[c]["tp"] += 1
-            op[c]["ious"].append(x["iou"])
-
-        for j, m in enumerate(gt_masks):
-            if gt_names[j] != CROP_CLASS and int(m.sum()) <= small_area_px:
-                small_total += 1
-                small_hit += int(j in matched_gt)
-
-        # Crop safety at the operating point, in PIXELS. Instance recall would
-        # score a barely-overlapping onion detection as a save; the laser aims
-        # at pixels, so pixels are what is counted.
-        #
-        # TWO different failures live here and they are not equally bad:
-        #
-        #   missed_onion_px   crop the model did not label as crop. The laser
-        #                     has no reason to aim there, so most of this is
-        #                     latent risk, not damage.
-        #   weed_on_crop_px   crop the model labelled as WEED. This is the
-        #                     laser firing into the onion. It is the only
-        #                     number on this page that describes damage rather
-        #                     than the possibility of it, and it is a strict
-        #                     subset of missed_onion_px.
-        #
-        # Reporting only the first makes a model that ignores onions look the
-        # same as one that shoots them.
-        gt_crop = np.zeros((h, w), bool)
-        for j, m in enumerate(gt_masks):
-            if gt_names[j] == CROP_CLASS:
-                gt_crop |= m
-        if gt_crop.any():
-            pred_crop = np.zeros((h, w), bool)
-            pred_weed = np.zeros((h, w), bool)
-            for i in keep:
-                if pred_names[i] == CROP_CLASS:
-                    pred_crop |= pred_masks[i]
-                else:
-                    pred_weed |= pred_masks[i]
-            # A pixel claimed by BOTH a crop and a weed prediction is not
-            # counted as a burn: the pipeline's onion-conflict check suppresses
-            # that shot. Only crop the model believes is purely weed burns.
-            burn = gt_crop & pred_weed & ~pred_crop
-            crop_gt_px += int(gt_crop.sum())
-            crop_missed_px += int((gt_crop & ~pred_crop).sum())
-            crop_weed_px += int(burn.sum())
-            crop_burn_frames += int(burn.any())
-            crop_boundary_f.append(boundary_f_score(pred_crop, gt_crop))
-            crop_frames += 1
+        for t in confs:
+            _accumulate_at_conf(acc[t], t, det, pred_masks, pred_names,
+                                pred_scores, gt_masks, gt_names, classes,
+                                small_area_px, h, w)
 
     detection = {}
     for c in classes:
@@ -265,39 +348,26 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
         "classes_without_ground_truth": [c for c in classes if c not in present],
     }
 
-    operating = {"conf": conf}
-    for c in classes:
-        d = op[c]
-        operating[c] = {
-            "n_gt": d["n_gt"], "n_pred": d["n_pred"], "tp": d["tp"],
-            "precision": float(d["tp"] / d["n_pred"]) if d["n_pred"] else None,
-            "recall": float(d["tp"] / d["n_gt"]) if d["n_gt"] else None,
-            "mean_iou": float(np.mean(d["ious"])) if d["ious"] else None,
-        }
-    operating["small_weed_recall"] = (float(small_hit / small_total)
-                                      if small_total else None)
-    operating["small_weed_n"] = small_total
-
-    crop = {
-        "frames_with_onion": crop_frames,
-        "onion_gt_px": crop_gt_px,
-        "missed_onion_px": crop_missed_px,
-        "missed_onion_fraction": (float(crop_missed_px / crop_gt_px)
-                                  if crop_gt_px else None),
-        # The burn: onion the model called weed and nothing called crop.
-        "weed_on_crop_px": crop_weed_px,
-        "weed_on_crop_fraction": (float(crop_weed_px / crop_gt_px)
-                                  if crop_gt_px else None),
-        "frames_with_burn": crop_burn_frames,
-        "onion_boundary_f": (float(np.mean(crop_boundary_f))
-                             if crop_boundary_f else None),
-    }
-    if not crop_frames:
-        crop["note"] = ("no onion_plant ground truth in this split - crop "
-                        "safety is UNMEASURED, not passing")
+    operating = _summarise(acc[round(float(conf), 4)], classes)
+    crop = operating.pop("_crop")
+    sweep_rows = []
+    for t in confs:
+        o = _summarise(acc[t], classes)
+        cs = o.pop("_crop")
+        sweep_rows.append({
+            "conf": t,
+            "small_weed_recall": o["small_weed_recall"],
+            "weed_recall": _weed_recall(o, classes),
+            "weed_precision": _weed_precision(o, classes),
+            "crop_recall": (o[CROP_CLASS]["recall"]
+                            if CROP_CLASS in classes else None),
+            "missed_onion_fraction": cs["missed_onion_fraction"],
+            "weed_on_crop_fraction": cs["weed_on_crop_fraction"],
+        })
 
     return {"summary": summary, "detection": detection,
-            "operating_point": operating, "crop_safety": crop}
+            "operating_point": operating, "crop_safety": crop,
+            "conf_sweep": sweep_rows}
 
 
 def format_report(res):
@@ -337,6 +407,23 @@ def format_report(res):
         L.append("  Missed onion pixels are onion the system does not know is")
         L.append("  there. ONION CALLED WEED is onion it would aim at - the")
         L.append("  subset that is actual crop damage, not latent risk.")
+
+    sweep = res.get("conf_sweep") or []
+    if len(sweep) > 1:
+        L.append("")
+        L.append("CONFIDENCE SWEEP  (choose the deployment threshold here)")
+        L.append(f"  {'conf':>6}{'small-weed R':>14}{'weed R':>9}"
+                 f"{'weed P':>9}{'onion R':>9}{'missed onion':>14}"
+                 f"{'ONION BURNED':>14}")
+        for r in sweep:
+            L.append(f"  {r['conf']:>6.2f}{f(r['small_weed_recall']):>14}"
+                     f"{f(r['weed_recall']):>9}{f(r['weed_precision']):>9}"
+                     f"{f(r['crop_recall']):>9}"
+                     f"{f(r['missed_onion_fraction'], 4):>14}"
+                     f"{f(r['weed_on_crop_fraction'], 5):>14}")
+        L.append("  A missed weed survives; a false weed costs one laser pulse.")
+        L.append("  That asymmetry favours recall - as far as ONION BURNED")
+        L.append("  lets you go, and no further.")
     return "\n".join(L)
 
 
@@ -359,15 +446,23 @@ def main(argv=None):
     p.add_argument("--conf", type=float, default=0.5,
                    help="deployment confidence, for the P/R table")
     p.add_argument("--mask-threshold", type=float, default=0.5)
+    p.add_argument("--sweep", nargs="*", type=float,
+                   default=None, metavar="CONF",
+                   help="also report the operating point at these confidences "
+                        "(bare --sweep uses a default ladder). The model runs "
+                        "once either way, so this is nearly free.")
     p.add_argument("--out", default=None, help="write metrics JSON here")
     a = p.parse_args(argv)
 
     # backend must reach evaluate(): without it --backend rfdetr silently
     # loaded an RF-DETR checkpoint through the Mask R-CNN builder, which is
     # the one thing that makes the two backends incomparable.
+    sweep = a.sweep
+    if sweep is not None and not sweep:
+        sweep = DEFAULT_SWEEP
     res = evaluate(a.checkpoint, a.dataset, a.images_root or None, a.split,
                    a.device, conf=a.conf, mask_threshold=a.mask_threshold,
-                   backend=a.backend)
+                   backend=a.backend, sweep=sweep or ())
     print(format_report(res))
     out = Path(a.out) if a.out else Path(a.checkpoint).parent / \
         f"metrics_{a.split}.json"
