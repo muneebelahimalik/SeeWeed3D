@@ -58,7 +58,7 @@ CONFIG = {
     # single image file. A folder is searched recursively; a depth/ subfolder
     # is skipped, because depth PNGs share their RGB frame's filename and would
     # otherwise be fed to the model as pictures.
-    "IMAGES": r"E:\Dataset_Vidalia\sessions\vid3_20260108_103135",
+    "IMAGES": r"E:\Dataset_Vidalia\Weeds_1\auto_labels_weeds_6\vid3_20260108_110444\cvat_ready",
 
     # 0 = every frame found. Otherwise the first N, which is usually what you
     # want the first time you point this at 4000 frames.

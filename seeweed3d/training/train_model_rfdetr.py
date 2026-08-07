@@ -58,7 +58,7 @@ CONFIG = {
     "IMAGES_ROOT": "",
 
     # One folder per run - do not reuse, or you lose the comparison.
-    "RUN_DIR": r"E:\Dataset_Vidalia\training1\rfdetr_v1",
+    "RUN_DIR": r"E:\Dataset_Vidalia\training1\rfdetr_v3",
 
     # RF-DETR trains from a Roboflow-style COCO tree, which this builds from
     # seg_manifest.json. "" puts it inside RUN_DIR. Point several runs at ONE
