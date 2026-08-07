@@ -346,9 +346,11 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--dataset", required=True, help="prepare_dataset output dir")
-    p.add_argument("--images-root", required=True, nargs="+",
+    p.add_argument("--images-root", nargs="*", default=None,
                    help="sessions root(s); more than one if the datasets were "
-                        "not captured under a common parent")
+                        "not captured under a common parent. Omit to use what "
+                        "make_dataset.py recorded in seg_manifest.json, which "
+                        "is normally right and is what report.py does.")
     p.add_argument("--split", default="val", choices=["train", "val", "test"])
     p.add_argument("--device", default="cpu")
     p.add_argument("--backend", default="maskrcnn",
@@ -360,8 +362,12 @@ def main(argv=None):
     p.add_argument("--out", default=None, help="write metrics JSON here")
     a = p.parse_args(argv)
 
-    res = evaluate(a.checkpoint, a.dataset, a.images_root, a.split, a.device,
-                   conf=a.conf, mask_threshold=a.mask_threshold)
+    # backend must reach evaluate(): without it --backend rfdetr silently
+    # loaded an RF-DETR checkpoint through the Mask R-CNN builder, which is
+    # the one thing that makes the two backends incomparable.
+    res = evaluate(a.checkpoint, a.dataset, a.images_root or None, a.split,
+                   a.device, conf=a.conf, mask_threshold=a.mask_threshold,
+                   backend=a.backend)
     print(format_report(res))
     out = Path(a.out) if a.out else Path(a.checkpoint).parent / \
         f"metrics_{a.split}.json"
