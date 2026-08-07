@@ -46,14 +46,14 @@ CONFIG = {
 
     # Where checkpoints, curves and metrics go. One folder per run - do not
     # reuse it, or you lose the comparison.
-    "RUN_DIR": r"E:\Dataset_Vidalia\training1\run2",
+    "RUN_DIR": r"E:\Dataset_Vidalia\training1\run3",
 
     # -- Training --------------------------------------------------------------
     "DEVICE": "cuda",          # "cuda", or "cpu" if you have no GPU (very slow)
 
     # ~34 training frames is ~17 steps per epoch at BATCH 2. The default of 20
     # epochs is only ~340 steps, nowhere near enough to fit a fresh head.
-    "EPOCHS": 60,
+    "EPOCHS": 30,
 
     # Drop to 1 on CUDA out-of-memory - ZED frames are large and Mask R-CNN v2
     # at full resolution is heavy. If you do, halve LR too.
@@ -80,7 +80,7 @@ CONFIG = {
     # "all" requires both and errors if either is missing. "none" disables it.
     # Everything is written locally; nothing is uploaded anywhere.
     #     python -m pip install tensorboard mlflow
-    "TRACK": "auto",
+    "TRACK": "all",
 
     # GT-vs-prediction overlay panels every N epochs. 0 disables.
     "PREVIEW_EVERY": 5,
@@ -88,7 +88,7 @@ CONFIG = {
     # Val mAP every N epochs. 0 disables. A full pass over val, so it costs
     # real time on a large val split; the final evaluation below runs
     # regardless. Forced to 1 if SELECT_BY needs mAP and this is 0.
-    "EVAL_EVERY": 0,
+    "EVAL_EVERY": 2,
 
     # What best.pt is chosen on: "val_loss" | "map50" | "map50_95".
     #
@@ -98,7 +98,7 @@ CONFIG = {
     # often bottoms out long before detection quality peaks. If your run
     # reports a best epoch early in the schedule, switch to "map50_95" and
     # compare: it selects on the number you actually report.
-    "SELECT_BY": "val_loss",
+    "SELECT_BY": "map50_95",
 
     # Stop after N EVALUATED epochs with no improvement in SELECT_BY. 0 = run
     # every epoch. On a few dozen frames the peak arrives early and the rest
