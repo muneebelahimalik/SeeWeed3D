@@ -189,10 +189,19 @@ def build_augmentation(preset="standard", min_box_px=2):
             # Scale jitter is the one that targets small-weed recall directly:
             # it shows the same plant at several apparent sizes, which is what
             # a varying camera height and a growing crop produce anyway.
-            v2.ScaleJitter(target_size=(1024, 1024),
-                           scale_range=(0.5, 1.6) if strong else (0.7, 1.4),
-                           antialias=True),
-            v2.RandomRotation(degrees=15 if strong else 7, expand=False),
+            #
+            # RandomAffine, NOT ScaleJitter. ScaleJitter resizes the CANVAS to
+            # target_size x scale; against a 2208x1242 ZED frame a target of
+            # 1024 meant every training image arrived at 24-73% of native.
+            # Mask R-CNN's own transform then upsampled it back to min_size, so
+            # raising min_size bought nothing - the detail was already gone and
+            # the model trained on blur. The augmentation was silently undoing
+            # the single biggest lever on the metric it was added to improve.
+            # RandomAffine scales the CONTENT and leaves the canvas alone, which
+            # is the augmentation that was intended all along, and it folds the
+            # rotation into the same resample instead of blurring twice.
+            v2.RandomAffine(degrees=15 if strong else 7,
+                            scale=(0.5, 1.6) if strong else (0.7, 1.4)),
         ]
     # ALWAYS last: an instance whose box has been rotated or scaled out of the
     # frame must lose its box, its mask and its label together. torchvision
@@ -313,13 +322,26 @@ class SegManifestDataset(Dataset):
                 if keep.any():
                     from torchvision.ops import masks_to_boxes
                     m = m[keep]
-                    img = aug_img.as_subclass(torch.Tensor)
-                    target = {
-                        "boxes": masks_to_boxes(m).float(),
-                        "labels": aug["labels"][keep],
-                        "masks": m,
-                        "image_id": target["image_id"],
-                    }
+                    b = masks_to_boxes(m)
+                    # A non-empty mask is NOT enough. Rotation and scale jitter
+                    # can leave a plant as a single row or column of pixels, and
+                    # masks_to_boxes takes inclusive min/max - so x1 == x2 and
+                    # the box has zero area. torchvision asserts on that inside
+                    # forward() ("All bounding boxes should have positive height
+                    # and width"), killing the run minutes in with no clue that
+                    # augmentation caused it. The pre-augmentation path above
+                    # already drops these; the augmented path must too, or the
+                    # guard only holds for the transform that cannot break it.
+                    solid = (b[:, 2] > b[:, 0]) & (b[:, 3] > b[:, 1])
+                    if solid.any():
+                        m = m[solid]
+                        img = aug_img.as_subclass(torch.Tensor)
+                        target = {
+                            "boxes": b[solid].float(),
+                            "labels": aug["labels"][keep][solid],
+                            "masks": m,
+                            "image_id": target["image_id"],
+                        }
         return img, target
 
 

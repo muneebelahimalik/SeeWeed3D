@@ -138,6 +138,12 @@ CONFIG = {
     # preset: pasting an onion between frames fabricates crop geometry no field
     # produced, and this is a crop-SAFETY model.
     #
+    # Scale jitter is applied to the image CONTENT, not the canvas, so it does
+    # not fight MIN_SIZE/MAX_SIZE above. It used to: canvas-resizing jitter
+    # delivered every ZED frame at 24-73% of native and the model's own
+    # transform upsampled the loss back, which made raising MIN_SIZE do
+    # nothing at all.
+    #
     # Use "strong" if the best epoch keeps landing in the first third of the
     # schedule, which is what overfitting looks like here.
     "AUG": "standard",

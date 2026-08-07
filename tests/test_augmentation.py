@@ -265,3 +265,163 @@ def test_the_keep_mask_is_boolean_not_uint8():
     keep = m.flatten(1).any(1).bool()
     labels = torch.tensor([10, 20, 30])
     assert labels[keep].tolist() == [20]
+
+
+# --------------------------------------------------------------------------- #
+# degenerate boxes out of augmentation
+#
+# A mask can survive a rotation as a single row or column of pixels: non-empty,
+# so the emptiness filter keeps it, but masks_to_boxes takes INCLUSIVE min/max
+# so x1 == x2 and the box has zero area. torchvision asserts on that inside
+# forward() - "All bounding boxes should have positive height and width" -
+# minutes into a run, with nothing pointing at augmentation as the cause.
+# --------------------------------------------------------------------------- #
+def _two_instance_manifest(tmp_path):
+    import json  # noqa: F401
+    import cv2
+    root = tmp_path / "sessions" / "s1" / "rgb"
+    root.mkdir(parents=True)
+    cv2.imwrite(str(root / "s1_000001.png"),
+                np.random.randint(0, 255, (120, 160, 3), dtype=np.uint8))
+    return {"images_root": [str(tmp_path / "sessions")],
+            "classes": ["grass_weed", "onion_plant"],
+            "frames": [{
+                "session_id": "s1", "item_id": "s1_000001",
+                "image_path": "s1_000001.png",
+                "width": 160, "height": 120, "split": "train",
+                "instances": [
+                    {"class_name": "grass_weed",
+                     "polygons": [[20, 20, 70, 20, 70, 70, 20, 70]]},
+                    {"class_name": "onion_plant",
+                     "polygons": [[90, 20, 140, 20, 140, 70, 90, 70]]}]}]}
+
+
+def _flatten_to_slivers(*indices):
+    """Stand-in for the transform that causes this: leaves the named instances
+    as a single row of pixels and everything else untouched."""
+    def _t(img, target):
+        m = target["masks"].clone()
+        for i in indices:
+            m[i] = 0
+            m[i, 50, 30:60] = 1
+        out = dict(target)
+        out["masks"] = type(target["masks"])(m)
+        return img, out
+    return _t
+
+
+def test_a_flattened_instance_is_dropped_not_handed_to_torchvision(tmp_path):
+    doc = _two_instance_manifest(tmp_path)
+    ds = sd.SegManifestDataset(doc, tmp_path / "sessions", "train",
+                               augment=True, aug_preset="standard")
+    ds._aug = _flatten_to_slivers(0)
+    _, t = ds[0]
+    assert len(t["labels"]) == 1
+    assert (t["boxes"][:, 2] > t["boxes"][:, 0]).all()
+    assert (t["boxes"][:, 3] > t["boxes"][:, 1]).all()
+
+
+def test_the_surviving_instance_keeps_its_own_label(tmp_path):
+    """boxes, labels and masks are filtered twice - emptiness then area - and
+    a mis-chained index would silently relabel the plant that survived."""
+    doc = _two_instance_manifest(tmp_path)
+    ds = sd.SegManifestDataset(doc, tmp_path / "sessions", "train",
+                               augment=True, aug_preset="standard")
+    ds._aug = _flatten_to_slivers(0)          # drops grass_weed, keeps onion
+    _, t = ds[0]
+    assert t["labels"].tolist() == [2]        # onion_plant, +1 for background
+    assert len(t["masks"]) == len(t["boxes"]) == 1
+
+
+def test_a_frame_of_nothing_but_slivers_falls_back_to_the_original(tmp_path):
+    """Same rule as a frame rotated empty: hand back the untransformed sample
+    rather than a batch element the trainer has to skip."""
+    doc = _two_instance_manifest(tmp_path)
+    ds = sd.SegManifestDataset(doc, tmp_path / "sessions", "train",
+                               augment=True, aug_preset="standard")
+    ds._aug = _flatten_to_slivers(0, 1)
+    _, t = ds[0]
+    assert len(t["labels"]) == 2
+    assert (t["boxes"][:, 2] > t["boxes"][:, 0]).all()
+
+
+@pytest.mark.parametrize("preset", ["flip", "standard", "strong"])
+def test_no_preset_can_emit_a_zero_area_box(tmp_path, preset):
+    """The property that actually has to hold, over the real transforms - a
+    thin instance is what rotation turns into a sliver."""
+    doc = _two_instance_manifest(tmp_path)
+    doc["frames"][0]["instances"].append(
+        {"class_name": "grass_weed",           # 3 px tall, 60 px wide
+         "polygons": [[40, 100, 100, 100, 100, 103, 40, 103]]})
+    ds = sd.SegManifestDataset(doc, tmp_path / "sessions", "train",
+                               augment=True, aug_preset=preset)
+    for _ in range(40):
+        _, t = ds[0]
+        b = t["boxes"]
+        assert (b[:, 2] > b[:, 0]).all(), f"zero-width box from {preset}: {b}"
+        assert (b[:, 3] > b[:, 1]).all(), f"zero-height box from {preset}: {b}"
+        assert len(b) == len(t["labels"]) == len(t["masks"])
+
+
+# --------------------------------------------------------------------------- #
+# augmentation must not undo the input resolution
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("preset", ["flip", "standard", "strong"])
+def test_augmentation_preserves_the_frame_resolution(preset):
+    """ScaleJitter(target_size=(1024,1024)) resized the CANVAS, so a 2208x1242
+    ZED frame arrived at 24-73% of native and Mask R-CNN's transform upsampled
+    the loss back - making MIN_SIZE/MAX_SIZE, the biggest lever on small-weed
+    recall, do nothing. Scale must be applied to the CONTENT."""
+    from torchvision import tv_tensors
+    H, W = 1242, 2208
+    aug = sd.build_augmentation(preset)
+    m = torch.zeros(1, H, W, dtype=torch.uint8)
+    m[0, 600:700, 1000:1100] = 1
+    for _ in range(6):
+        wrapped = {
+            "boxes": tv_tensors.BoundingBoxes(
+                torch.tensor([[1000., 600., 1099., 699.]]),
+                format="XYXY", canvas_size=(H, W)),
+            "masks": tv_tensors.Mask(m.clone()),
+            "labels": torch.tensor([1]),
+        }
+        out, _ = aug(tv_tensors.Image(torch.rand(3, H, W)), wrapped)
+        assert out.shape[-2:] == (H, W), (
+            f"{preset} resized the canvas to {tuple(out.shape[-2:])}; "
+            f"the model's own transform would have to upsample the loss back")
+
+
+def test_scale_jitter_is_applied_to_content_not_canvas():
+    """The regression itself: no preset may contain a transform that changes
+    the canvas size."""
+    from torchvision.transforms import v2
+    for preset in ("flip", "standard", "strong"):
+        for t in sd.build_augmentation(preset).transforms:
+            assert not isinstance(t, (v2.ScaleJitter, v2.Resize,
+                                      v2.RandomResize)), \
+                f"{preset} contains {type(t).__name__}, which resizes the frame"
+
+
+def test_scale_jitter_still_varies_apparent_plant_size():
+    """Dropping ScaleJitter must not drop the augmentation - a fixed-size plant
+    across every epoch is the thing that hurt small-weed recall."""
+    from torchvision import tv_tensors
+    H, W = 400, 600
+    aug = sd.build_augmentation("strong")
+    areas = set()
+    for _ in range(30):
+        m = torch.zeros(1, H, W, dtype=torch.uint8)
+        m[0, 150:250, 250:350] = 1
+        wrapped = {
+            "boxes": tv_tensors.BoundingBoxes(
+                torch.tensor([[250., 150., 349., 249.]]),
+                format="XYXY", canvas_size=(H, W)),
+            "masks": tv_tensors.Mask(m),
+            "labels": torch.tensor([1]),
+        }
+        _, o = aug(tv_tensors.Image(torch.rand(3, H, W)), wrapped)
+        mm = o["masks"].as_subclass(torch.Tensor)
+        if mm.numel():
+            areas.add(int(mm.sum()))
+    assert len(areas) > 5, f"apparent size barely varies: {sorted(areas)}"
+    assert max(areas) > 1.5 * min(areas)
