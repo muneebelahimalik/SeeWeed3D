@@ -163,13 +163,28 @@ def main(cfg=None):
           mask_ce_coef=c["MASK_CE_COEF"], mask_dice_coef=c["MASK_DICE_COEF"],
           cls_coef=c["CLS_COEF"], track=c["TRACK"])
 
+    # checkpoint_best_total.pth, NOT checkpoint_best_ema.pth. rfdetr keeps
+    # three: _regular (best live weights), _ema (best averaged weights) and
+    # _total, which it copies from whichever of the two actually won. Naming
+    # the EMA file would silently score the loser whenever the regular weights
+    # were better - which is the run this project has already seen.
+    best = _best_checkpoint(run)
     print(f"\nNext, score it with the SAME table the Mask R-CNN runs use:\n"
           f"  python -m seeweed3d.evaluation.eval_seg --backend rfdetr "
-          f"--checkpoint {run}/checkpoint_best_ema.pth --dataset {ds} "
-          f"--split val --device {c['DEVICE']}\n"
+          f"--checkpoint {best} --dataset {ds} "
+          f"--split val --device {c['DEVICE']} --sweep\n"
           f"  python -m seeweed3d.evaluation.report --backend rfdetr "
-          f"--checkpoint {run}/checkpoint_best_ema.pth --dataset {ds} "
+          f"--checkpoint {best} --dataset {ds} "
           f"--split val --device {c['DEVICE']}\n")
+
+
+def _best_checkpoint(run):
+    """The checkpoint to evaluate, preferring rfdetr's own overall winner."""
+    for name in ("checkpoint_best_total.pth", "checkpoint_best_regular.pth",
+                 "checkpoint_best_ema.pth", "checkpoint_best.pth"):
+        if (Path(run) / name).exists():
+            return Path(run) / name
+    return Path(run) / "checkpoint_best_total.pth"
 
 
 if __name__ == "__main__":
