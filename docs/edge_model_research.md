@@ -36,6 +36,45 @@ factor.
 
 ---
 
+## 1b. Measured first: resolution, not architecture, is the bottleneck
+
+Before changing any model, the actual cause of the 27% small-weed recall was
+measured. It is not the architecture.
+
+torchvision's `GeneralizedRCNNTransform` resizes every image before the
+backbone sees it, with defaults `min_size=800, max_size=1333`. A 2208×1242 ZED
+frame is therefore **downscaled to 1333×749** — a factor of 0.60 on each axis:
+
+| GT weed area | at native 2208×1242 | after default resize |
+|---|---|---|
+| 250 px | 16 × 16 px | **9.5 × 9.5 px** (91 px) |
+| 1000 px | 32 × 32 px | 19 × 19 px (364 px) |
+| 1500 px | 39 × 39 px | 23 × 23 px (547 px) |
+
+And the smallest default RPN anchor is **32 px**. A 9.5 px object cannot reach
+a usable IoU with any anchor in `(32, 64, 128, 256, 512)`, so the region
+proposal network never proposes it and no amount of training recovers it.
+
+**This inverts the naive upgrade path.** RF-DETR-Seg-M runs at **432²** — far
+*lower* than the 1333 px the current model already downscales to. Swapping to
+it at native resolution would make small-weed recall **worse**, not better. Any
+move to a fixed-low-resolution real-time architecture has to come with tiling,
+or it trades away the exact capability that matters.
+
+Fixed first, in the existing model:
+
+- `min_size` / `max_size` are now configurable and recorded in the checkpoint,
+  so inference cannot silently run at a different scale than training.
+- `--small-anchors` gives the RPN `(16, 32, 64, 128, 256)`. This costs no
+  parameters — the RPN head is shaped by anchors-per-location, not by their
+  values — so a checkpoint stays state-dict compatible.
+
+Measure `recall_by_size` in the HTML report before and after. If the small
+buckets move, resolution was the problem and no architecture change was needed
+for it.
+
+---
+
 ## 2. Current state, and why it is not the answer
 
 `MaskRCNNSegmenter` (torchvision, BSD-3-Clause) is the default backend, chosen
@@ -85,11 +124,15 @@ segmentation variants are Apache-2.0. **Confirm the licence on the specific
 checkpoint you ship.** Nano/Small/Medium/Large are unambiguous, and those are
 the ones worth using here anyway.
 
-### Resolution is the catch
+### Resolution is the catch — and §1b makes it decisive
 
 Seg-M runs at 432². ZED 2i frames are far larger, and a cotyledon-stage weed
-that is 40 px across at full resolution is ~8 px at 432². Options, in order of
-preference:
+that is 40 px across at full resolution is ~8 px at 432².
+
+§1b measured that the *current* model already loses small weeds by downscaling
+to 1333 px. RF-DETR at 432² is a **further 3× reduction**. Do not treat this
+swap as a straight upgrade: on latency it is, on small-weed recall it is a
+regression unless tiled. Options, in order of preference:
 
 1. **Tile the frame.** Two or three overlapping crops at native scale, batched.
    Costs linearly but preserves the small weeds that matter most.
@@ -236,6 +279,40 @@ Bimodality-checked depth sampling around the LEP, MAD outlier rejection, plane
 fallback, and pinhole uncertainty propagation live in `perception/depth3d.py`.
 That is the part where depth errors turn into a laser pointed at the wrong
 tissue, and it is the part that is most carefully guarded.
+
+---
+
+## 7b. Training-side levers, in the order they pay off
+
+Measured on this dataset, not general advice. All are implemented.
+
+| Lever | Why it is where it is | Flag |
+|---|---|---|
+| **Input resolution** | §1b: the default silently shrinks a 250 px weed to 91 px, below the smallest anchor. Nothing else can recover what the resize threw away. | `MIN_SIZE` / `MAX_SIZE` |
+| **Small anchors** | The RPN cannot propose what it has no anchor for. Free — no extra parameters. | `SMALL_ANCHORS` |
+| **Augmentation** | At 62 training frames this is the largest remaining lever. Photometric jitter buys the most transfer per unit of risk: field light varies far more between passes than geometry does. Scale jitter targets small weeds directly. | `AUG` |
+| **Early stopping** | The run peaked at epoch 11 of 60. Saves time; costs nothing, since `best.pt` already holds the winning weights. | `PATIENCE` |
+| **mAP-based selection** | `val_loss` sums classification, box and mask terms whose scales say nothing about whether a plant was found. | `SELECT_BY` |
+
+**Deliberately not implemented:**
+
+*Mosaic, MixUp, CopyPaste.* Standard in detection recipes and genuinely
+effective on COCO, but they composite objects between images. For a crop-safety
+model that fabricates crop geometry no field produced — an onion pasted beside
+weeds it never grew next to. The same reasoning that keeps them out of Stage B
+keeps them out here.
+
+*Custom losses (focal, Dice, Lovász).* torchvision's Mask R-CNN computes its
+losses internally; swapping them means forking the ROI heads. The honest
+ordering is that resolution and data volume dominate loss choice by a wide
+margin at 62 frames — revisit only after those are exhausted, and prefer a
+model whose losses are configurable (RF-DETR, MMDetection) over forking this
+one.
+
+*Class-balanced sampling.* `other_weed` recall is 0.16, which looks like an
+imbalance problem. It is more likely a **definition** problem: `other_weed` is a
+residual bucket with no coherent appearance, so there is no single concept to
+learn. Splitting real species out of it will do more than reweighting it.
 
 ---
 

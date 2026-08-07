@@ -124,6 +124,84 @@ def resolve_image(rel, images_root, session_id=None):
         f"of them.")
 
 
+#: Augmentation preset names. See build_augmentation() for what each does and,
+#: more importantly, for what is deliberately NOT in any of them.
+AUG_PRESETS = ("none", "flip", "standard", "strong")
+
+
+def build_augmentation(preset="standard", min_box_px=2):
+    """Joint image/mask/box augmentation, or None.
+
+    Built on `torchvision.transforms.v2` rather than Albumentations for two
+    reasons. It is BSD-3 and already a dependency, whereas the maintained
+    Albumentations is now AlbumentationsX under AGPL-3.0/commercial - the same
+    licence trap as Ultralytics, and the MIT `albumentations` is frozen at
+    2.0.8. And v2 transforms operate on tv_tensors, so masks, boxes and labels
+    are transformed and FILTERED TOGETHER; hand-rolled augmentation that flips
+    an image and its masks but forgets a box is a class of silent corruption
+    this avoids structurally.
+
+    WHAT IS DELIBERATELY ABSENT, in every preset:
+
+      Mosaic, MixUp, CopyPaste. For a crop-safety model these fabricate crop
+      geometry that never existed - an onion pasted from another frame teaches
+      the model about a plant arrangement no field produced. The same argument
+      that keeps them out of Stage B keeps them out here.
+
+      Vertical flip is in `flip` for backward compatibility but NOT in
+      `standard`. Top-down field imagery has a real light direction; mirroring
+      it vertically inverts the shading cue that separates a leaf from its own
+      shadow. Horizontal flip is safe because a row looks the same driven
+      either way.
+
+      Rotation beyond small angles. Onion rows are near-parallel in every
+      frame, and that regularity is signal the model may legitimately use.
+
+    Presets:
+      none      identity (returns None)
+      flip      horizontal + vertical flip, the historical behaviour
+      standard  horizontal flip, small rotation, scale jitter, photometric
+      strong    as standard with wider ranges, for when overfitting is clear
+    """
+    if preset in (None, "none"):
+        return None
+    if preset not in AUG_PRESETS:
+        raise ValueError(f"augment preset must be one of {AUG_PRESETS}, "
+                         f"got {preset!r}")
+    from torchvision.transforms import v2
+
+    if preset == "flip":
+        steps = [v2.RandomHorizontalFlip(0.5), v2.RandomVerticalFlip(0.5)]
+    else:
+        strong = preset == "strong"
+        steps = [
+            v2.RandomHorizontalFlip(0.5),
+            # Photometric first, on the un-warped image. Field light varies far
+            # more between a bright noon pass and an overcast one than any
+            # geometric change, and this is the cheapest transfer the model can
+            # be taught with 62 frames.
+            v2.RandomPhotometricDistort(
+                brightness=(0.6, 1.5) if strong else (0.75, 1.3),
+                contrast=(0.6, 1.5) if strong else (0.75, 1.3),
+                saturation=(0.6, 1.5) if strong else (0.75, 1.3),
+                hue=(-0.05, 0.05) if strong else (-0.025, 0.025),
+                p=0.8 if strong else 0.5),
+            # Scale jitter is the one that targets small-weed recall directly:
+            # it shows the same plant at several apparent sizes, which is what
+            # a varying camera height and a growing crop produce anyway.
+            v2.ScaleJitter(target_size=(1024, 1024),
+                           scale_range=(0.5, 1.6) if strong else (0.7, 1.4),
+                           antialias=True),
+            v2.RandomRotation(degrees=15 if strong else 7, expand=False),
+        ]
+    # ALWAYS last: an instance whose box has been rotated or scaled out of the
+    # frame must lose its box, its mask and its label together. torchvision
+    # rejects a degenerate box outright, and a mask surviving without its label
+    # would silently mislabel a plant.
+    steps.append(v2.SanitizeBoundingBoxes(min_size=min_box_px))
+    return v2.Compose(steps)
+
+
 def polygons_to_mask(polygons, h, w):
     m = np.zeros((h, w), np.uint8)
     for p in polygons:
@@ -142,7 +220,7 @@ class SegManifestDataset(Dataset):
     what was annotated."""
 
     def __init__(self, manifest, images_root=None, split="train",
-                 min_area_px=16, augment=True, seed=0):
+                 min_area_px=16, augment=True, seed=0, aug_preset="standard"):
         if isinstance(manifest, (str, Path)):
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         self.frames = [f for f in manifest["frames"]
@@ -157,6 +235,8 @@ class SegManifestDataset(Dataset):
         self.classes = list(manifest.get("classes") or CLASSES)
         self.min_area_px = min_area_px
         self.augment = augment
+        self.aug_preset = aug_preset
+        self._aug = build_augmentation(aug_preset) if augment else None
         self.rng = np.random.default_rng(seed)
 
     def __len__(self):
@@ -190,19 +270,6 @@ class SegManifestDataset(Dataset):
                           + BACKGROUND_OFFSET)
             boxes.append([x0, y0, x1, y1])
 
-        # Horizontal/vertical flips only. Mosaic and MixUp are NOT used here
-        # either: for a crop-safety model, compositing an onion from one frame
-        # into another fabricates crop geometry that never existed.
-        if self.augment and masks:
-            if self.rng.random() < 0.5:
-                bgr = bgr[:, ::-1].copy()
-                masks = [m[:, ::-1].copy() for m in masks]
-                boxes = [[w - b[2], b[1], w - b[0], b[3]] for b in boxes]
-            if self.rng.random() < 0.5:
-                bgr = bgr[::-1].copy()
-                masks = [m[::-1].copy() for m in masks]
-                boxes = [[b[0], h - b[3], b[2], h - b[1]] for b in boxes]
-
         img = torch.from_numpy(
             bgr[:, :, ::-1].copy().astype(np.float32) / 255.0).permute(2, 0, 1)
         target = {
@@ -212,6 +279,47 @@ class SegManifestDataset(Dataset):
                       if masks else torch.zeros((0, h, w), dtype=torch.uint8)),
             "image_id": torch.tensor(i),
         }
+        if self.augment and self._aug is not None and len(labels):
+            # v2 transforms dispatch on tv_tensor SUBCLASSES, not on dict keys.
+            # A plain tensor of boxes is silently treated as generic data and
+            # left untransformed while the image is warped - masks and boxes
+            # then describe a picture that no longer exists.
+            from torchvision import tv_tensors
+            h_, w_ = img.shape[-2:]
+            wrapped = {
+                "boxes": tv_tensors.BoundingBoxes(
+                    target["boxes"], format="XYXY", canvas_size=(h_, w_)),
+                "masks": tv_tensors.Mask(target["masks"]),
+                "labels": target["labels"],
+            }
+            aug_img, aug = self._aug(tv_tensors.Image(img), wrapped)
+            # Augmentation can legitimately empty a frame (every plant rotated
+            # out). Keep the original rather than hand the trainer a sample it
+            # has to skip.
+            if len(aug["labels"]):
+                m = aug["masks"].as_subclass(torch.Tensor).to(torch.uint8)
+                # Recompute boxes FROM the transformed masks rather than take
+                # v2's. Under rotation v2 transports a box by rotating its four
+                # corners and taking the axis-aligned hull, which is strictly
+                # larger than the rotated mask - a 45-degree rotation inflates
+                # a square box by ~41% per side. Here the mask is the ground
+                # truth, so deriving the box from it keeps the two consistent
+                # and keeps the box tight.
+                # bool, not uint8: torch treats a uint8 index as POSITIONAL,
+                # so `labels[keep]` would silently select labels 0 and 1 by
+                # position instead of masking - a wrong-label bug that only
+                # shows up as poor accuracy.
+                keep = m.flatten(1).any(1).bool()
+                if keep.any():
+                    from torchvision.ops import masks_to_boxes
+                    m = m[keep]
+                    img = aug_img.as_subclass(torch.Tensor)
+                    target = {
+                        "boxes": masks_to_boxes(m).float(),
+                        "labels": aug["labels"][keep],
+                        "masks": m,
+                        "image_id": target["image_id"],
+                    }
         return img, target
 
 

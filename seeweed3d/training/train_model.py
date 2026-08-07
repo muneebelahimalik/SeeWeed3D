@@ -100,6 +100,48 @@ CONFIG = {
     # compare: it selects on the number you actually report.
     "SELECT_BY": "val_loss",
 
+    # Stop after N EVALUATED epochs with no improvement in SELECT_BY. 0 = run
+    # every epoch. On a few dozen frames the peak arrives early and the rest
+    # only overfits, so this is time saved, not quality traded - best.pt
+    # already holds the winning weights.
+    "PATIENCE": 0,
+
+    # -- Input resolution: the biggest lever on SMALL-WEED RECALL --------------
+    # torchvision resizes every image before the backbone sees it, and its
+    # defaults (800 / 1333) downscale a 2208x1242 ZED frame to 1333x749. A
+    # 250 px cotyledon becomes 91 px - and the smallest RPN anchor is 32 px, so
+    # the region proposal network cannot propose it at all.
+    #
+    # None keeps torchvision's defaults. Raising these is the single most
+    # likely fix for low small-weed recall, and the most likely cause of CUDA
+    # out-of-memory: cost grows with the square. If you OOM, drop BATCH to 1
+    # before lowering these.
+    #
+    #   None / None   1333x749   torchvision default, small weeds ~91 px
+    #   1000 / 1800   1777x1000  a good first step
+    #   1242 / 2208   native     no downscaling at all; needs the most memory
+    "MIN_SIZE": 1000,
+    "MAX_SIZE": 1800,
+
+    # RPN anchors of (16,32,64,128,256) instead of (32,64,128,256,512).
+    # Costs no parameters - the RPN head is shaped by anchors-per-location, not
+    # by their values - and gives the proposal network something that can
+    # actually match a small plant.
+    "SMALL_ANCHORS": True,
+
+    # -- Augmentation ----------------------------------------------------------
+    # "none" | "flip" | "standard" | "strong"
+    #
+    # standard = horizontal flip + photometric jitter + scale jitter + small
+    # rotation. With 62 training frames this is the largest single lever after
+    # resolution. Mosaic/MixUp/CopyPaste are deliberately absent from every
+    # preset: pasting an onion between frames fabricates crop geometry no field
+    # produced, and this is a crop-SAFETY model.
+    #
+    # Use "strong" if the best epoch keeps landing in the first third of the
+    # schedule, which is what overfitting looks like here.
+    "AUG": "standard",
+
     # -- Evaluation ------------------------------------------------------------
     "EVALUATE_AFTER": True,
     "EVAL_SPLIT": "val",       # "val", or "test" once you have a real one
@@ -157,13 +199,17 @@ def main(cfg=None):
               f"OVERWRITTEN.\n    Point RUN_DIR at a new folder to keep the "
               f"old run comparable.\n")
 
-    from training.train_seg_torchvision import train
+    from training.train_seg_torchvision import train, SMALL_ANCHORS
     train(ds, images, run,
           epochs=c["EPOCHS"], batch=c["BATCH"], lr=c["LR"],
           device=c["DEVICE"], workers=c["WORKERS"], seed=c["SEED"],
           pretrained=c["PRETRAINED"], track=c["TRACK"],
           preview_every=c["PREVIEW_EVERY"], eval_every=c["EVAL_EVERY"],
-          select_by=c.get("SELECT_BY", "val_loss"))
+          select_by=c.get("SELECT_BY", "val_loss"),
+          aug_preset=c.get("AUG", "standard"),
+          min_size=c.get("MIN_SIZE"), max_size=c.get("MAX_SIZE"),
+          patience=c.get("PATIENCE", 0),
+          anchor_sizes=(SMALL_ANCHORS if c.get("SMALL_ANCHORS") else None))
 
     if not c["EVALUATE_AFTER"]:
         return

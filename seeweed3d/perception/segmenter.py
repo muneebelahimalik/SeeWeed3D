@@ -215,12 +215,31 @@ class MaskRCNNSegmenter:
         self.classes = None
 
     @staticmethod
-    def build(num_classes=None, pretrained=False):
-        """A Mask R-CNN head sized for this ontology (+1 for background)."""
+    def build(num_classes=None, pretrained=False, min_size=None, max_size=None,
+              anchor_sizes=None):
+        """A Mask R-CNN head sized for this ontology (+1 for background).
+
+        min_size / max_size: the INPUT RESOLUTION torchvision resizes to before
+            the backbone ever sees the image. torchvision's defaults (800 /
+            1333) silently downscale a 2208x1242 ZED frame to 1333x749 - a
+            factor of 0.60 on each axis, so a 250 px cotyledon becomes 91 px.
+            On a weeder that is not a detail: the plants worth killing are the
+            small ones, and this is the first place they are thrown away.
+            None keeps torchvision's defaults, so an existing checkpoint that
+            recorded nothing still loads exactly as it was trained.
+
+        anchor_sizes: one anchor size per FPN level. The default
+            ((32,),(64,),(128,),(256,),(512,)) cannot match a 10-20 px object
+            at ANY IoU, so the RPN never proposes it and no amount of training
+            recovers it. Passing smaller sizes costs nothing in parameters -
+            the RPN head is shaped by anchors-per-location (sizes x ratios per
+            level), not by their values - so a checkpoint stays state-dict
+            compatible across this change."""
         try:
             import torchvision
             from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
             from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+            from torchvision.models.detection.anchor_utils import AnchorGenerator
         except ImportError as e:
             raise ImportError(
                 "torchvision is required for the maskrcnn backend:\n"
@@ -228,8 +247,28 @@ class MaskRCNNSegmenter:
             ) from e
         n = (num_classes or len(CLASSES)) + 1          # +1 background
         weights = "DEFAULT" if pretrained else None
+        kw = {}
+        if min_size is not None:
+            kw["min_size"] = int(min_size)
+        if max_size is not None:
+            kw["max_size"] = int(max_size)
         model = torchvision.models.detection.maskrcnn_resnet50_fpn_v2(
-            weights=weights, weights_backbone=None)
+            weights=weights, weights_backbone=None, **kw)
+
+        if anchor_sizes is not None:
+            sizes = tuple(tuple(s) if isinstance(s, (list, tuple)) else (int(s),)
+                          for s in anchor_sizes)
+            ratios = model.rpn.anchor_generator.aspect_ratios[0]
+            per_loc = {len(s) * len(ratios) for s in sizes}
+            old = model.rpn.anchor_generator.num_anchors_per_location()[0]
+            if per_loc != {old}:
+                raise ValueError(
+                    f"anchor_sizes would change anchors-per-location from "
+                    f"{old} to {sorted(per_loc)}, which reshapes the RPN head "
+                    f"and breaks state-dict compatibility. Keep one size per "
+                    f"FPN level.")
+            model.rpn.anchor_generator = AnchorGenerator(
+                sizes=sizes, aspect_ratios=(ratios,) * len(sizes))
         in_f = model.roi_heads.box_predictor.cls_score.in_features
         model.roi_heads.box_predictor = FastRCNNPredictor(in_f, n)
         in_m = model.roi_heads.mask_predictor.conv5_mask.in_channels
@@ -247,7 +286,17 @@ class MaskRCNNSegmenter:
                 f"--dataset <prepared> --images-root <sessions> --out <dir>")
         blob = torch.load(p, map_location=self.device, weights_only=False)
         self.classes = list(blob.get("classes") or CLASSES)
-        self._model = self.build(len(self.classes))
+        # Rebuild with the SAME input resolution and anchors the checkpoint was
+        # trained at. Weights say nothing about either, so inferring at
+        # torchvision's defaults after training at full resolution would feed
+        # the backbone images 0.6x the scale it learned on - a silent accuracy
+        # loss that looks like the model simply being worse than its own
+        # validation score. Absent keys mean a checkpoint from before this was
+        # recorded, which is exactly when the defaults ARE correct.
+        self._model = self.build(len(self.classes),
+                                 min_size=blob.get("min_size"),
+                                 max_size=blob.get("max_size"),
+                                 anchor_sizes=blob.get("anchor_sizes"))
         self._model.load_state_dict(blob["model"])
         self._model.to(self.device).eval()
         return self
