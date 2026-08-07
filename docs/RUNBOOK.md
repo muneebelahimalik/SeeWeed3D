@@ -24,7 +24,7 @@ on PATH.
 | [6b. RF-DETR-Seg](#6b-train-stage-a-on-rf-detr-seg-the-advanced-path) | same, on the real-time transformer backend | **yes** |
 | [7. Train Stage B](#7-train-stage-b-lep) | LEP localization | **yes** |
 | [8. Evaluate](#8-evaluate) | metrics by session | no |
-| [9. Inference](#9-run-inference) | full RGB-D pipeline | yes (practically) |
+| [9. Inference](#9-run-inference) | predict on unlabelled frames; full RGB-D pipeline | yes (practically) |
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
 **Related:** [experiment tracking](experiment_tracking.md) ·
@@ -815,6 +815,42 @@ is preserved and is also the runtime fallback.
 
 ## 9. Run inference
 
+### 9.1 On a folder of images — the quick look
+
+Needs **no ground truth**, so it works on a held-out session, a new field, or a
+different time of day. Edit the config block and run:
+
+```powershell
+python seeweed3d/perception/predict_images.py
+```
+
+| Setting | Note |
+|---|---|
+| `IMAGES` | a session folder (uses its `rgb/`), a folder of images, or one file |
+| `STRIDE` | **use this.** Consecutive ZED frames are near-identical, so `LIMIT` alone gives you N pictures of the same plant |
+| `CONF` | lower than the 0.5 the metrics table uses — to see failures you want what the model *nearly* said |
+| `BACKEND` | `maskrcnn` or `rfdetr`, must match the checkpoint |
+| `MODE` | `segmentation` (RGB only) or `full` (depth → LEP → 3D → safety decision) |
+
+Writes `overlays/*.png` and `predictions.json`. Colours match the evaluation
+report: **orange** crop, **green** weed, **magenta** a weed touching predicted
+onion.
+
+> **What this cannot tell you.** Without labels there is no recall. An empty
+> frame means *the model found nothing*, which is indistinguishable from *there
+> was nothing to find*. Use this to see **how** the model fails and `eval_seg`
+> to learn **how often**. On a held-out session the useful question is usually
+> not the score but whether the masks still land on plants at all.
+
+`MODE: "full"` runs the deployed pipeline and returns each weed as a
+`candidate` or an `abstention` with reasons. It needs `<session>/rgb`,
+`<session>/depth` and `<session>/meta/calibration.json`; a frame missing depth
+degrades to segmentation for that frame rather than aborting the run. With
+`LEP_CHECKPOINT` empty it uses the hand-engineered growth-point estimator, so it
+works before Stage B is trained.
+
+### 9.2 From Python — the full pipeline
+
 ```python
 import cv2, torch
 from seeweed3d.perception.segmenter import MaskRCNNSegmenter
@@ -905,6 +941,7 @@ python -m seeweed3d.training.train_seg_torchvision --dataset <dir> --images-root
 python seeweed3d/training/train_model_rfdetr.py                    # RF-DETR-Seg, config block
 python -m seeweed3d.evaluation.eval_seg --checkpoint <run>/best.pt --dataset <dir> --split val
 python -m seeweed3d.evaluation.report   --checkpoint <run>/best.pt --dataset <dir> --split val
+python seeweed3d/perception/predict_images.py                       # predict on unlabelled frames
 python -m seeweed3d.training.train_lep --manifest <dir>/lep_manifest.json --images-root <sessions> --out <run>
 python -m seeweed3d.deploy.export --checkpoint <run>/best.pt --out <run>/export --precision fp16
 python -m seeweed3d.deploy.benchmark --checkpoint <run>/best.pt --device cuda
