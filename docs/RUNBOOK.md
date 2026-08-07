@@ -795,6 +795,41 @@ metric on the page.
 
 Writes `metrics_<split>.json` next to the checkpoint.
 
+### 8.1b Everything at once — `analyze_run.py`
+
+Both trainers run this automatically when they finish. To redo it, or to
+analyse an older run, edit the config block and:
+
+```powershell
+python seeweed3d/evaluation/analyze_run.py
+```
+
+Point `RUN_DIR` at **either** backend's run directory — it detects which from
+what training wrote, reads that backend's history (`history.json` for
+Mask R-CNN, lightning's `metrics.csv` for RF-DETR), and produces one set of
+figures for both:
+
+| `analysis/` | Answers |
+|---|---|
+| `training_curves.png` | is it still learning, or was the schedule cut short? |
+| `per_class_ap.png` | which class is holding the headline number down (with `n_gt` on each bar) |
+| `confidence_sweep.png` | **the deployment-threshold decision** |
+| `crop_safety.png` | did it get *safer*, or just better at weeds? |
+| `recall_by_size.png` | the failure this system is actually limited by |
+| `report.html` | GT-vs-prediction panels and the missed-weed gallery |
+
+Everything is also logged to MLflow, so both backends' runs sit in one
+comparison table.
+
+> **On hosted trackers (W&B, Comet).** They would not save any of this work.
+> Every figure above has to be **computed** here either way — no tracker knows
+> what a missed onion is, that recall at conf 0.5 and 0.25 are different
+> questions, or how to draw a mask on a plant. A tracker only decides where the
+> resulting PNG is filed, which is one call in `_track()`. What a hosted service
+> *does* buy is a shared URL and a comparison UI, against uploading field
+> imagery and a customer's row geometry to a vendor's cloud. That is a business
+> decision, not a technical gap, which is why the default is local.
+
 ### 8.2 The visual report — look at this before changing anything
 
 Numbers say how good the model is. They say nothing about **which** plants it
