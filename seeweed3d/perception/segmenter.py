@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import sys
 
 import numpy as np
@@ -337,20 +338,58 @@ class RFDETRSegmenter:
     TensorRT FP16 and sized nano..2XL, so a model can be matched to the Orin's
     budget rather than the other way round.
 
-    Not the default only because it is an extra dependency the prototype does
-    not need; promote it by passing backend='rfdetr' once the pipeline is
-    proven end to end."""
+    THREE THINGS TRAVEL WITH THE WEIGHTS AND NONE ARE IN THE .pth
+    -------------------------------------------------------------
+    The variant, the training resolution and the class list. Get any of them
+    wrong and the failure is silent:
+
+      variant      loading Medium weights into Preview is a different
+                   architecture. It does not raise; it warns about partial
+                   loading and predicts noise.
+      resolution   the model was trained at 1008, not the 432 default. A
+                   mismatch changes the positional encoding grid.
+      classes      rfdetr's own `class_names` defaults to the COCO 80, so
+                   trusting it labels an onion "bicycle". Worse, a Detections
+                   built without `names` falls back to the FULL ontology while
+                   the model emits indices into the 4-class active list - which
+                   is exactly the crop-safety bug already fixed once for
+                   Mask R-CNN: crop_index() would point at the wrong class and
+                   every onion would be handed to the laser as a weed.
+
+    train_seg_rfdetr.py writes all three to `rfdetr_train_config.json` beside
+    the checkpoint, and this reads them back. Passing them explicitly overrides
+    the sidecar; a MISSING sidecar with nothing passed is an error, not a
+    default, because every available default here is wrong.
+    """
+
+    #: variant -> rfdetr class name. Mirrors training/train_seg_rfdetr.VARIANTS.
+    VARIANTS = {"nano": "RFDETRSegNano", "small": "RFDETRSegSmall",
+                "medium": "RFDETRSegMedium", "large": "RFDETRSegLarge",
+                "preview": "RFDETRSegPreview"}
 
     def __init__(self, weights, conf=0.25, device="cpu", max_det=300,
-                 resolution=None):
+                 resolution=None, variant=None, classes=None):
         self.weights = str(weights)
         self.conf, self.device = conf, device
-        self.max_det, self.resolution = max_det, resolution
+        self.max_det = max_det
+        self.resolution = resolution
+        self.variant = variant
+        self.classes = list(classes) if classes else None
         self._model = None
+
+    def sidecar(self):
+        """The training config written next to the checkpoint, or {}."""
+        p = Path(self.weights).parent / "rfdetr_train_config.json"
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return {}
 
     def load(self):
         try:
-            from rfdetr import RFDETRSegPreview  # noqa: F401
+            import rfdetr
         except ImportError as e:
             raise ImportError(
                 "rfdetr is not installed. It is OPTIONAL:\n"
@@ -358,12 +397,35 @@ class RFDETRSegmenter:
                 "RF-DETR-Seg is Apache-2.0, so it carries no source-release "
                 "obligation - unlike the ultralytics backend."
             ) from e
-        from rfdetr import RFDETRSegPreview
-        kw = {"pretrain_weights": self.weights} if Path(self.weights).exists() \
-            else {}
-        if self.resolution:
-            kw["resolution"] = self.resolution
-        self._model = RFDETRSegPreview(**kw)
+
+        cfg = self.sidecar()
+        variant = self.variant or cfg.get("variant")
+        resolution = self.resolution or cfg.get("resolution")
+        if self.classes is None:
+            self.classes = list(cfg.get("classes") or []) or None
+
+        if not (variant and resolution and self.classes):
+            raise SystemExit(
+                f"ERROR: cannot load {self.weights} - the variant, resolution "
+                f"and class list are not recorded in the checkpoint and were "
+                f"not supplied.\n"
+                f"Expected {Path(self.weights).parent / 'rfdetr_train_config.json'}"
+                f", which training/train_seg_rfdetr.py writes.\n"
+                f"Guessing is not safe here: the wrong variant loads partially "
+                f"and predicts noise, and the wrong class list points crop "
+                f"safety at the wrong class.\n"
+                f"got variant={variant!r} resolution={resolution!r} "
+                f"classes={self.classes!r}")
+        if variant not in self.VARIANTS:
+            raise SystemExit(f"ERROR: unknown rfdetr variant {variant!r}; "
+                             f"expected one of {sorted(self.VARIANTS)}")
+
+        cls = getattr(rfdetr, self.VARIANTS[variant])
+        kw = {"num_classes": len(self.classes), "resolution": int(resolution),
+              "device": self.device}
+        if Path(self.weights).exists():
+            kw["pretrain_weights"] = self.weights
+        self._model = cls(**kw)
         return self
 
     def __call__(self, bgr):
@@ -373,17 +435,33 @@ class RFDETRSegmenter:
         h, w = bgr.shape[:2]
         det = self._model.predict(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),
                                   threshold=self.conf)
-        # rfdetr returns a supervision.Detections; normalise it to ours.
         masks = getattr(det, "mask", None)
+        names = list(self.classes or CLASSES)
         if masks is None or not len(det):
             return Detections(np.zeros((0, h, w), bool), np.zeros((0, 4)),
-                              np.zeros((0,), int), np.zeros((0,)), w, h)
+                              np.zeros((0,), int), np.zeros((0,)), w, h,
+                              names=names)
+
+        ids = np.asarray(det.class_id, int)
+        # A fine-tuned rfdetr model emits a 0-based index into the class list
+        # the dataset was built with, which coco_export wrote in exactly this
+        # order. An index outside it means that assumption broke - and the
+        # damage would be a silently mislabelled crop, so it fails loudly.
+        if len(ids) and (ids.min() < 0 or ids.max() >= len(names)):
+            raise SystemExit(
+                f"ERROR: {self.weights} predicted class id "
+                f"{int(ids.max())} but was loaded with {len(names)} classes "
+                f"{names}.\nThe checkpoint and its recorded class list "
+                f"disagree; re-export the dataset and retrain rather than "
+                f"trusting this mapping.")
+
         xyxy = np.asarray(det.xyxy, float)
         boxes = np.stack([xyxy[:, 0], xyxy[:, 1],
                           xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]], 1)
-        return Detections(np.asarray(masks, bool), boxes,
-                          np.asarray(det.class_id, int),
-                          np.asarray(det.confidence, float), w, h)
+        order = np.argsort(-np.asarray(det.confidence, float))[: self.max_det]
+        return Detections(np.asarray(masks, bool)[order], boxes[order],
+                          ids[order], np.asarray(det.confidence, float)[order],
+                          w, h, names=names)
 
 
 # Backend registry. `ultralytics` is present but never selected by default -

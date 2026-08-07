@@ -655,17 +655,34 @@ The evaluation path is identical apart from one flag:
 
 ```powershell
 python -m seeweed3d.evaluation.eval_seg --backend rfdetr `
-    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_ema.pth `
-    --dataset E:/Dataset_Vidalia/training1 --split val --device cuda
+    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_total.pth `
+    --dataset E:/Dataset_Vidalia/training1 --split val --device cuda --sweep
 
 python -m seeweed3d.evaluation.report --backend rfdetr `
-    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_ema.pth `
+    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_total.pth `
     --dataset E:/Dataset_Vidalia/training1 --split val --device cuda
 ```
 
-Compare the **recall-by-size** table, not overall mAP. Overall mAP is dominated
-by the large easy instances; small-weed recall is the number this system is
-actually limited by.
+**`checkpoint_best_total.pth`, not `_ema`.** rfdetr keeps three files —
+`_regular` (best live weights), `_ema` (best averaged weights) and `_total`,
+copied from whichever actually won. Scoring `_ema` silently reports the loser
+whenever the live weights were better; the runner prints the right path.
+
+Loading it back needs the **variant, the resolution and the class list**, and
+none of the three are inside the `.pth`. `train_seg_rfdetr.py` writes them to
+`rfdetr_train_config.json` beside the checkpoint and the segmenter reads them
+from there. Move a checkpoint without that file and loading fails with an
+explanation rather than guessing — every available default is wrong: `Preview`
+is a different architecture, 432 is the wrong resolution, and rfdetr's own
+`class_names` is the COCO 80, which would point crop safety at "bicycle".
+
+Compare the **recall-by-size** table and `weed_on_crop_fraction` at a matched
+confidence, not overall mAP. Overall mAP is dominated by the large easy
+instances; small-weed recall is the number this system is actually limited by.
+
+RF-DETR prints its own per-class table each epoch, but that one is **box** AP
+while `eval_seg` reports **mask** AP, and the two use different matching. Only
+`eval_seg --backend rfdetr` compares like with like.
 
 Sizing, the licence caveat on the XL variants (Nano..Large are Apache-2.0;
 XL/2XL may fall under Roboflow's Platform Model License and are deliberately not

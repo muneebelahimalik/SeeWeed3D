@@ -314,3 +314,162 @@ def test_the_shipped_config_uses_no_dataloader_workers(tmp_path):
     nothing to read. At 62 frames the parent can do the loading."""
     tm = load_script("training/train_model_rfdetr.py")
     assert tm.CONFIG["WORKERS"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# loading a trained checkpoint back
+#
+# Three things travel with rfdetr weights and none are inside the .pth: the
+# variant, the training resolution and the class list. Every wrong answer is
+# silent, and one of them is the crop-safety bug already fixed once for
+# Mask R-CNN.
+# --------------------------------------------------------------------------- #
+import json as _json                                            # noqa: E402
+
+import numpy as _np                                             # noqa: E402
+
+sg = load_script("perception/segmenter.py")
+from seeweed3d.common.ontology import CLASSES, CROP_CLASS       # noqa: E402
+
+ACTIVE = ["cutleaf_evening_primrose", "grass_weed", "other_weed", CROP_CLASS]
+
+
+def _run_dir(tmp_path, **over):
+    d = tmp_path / "rfdetr_v1"
+    d.mkdir(exist_ok=True)
+    cfg = {"variant": "medium", "resolution": 1008, "classes": list(ACTIVE)}
+    cfg.update(over)
+    (d / "rfdetr_train_config.json").write_text(_json.dumps(cfg))
+    (d / "checkpoint_best_total.pth").write_bytes(b"x")
+    return d
+
+
+def _stub(seg_obj, ids, n=None):
+    """Attach a fake rfdetr model returning supervision-like detections."""
+    n = len(ids) if n is None else n
+
+    class _Sv:
+        mask = _np.ones((n, 8, 8), bool)
+        xyxy = _np.tile(_np.array([[1.0, 2.0, 5.0, 7.0]]), (n, 1))
+        class_id = _np.asarray(ids, int)
+        confidence = _np.linspace(0.9, 0.5, n)
+        def __len__(self): return n
+
+    class _M:
+        def predict(self, _rgb, threshold=0.5): return _Sv()
+
+    seg_obj._model = _M()
+    return seg_obj
+
+
+def test_the_variant_and_resolution_come_from_the_run_config(tmp_path):
+    """Medium weights loaded into Preview is a different architecture; it warns
+    about partial loading and predicts noise rather than raising."""
+    d = _run_dir(tmp_path)
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
+    cfg = s.sidecar()
+    assert cfg["variant"] == "medium" and cfg["resolution"] == 1008
+
+
+def test_a_missing_run_config_is_an_error_not_a_default(tmp_path):
+    """Every available default is wrong: Preview is the wrong architecture, 432
+    is the wrong resolution, and the COCO 80 is the wrong class list."""
+    (tmp_path / "loose.pth").write_bytes(b"x")
+    s = sg.RFDETRSegmenter(tmp_path / "loose.pth")
+    with pytest.raises(SystemExit) as e:
+        s.load()
+    msg = str(e.value)
+    assert "rfdetr_train_config.json" in msg
+    assert "crop safety" in msg
+
+
+def test_explicit_arguments_override_the_run_config(tmp_path):
+    d = _run_dir(tmp_path)
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth", variant="nano",
+                           resolution=504, classes=["grass_weed"])
+    assert s.classes == ["grass_weed"]
+    assert s.variant == "nano" and s.resolution == 504
+
+
+def test_an_unknown_variant_is_refused(tmp_path):
+    d = _run_dir(tmp_path, variant="enormous")
+    with pytest.raises(SystemExit, match="variant"):
+        sg.RFDETRSegmenter(d / "checkpoint_best_total.pth").load()
+
+
+def test_predictions_carry_the_models_own_class_list(tmp_path):
+    """Without names= the Detections falls back to the FULL ontology while the
+    model emits indices into the 4-class active list."""
+    d = _run_dir(tmp_path)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
+                                 classes=ACTIVE), [0, 3])
+    det = s(_np.zeros((8, 8, 3), _np.uint8))
+    assert det.names == ACTIVE
+    assert det.class_name(1) == CROP_CLASS
+
+
+def test_the_crop_is_still_the_crop_under_the_reduced_class_list(tmp_path):
+    """THE regression. ACTIVE drops wild_radish and weed_cluster, so onion sits
+    at 3 here and 5 in the ontology. Resolved against the ontology, the crop
+    mask would come back empty and every onion would be handed to the laser."""
+    assert ACTIVE.index(CROP_CLASS) != CLASSES.index(CROP_CLASS)
+    d = _run_dir(tmp_path)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
+                                 classes=ACTIVE), [3, 1])
+    det = s(_np.zeros((8, 8, 3), _np.uint8))
+    assert det.crop_index() == 3
+    assert det.onion_safety_mask().any(), "crop mask lost"
+    assert det.weed_indices() == [1], "an onion was handed over as a weed"
+
+
+def test_a_class_id_outside_the_recorded_list_fails_loudly(tmp_path):
+    """Silently mislabelling a plant here is a crop-safety failure, so an
+    index the class list cannot explain must stop the run."""
+    d = _run_dir(tmp_path)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
+                                 classes=ACTIVE), [0, 9])
+    with pytest.raises(SystemExit, match="class id"):
+        s(_np.zeros((8, 8, 3), _np.uint8))
+
+
+def test_an_empty_prediction_still_reports_the_right_class_list(tmp_path):
+    d = _run_dir(tmp_path)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
+                                 classes=ACTIVE), [], n=0)
+    s._model.predict = lambda *_a, **_k: type(
+        "E", (), {"mask": None, "__len__": lambda s: 0})()
+    det = s(_np.zeros((8, 8, 3), _np.uint8))
+    assert len(det) == 0 and det.names == ACTIVE
+
+
+def test_eval_seg_can_read_the_class_list_after_load(tmp_path):
+    """eval_seg compares seg.classes against the manifest before scoring; an
+    absent attribute would crash --backend rfdetr on the first line."""
+    d = _run_dir(tmp_path)
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
+    assert hasattr(s, "classes")
+
+
+# --------------------------------------------------------------------------- #
+# which checkpoint to score
+# --------------------------------------------------------------------------- #
+def test_the_overall_winner_is_preferred_over_the_ema_file(tmp_path):
+    """rfdetr keeps _regular, _ema and _total, copying _total from whichever
+    won. Naming the EMA file scores the loser whenever the live weights were
+    better - which is the run this project has already seen (regular 0.4498,
+    ema 0.4475)."""
+    tm = load_script("training/train_model_rfdetr.py")
+    d = tmp_path / "run"
+    d.mkdir()
+    for n in ("checkpoint_best_ema.pth", "checkpoint_best_regular.pth",
+              "checkpoint_best_total.pth"):
+        (d / n).write_bytes(b"x")
+    assert tm._best_checkpoint(d).name == "checkpoint_best_total.pth"
+
+
+def test_it_falls_back_when_the_total_checkpoint_is_absent(tmp_path):
+    tm = load_script("training/train_model_rfdetr.py")
+    d = tmp_path / "run"
+    d.mkdir()
+    (d / "checkpoint_best_ema.pth").write_bytes(b"x")
+    assert tm._best_checkpoint(d).name == "checkpoint_best_ema.pth"
