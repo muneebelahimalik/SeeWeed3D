@@ -18,6 +18,7 @@ on PATH.
 | [1. Extract](#1-extract-recordings) | recordings → indexed frame pool | no |
 | [2. Curate](#2-curate-the-pool-optional) | drop redundant/bad frames | no |
 | [3. Prelabel with SAM 3](#3-prelabel-with-sam-3) | auto-annotations to correct | **yes** |
+| [3b. Mine the pool](#3b-mine-the-pool-for-the-next-batch) | pick the frames worth annotating next | **yes** |
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
 | [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
 | [6. Train Stage A](#6-train-stage-a-segmentation) | crop-vs-weed segmentation | **yes** |
@@ -27,7 +28,8 @@ on PATH.
 | [9. Inference](#9-run-inference) | predict on unlabelled frames; full RGB-D pipeline | yes (practically) |
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
-**Related:** [experiment tracking](experiment_tracking.md) ·
+**Related:** [growing the dataset](dataset_growth.md) ·
+[experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
 [LEP localization explained](lep_localization_explained.md)
 
@@ -230,6 +232,43 @@ guessing — extend `KNOWN_RENAMES` in the script if a genuinely new one turns u
 If you change the ontology later, you do **not** need to re-run SAM 3 — the
 same command above refreshes every existing session's label file in seconds
 without touching any mask, preview, or `instances_default.json`.
+
+---
+
+## 3b. Mine the pool for the next batch
+
+**Once a model exists, this replaces §3 for every subsequent round.** SAM 3
+proposes masks with generic classes; your own checkpoint knows this ontology, so
+the export is *correction* rather than annotation.
+
+```powershell
+conda activate sw-train
+python seeweed3d/annotation/mine_pool.py     # edit the config block first
+```
+
+It runs your model over the unlabelled pool, ranks every frame by how much
+annotating it would teach (uncertainty + class rarity + crop risk, then a
+diversity pass so you do not get 60 pictures of one plant), and writes
+`cvat_ready/` plus `instances_default.json` — the same layout the SAM 3
+prelabelers produce, so §4 is unchanged.
+
+| Setting | Note |
+|---|---|
+| `HOLDOUT_SESSIONS` | **use it.** A session you intend as a test set stops being one the moment it is annotated into training, and this is the last point where that is preventable |
+| `CONF` | 0.20 — *below* deployment. A spurious mask costs one delete; a missing one costs you noticing an absence |
+| `STRIDE` | 5. Consecutive ZED frames are near-identical; scanning all of them wastes inference on duplicates |
+| `BATCH_SIZE` | size it to what you will actually annotate this round |
+
+Frames already in `seg_manifest.json` are excluded automatically — the same
+frame in two CVAT tasks produces two versions of the truth.
+
+> These are **predictions, not truth**. The model's recall is well under 1.0, so
+> every frame is missing instances — and the ones it missed are worth the most.
+> Open `analysis/report.html` and look at the missed-weed gallery before
+> starting a batch; it re-tunes your eye for what to look for.
+
+The full strategy — active learning, teacher–student, what to target and in what
+order — is in **[growing the dataset](dataset_growth.md)**.
 
 ---
 
