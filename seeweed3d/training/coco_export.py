@@ -126,7 +126,14 @@ def export(dataset_dir, out_dir, images_root=None, link=False, overwrite=False):
                 f"choose an empty directory.")
         shutil.rmtree(out)
 
-    summary = {"classes": classes, "splits": {}, "out_dir": str(out)}
+    # category_id -> class name, recorded so INFERENCE can map predictions back
+    # by id instead of by position. rfdetr remaps sparse ids to contiguous
+    # labels for training and then maps them BACK to the original category_id
+    # at predict time, so a model trained on ids 1..N predicts 1..N - not
+    # 0..N-1. Guessing an offset there mislabels plants, and mislabelling the
+    # crop is a laser pointed at an onion.
+    summary = {"classes": classes, "splits": {}, "out_dir": str(out),
+               "category_ids": {str(i + 1): c for i, c in enumerate(classes)}}
     for split, dirname in SPLIT_DIRS.items():
         frames = [f for f in doc["frames"] if f.get("split") == split]
         if not frames:

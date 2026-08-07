@@ -637,6 +637,9 @@ trains at 1008 px with an effective batch of 16 on modest VRAM.
 | `MULTI_SCALE` | trains across scales; helps small objects |
 | `EARLY_STOPPING` / `PATIENCE` | built in |
 | `GRAD_ACCUM` | effective batch 16 on small VRAM, instead of actually training at batch 2 |
+| `LR_SCHEDULER` | **`cosine`.** rfdetr defaults to `step` with `lr_drop=100`, so on any run under 100 epochs the step never fires and the LR is **constant start to finish** |
+| `WARMUP_EPOCHS` | the detection head is re-initialised for your class count, so step 0 is a random classifier at full LR beside a pretrained backbone |
+| `PATIENCE` | **25, not rfdetr's 10.** The re-initialised head leaves whole classes at AP 0.000 for the first several epochs; patience 10 stopped a 60-epoch run at 23 with a class still improving |
 | — | no anchors at all: DETR set prediction, so the anchor-size trap that cost the Mask R-CNN path its small weeds cannot occur in the same form |
 
 Leave the three loss coefficients at `None` for the first run — that uses the

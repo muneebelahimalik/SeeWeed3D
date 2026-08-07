@@ -356,6 +356,21 @@ class RFDETRSegmenter:
                    Mask R-CNN: crop_index() would point at the wrong class and
                    every onion would be handed to the laser as a weed.
 
+    AND THE IDS ARE NOT WHAT THE DOCUMENTATION SAYS
+    ------------------------------------------------
+    rfdetr's docstring promises "a 0-based index into class_names" for a
+    fine-tuned model. It is not. Its COCO loader remaps sparse category ids to
+    contiguous labels for TRAINING and then maps them BACK to the original
+    category_id at predict time, so a model trained on ids 1..N predicts 1..N.
+    Subtracting one is not a fix either - it is the same guess with a different
+    off-by-one waiting on the next dataset.
+
+    So the id -> name mapping is READ, never inferred: from `category_ids` in
+    the run config, or failing that from the COCO annotations the run was built
+    from. Neither present means the run predates this and must be re-exported;
+    it is not something to guess at when the cost of being wrong is a laser
+    aimed at the crop.
+
     train_seg_rfdetr.py writes all three to `rfdetr_train_config.json` beside
     the checkpoint, and this reads them back. Passing them explicitly overrides
     the sidecar; a MISSING sidecar with nothing passed is an error, not a
@@ -368,24 +383,47 @@ class RFDETRSegmenter:
                 "preview": "RFDETRSegPreview"}
 
     def __init__(self, weights, conf=0.25, device="cpu", max_det=300,
-                 resolution=None, variant=None, classes=None):
+                 resolution=None, variant=None, classes=None,
+                 category_ids=None):
         self.weights = str(weights)
         self.conf, self.device = conf, device
         self.max_det = max_det
         self.resolution = resolution
         self.variant = variant
         self.classes = list(classes) if classes else None
+        self._id_to_name = ({int(k): v for k, v in category_ids.items()}
+                            if category_ids else None)
         self._model = None
 
     def sidecar(self):
         """The training config written next to the checkpoint, or {}."""
-        p = Path(self.weights).parent / "rfdetr_train_config.json"
-        if not p.exists():
-            return {}
+        return self._read_json(
+            Path(self.weights).parent / "rfdetr_train_config.json")
+
+    @staticmethod
+    def _read_json(p):
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            return json.loads(Path(p).read_text(encoding="utf-8"))
         except (ValueError, OSError):
             return {}
+
+    def _category_ids(self, cfg):
+        """{predicted class id -> class name}.
+
+        Preferred source is `category_ids` in the run config. A run made before
+        that was recorded falls back to the COCO annotations sitting in the run
+        directory, which carry the same information - so an existing checkpoint
+        stays usable without retraining."""
+        raw = cfg.get("category_ids")
+        if raw:
+            return {int(k): v for k, v in raw.items()}
+        for rel in ("coco/train/_annotations.coco.json",
+                    "coco/valid/_annotations.coco.json"):
+            doc = self._read_json(Path(self.weights).parent / rel)
+            cats = doc.get("categories")
+            if cats:
+                return {int(c["id"]): c["name"] for c in cats}
+        return {}
 
     def load(self):
         try:
@@ -403,6 +441,8 @@ class RFDETRSegmenter:
         resolution = self.resolution or cfg.get("resolution")
         if self.classes is None:
             self.classes = list(cfg.get("classes") or []) or None
+        if self._id_to_name is None:
+            self._id_to_name = self._category_ids(cfg) or None
 
         if not (variant and resolution and self.classes):
             raise SystemExit(
@@ -443,25 +483,48 @@ class RFDETRSegmenter:
                               names=names)
 
         ids = np.asarray(det.class_id, int)
-        # A fine-tuned rfdetr model emits a 0-based index into the class list
-        # the dataset was built with, which coco_export wrote in exactly this
-        # order. An index outside it means that assumption broke - and the
-        # damage would be a silently mislabelled crop, so it fails loudly.
-        if len(ids) and (ids.min() < 0 or ids.max() >= len(names)):
-            raise SystemExit(
-                f"ERROR: {self.weights} predicted class id "
-                f"{int(ids.max())} but was loaded with {len(names)} classes "
-                f"{names}.\nThe checkpoint and its recorded class list "
-                f"disagree; re-export the dataset and retrain rather than "
-                f"trusting this mapping.")
+        idx = self.map_class_ids(ids, names)
 
         xyxy = np.asarray(det.xyxy, float)
         boxes = np.stack([xyxy[:, 0], xyxy[:, 1],
                           xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]], 1)
         order = np.argsort(-np.asarray(det.confidence, float))[: self.max_det]
         return Detections(np.asarray(masks, bool)[order], boxes[order],
-                          ids[order], np.asarray(det.confidence, float)[order],
+                          idx[order], np.asarray(det.confidence, float)[order],
                           w, h, names=names)
+
+    def map_class_ids(self, ids, names):
+        """Predicted category ids -> indices into `names`.
+
+        Read from the recorded mapping, never inferred from the values. An id
+        the mapping cannot explain, or a name not in this model's class list,
+        stops the run: a silently mislabelled plant here is a laser pointed at
+        an onion, which is not a failure to discover in the field."""
+        ids = np.asarray(ids, int)
+        if not len(ids):
+            return ids
+        if not self._id_to_name:
+            raise SystemExit(
+                f"ERROR: {self.weights} has no recorded category-id mapping.\n"
+                f"Expected 'category_ids' in "
+                f"{Path(self.weights).parent / 'rfdetr_train_config.json'}, or "
+                f"the COCO annotations under "
+                f"{Path(self.weights).parent / 'coco'}.\n"
+                f"rfdetr predicts the ORIGINAL COCO category_id, not a 0-based "
+                f"index, so without this the class of every prediction - "
+                f"including the crop - would be a guess.")
+        out = np.empty(len(ids), int)
+        for k, i in enumerate(ids):
+            name = self._id_to_name.get(int(i))
+            if name is None or name not in names:
+                raise SystemExit(
+                    f"ERROR: {self.weights} predicted class id {int(i)}, which "
+                    f"maps to {name!r} - not one of this model's classes "
+                    f"{names}.\nThe checkpoint and its recorded mapping "
+                    f"disagree; re-export the dataset and retrain rather than "
+                    f"trusting this.")
+            out[k] = names.index(name)
+        return out
 
 
 # Backend registry. `ultralytics` is present but never selected by default -

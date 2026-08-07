@@ -334,10 +334,18 @@ from seeweed3d.common.ontology import CLASSES, CROP_CLASS       # noqa: E402
 ACTIVE = ["cutleaf_evening_primrose", "grass_weed", "other_weed", CROP_CLASS]
 
 
-def _run_dir(tmp_path, **over):
+def _run_dir(tmp_path, coco_only=False, **over):
     d = tmp_path / "rfdetr_v1"
     d.mkdir(exist_ok=True)
-    cfg = {"variant": "medium", "resolution": 1008, "classes": list(ACTIVE)}
+    cfg = {"variant": "medium", "resolution": 1008, "classes": list(ACTIVE),
+           "category_ids": {str(i + 1): c for i, c in enumerate(ACTIVE)}}
+    if coco_only:
+        cfg.pop("category_ids")
+        a = d / "coco" / "train"
+        a.mkdir(parents=True, exist_ok=True)
+        (a / "_annotations.coco.json").write_text(_json.dumps(
+            {"categories": [{"id": i + 1, "name": c}
+                            for i, c in enumerate(ACTIVE)]}))
     cfg.update(over)
     (d / "rfdetr_train_config.json").write_text(_json.dumps(cfg))
     (d / "checkpoint_best_total.pth").write_bytes(b"x")
@@ -345,7 +353,16 @@ def _run_dir(tmp_path, **over):
 
 
 def _stub(seg_obj, ids, n=None):
-    """Attach a fake rfdetr model returning supervision-like detections."""
+    """Attach a fake rfdetr model returning supervision-like detections.
+
+    Also does what load() would do apart from building the network, so the
+    class list and the id mapping come from the run config exactly as they do
+    in a real run."""
+    cfg = seg_obj.sidecar()
+    if seg_obj.classes is None:
+        seg_obj.classes = list(cfg.get("classes") or [])
+    if seg_obj._id_to_name is None:
+        seg_obj._id_to_name = seg_obj._category_ids(cfg) or None
     n = len(ids) if n is None else n
 
     class _Sv:
@@ -401,8 +418,7 @@ def test_predictions_carry_the_models_own_class_list(tmp_path):
     """Without names= the Detections falls back to the FULL ontology while the
     model emits indices into the 4-class active list."""
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
-                                 classes=ACTIVE), [0, 3])
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [1, 4])
     det = s(_np.zeros((8, 8, 3), _np.uint8))
     assert det.names == ACTIVE
     assert det.class_name(1) == CROP_CLASS
@@ -414,8 +430,7 @@ def test_the_crop_is_still_the_crop_under_the_reduced_class_list(tmp_path):
     mask would come back empty and every onion would be handed to the laser."""
     assert ACTIVE.index(CROP_CLASS) != CLASSES.index(CROP_CLASS)
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
-                                 classes=ACTIVE), [3, 1])
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [4, 2])
     det = s(_np.zeros((8, 8, 3), _np.uint8))
     assert det.crop_index() == 3
     assert det.onion_safety_mask().any(), "crop mask lost"
@@ -426,16 +441,14 @@ def test_a_class_id_outside_the_recorded_list_fails_loudly(tmp_path):
     """Silently mislabelling a plant here is a crop-safety failure, so an
     index the class list cannot explain must stop the run."""
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
-                                 classes=ACTIVE), [0, 9])
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [1, 9])
     with pytest.raises(SystemExit, match="class id"):
         s(_np.zeros((8, 8, 3), _np.uint8))
 
 
 def test_an_empty_prediction_still_reports_the_right_class_list(tmp_path):
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth",
-                                 classes=ACTIVE), [], n=0)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [], n=0)
     s._model.predict = lambda *_a, **_k: type(
         "E", (), {"mask": None, "__len__": lambda s: 0})()
     det = s(_np.zeros((8, 8, 3), _np.uint8))
@@ -473,3 +486,115 @@ def test_it_falls_back_when_the_total_checkpoint_is_absent(tmp_path):
     d.mkdir()
     (d / "checkpoint_best_ema.pth").write_bytes(b"x")
     assert tm._best_checkpoint(d).name == "checkpoint_best_ema.pth"
+
+
+# --------------------------------------------------------------------------- #
+# the id -> class mapping
+#
+# rfdetr's docstring promises "a 0-based index into class_names" for a
+# fine-tuned model. It is not: its COCO loader remaps sparse category ids to
+# contiguous labels for TRAINING and maps them BACK to the original category_id
+# at predict time. A model trained on ids 1..4 predicts 1..4, and the first
+# real run raised on exactly that.
+# --------------------------------------------------------------------------- #
+def _mapped(tmp_path, ids, **kw):
+    d = _run_dir(tmp_path, **kw)
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
+    cfg = s.sidecar()
+    s.classes = list(cfg["classes"])
+    s._id_to_name = s._category_ids(cfg)
+    return s.map_class_ids(_np.asarray(ids), s.classes)
+
+
+def test_ids_are_one_based_category_ids_not_zero_based_indices(tmp_path):
+    """The bug that stopped the first evaluation: id 4 with 4 classes."""
+    assert _mapped(tmp_path, [1, 2, 3, 4]).tolist() == [0, 1, 2, 3]
+
+
+def test_the_crop_id_maps_to_the_crop(tmp_path):
+    idx = _mapped(tmp_path, [4])
+    assert ACTIVE[idx[0]] == CROP_CLASS
+
+
+def test_the_mapping_is_read_not_inferred_by_subtracting_one(tmp_path):
+    """Subtracting 1 is the same guess with a different off-by-one waiting on
+    the next dataset. A non-contiguous id set must still resolve."""
+    d = _run_dir(tmp_path, category_ids={"7": "grass_weed", "9": CROP_CLASS})
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
+    cfg = s.sidecar()
+    s.classes, s._id_to_name = list(cfg["classes"]), s._category_ids(cfg)
+    assert s.map_class_ids(_np.asarray([9, 7]), s.classes).tolist() == [3, 1]
+
+
+def test_an_older_run_falls_back_to_its_coco_annotations(tmp_path):
+    """A checkpoint trained before category_ids was recorded stays usable: the
+    COCO tree in the run directory carries the same information."""
+    assert _mapped(tmp_path, [1, 4], coco_only=True).tolist() == [0, 3]
+
+
+def test_no_mapping_anywhere_refuses_to_guess(tmp_path):
+    s = sg.RFDETRSegmenter(tmp_path / "loose.pth", classes=ACTIVE)
+    with pytest.raises(SystemExit, match="no recorded category-id mapping"):
+        s.map_class_ids(_np.asarray([1]), ACTIVE)
+
+
+def test_an_id_naming_a_class_this_model_lacks_is_refused(tmp_path):
+    d = _run_dir(tmp_path, category_ids={"1": "bindweed"})
+    s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
+    cfg = s.sidecar()
+    s.classes, s._id_to_name = list(cfg["classes"]), s._category_ids(cfg)
+    with pytest.raises(SystemExit, match="not one of this model's classes"):
+        s.map_class_ids(_np.asarray([1]), s.classes)
+
+
+def test_the_export_records_the_ids_it_assigned(tmp_path):
+    """coco_export is the only place that knows which id each class got, so it
+    is the only honest source for the reverse mapping."""
+    ds = _dataset(tmp_path, classes=("grass_weed", "onion_plant"))
+    s = ce.export(ds, tmp_path / "coco")
+    assert s["category_ids"] == {"1": "grass_weed", "2": "onion_plant"}
+    coco = json.loads(
+        (tmp_path / "coco" / "train" / "_annotations.coco.json").read_text())
+    assert {str(c["id"]): c["name"] for c in coco["categories"]} == \
+        s["category_ids"]
+
+
+# --------------------------------------------------------------------------- #
+# the schedule
+# --------------------------------------------------------------------------- #
+def test_the_learning_rate_actually_decays():
+    """rfdetr defaults to lr_scheduler='step' with lr_drop=100, so on a
+    60-epoch run the step never fires and the LR is constant start to finish -
+    which is what the first run did."""
+    from rfdetr import config as C
+    tc = C.TrainConfig.model_fields
+    assert tc["lr_scheduler"].default == "step"
+    assert tc["lr_drop"].default > 60, "the default drop is past a normal run"
+    tm = load_script("training/train_model_rfdetr.py")
+    assert tm.CONFIG["LR_SCHEDULER"] == "cosine"
+    assert tm.CONFIG["EPOCHS"] < tc["lr_drop"].default
+
+
+def test_the_schedule_reaches_the_trainer(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(rf, "train", lambda *a, **k: seen.update(k))
+    tm = load_script("training/train_model_rfdetr.py")
+    monkeypatch.setattr(tm, "CONFIG", dict(tm.CONFIG))
+    import training.train_seg_rfdetr as _t
+    monkeypatch.setattr(_t, "train", lambda *a, **k: seen.update(k))
+    ds = _dataset(tmp_path)
+    c = dict(tm.CONFIG)
+    c.update({"DATASET_DIR": str(ds), "IMAGES_ROOT": str(tmp_path),
+              "RUN_DIR": str(tmp_path / "run")})
+    tm.main(c)
+    assert seen["lr_scheduler"] == "cosine"
+    assert seen["warmup_epochs"] == 1.0
+    assert seen["patience"] == tm.CONFIG["PATIENCE"]
+
+
+def test_patience_outlasts_the_dead_head_epochs():
+    """The re-initialised detection head leaves whole classes at AP 0.000 for
+    the first several epochs; patience 10 stopped a 60-epoch run at 23 while a
+    class was still improving."""
+    tm = load_script("training/train_model_rfdetr.py")
+    assert tm.CONFIG["PATIENCE"] >= 20

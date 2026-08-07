@@ -106,8 +106,24 @@ CONFIG = {
     # -- Advanced features -----------------------------------------------------
     "USE_EMA": True,             # averaged weights; usually a small free gain
     "MULTI_SCALE": True,         # trains across scales, helps small objects
+
+    # "cosine" | "step". RF-DETR's own default is "step" with lr_drop=100, so
+    # on any run shorter than 100 epochs the step NEVER FIRES and the learning
+    # rate is constant start to finish - the first run here ended at the same
+    # 1e-4 it began with. "cosine" sizes itself to EPOCHS and actually decays.
+    "LR_SCHEDULER": "cosine",
+
+    # The detection head is re-initialised for our class count, so step 0 is a
+    # random classifier at full LR next to a pretrained backbone.
+    "WARMUP_EPOCHS": 1.0,
+
     "EARLY_STOPPING": True,
-    "PATIENCE": 10,
+
+    # EVALUATED epochs without improvement. Higher than rfdetr's 10 by design:
+    # the re-initialised head leaves whole classes at AP 0.000 for the first
+    # several epochs (cutleaf was dead until epoch 6 here), and patience 10
+    # stopped a 60-epoch run at 23 while other_weed was still improving.
+    "PATIENCE": 25,
 
     # -- Loss weights ----------------------------------------------------------
     # None = the model's defaults (mask_ce 5.0, mask_dice 5.0, cls 1.0).
@@ -160,6 +176,7 @@ def main(cfg=None):
           link=c["LINK_IMAGES"], overwrite=True,
           early_stopping=c["EARLY_STOPPING"], patience=c["PATIENCE"],
           use_ema=c["USE_EMA"], multi_scale=c["MULTI_SCALE"],
+          lr_scheduler=c["LR_SCHEDULER"], warmup_epochs=c["WARMUP_EPOCHS"],
           mask_ce_coef=c["MASK_CE_COEF"], mask_dice_coef=c["MASK_DICE_COEF"],
           cls_coef=c["CLS_COEF"], track=c["TRACK"])
 

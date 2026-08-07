@@ -98,10 +98,10 @@ def check_resolution(variant, resolution):
 def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
           batch=2, grad_accum=8, lr=1e-4, device="cuda", workers=2,
           coco_dir=None, images_root=None, link=False, overwrite=False,
-          early_stopping=True, patience=10, use_ema=True,
+          early_stopping=True, patience=25, use_ema=True,
           mask_ce_coef=None, mask_dice_coef=None, cls_coef=None,
           multi_scale=True, track="auto", allow_default_resolution=False,
-          extra=None):
+          lr_scheduler="cosine", warmup_epochs=1.0, extra=None):
     if variant not in VARIANTS:
         raise SystemExit(f"ERROR: --variant must be one of "
                          f"{sorted(VARIANTS)}; got {variant!r}")
@@ -185,6 +185,19 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
         "early_stopping": early_stopping,
         "early_stopping_patience": patience,
         "multi_scale": multi_scale,
+        # The LR schedule. rfdetr defaults to lr_scheduler="step" with
+        # lr_drop=100, so on any run shorter than 100 epochs the step never
+        # fires and the learning rate is CONSTANT for the whole run - which is
+        # what the first run did, finishing at the same 1e-4 it started at and
+        # never getting the decayed fine-tuning phase that usually adds the
+        # last few points. "cosine" sizes itself to `epochs`, so it decays
+        # whatever the schedule length.
+        "lr_scheduler": lr_scheduler,
+        # The detection head is re-initialised for our class count, so the
+        # first steps are a randomly-initialised classifier at full LR. A short
+        # warmup costs one epoch and stops that from perturbing the pretrained
+        # backbone.
+        "warmup_epochs": warmup_epochs,
         "tensorboard": want_tb,
         "mlflow": want_mf,
         # rfdetr names the MLflow experiment after `project` and the run after
@@ -212,8 +225,16 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     print(f"  losses: mask_ce={cfg.get('mask_ce_loss_coef', 'default')} "
           f"mask_dice={cfg.get('mask_dice_loss_coef', 'default')} "
           f"cls={cfg.get('cls_loss_coef', 'default')}")
+    print(f"  schedule: lr {lr} {lr_scheduler} | warmup {warmup_epochs} ep | "
+          f"{epochs} epochs | early stop "
+          f"{f'patience {patience}' if early_stopping else 'off'}")
+    # category_ids travels with the run because rfdetr predicts the ORIGINAL
+    # COCO category_id, not a 0-based index - see coco_export. Without it the
+    # segmenter has to guess an offset, and the wrong guess points crop safety
+    # at the wrong class.
     (out / "rfdetr_train_config.json").write_text(
-        json.dumps({**cfg, "variant": variant, "classes": summary["classes"]},
+        json.dumps({**cfg, "variant": variant, "classes": summary["classes"],
+                    "category_ids": summary["category_ids"]},
                    indent=2), encoding="utf-8")
 
     import rfdetr as R
@@ -330,7 +351,16 @@ def main(argv=None):
                    help="hardlink images instead of copying")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--no-early-stopping", action="store_true")
-    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--patience", type=int, default=25,
+                   help="EVALUATED epochs without improvement before stopping. "
+                        "Higher than rfdetr's 10 on purpose: the re-initialised "
+                        "head leaves some classes at AP 0 for the first several "
+                        "epochs, and 10 stopped a 60-epoch run at 23 while a "
+                        "class was still improving.")
+    p.add_argument("--lr-scheduler", default="cosine",
+                   help="'cosine' (decays over --epochs) or 'step' (rfdetr's "
+                        "default, which never fires below 100 epochs)")
+    p.add_argument("--warmup-epochs", type=float, default=1.0)
     p.add_argument("--no-ema", action="store_true")
     p.add_argument("--mask-ce-coef", type=float, default=None)
     p.add_argument("--mask-dice-coef", type=float, default=None)
@@ -350,6 +380,7 @@ def main(argv=None):
           use_ema=not a.no_ema, mask_ce_coef=a.mask_ce_coef,
           mask_dice_coef=a.mask_dice_coef, cls_coef=a.cls_coef,
           multi_scale=not a.no_multi_scale, track=a.track,
+          lr_scheduler=a.lr_scheduler, warmup_epochs=a.warmup_epochs,
           allow_default_resolution=a.allow_default_resolution)
 
 
