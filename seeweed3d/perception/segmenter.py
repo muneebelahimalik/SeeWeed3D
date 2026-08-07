@@ -356,20 +356,27 @@ class RFDETRSegmenter:
                    Mask R-CNN: crop_index() would point at the wrong class and
                    every onion would be handed to the laser as a weed.
 
-    AND THE IDS ARE NOT WHAT THE DOCUMENTATION SAYS
-    ------------------------------------------------
-    rfdetr's docstring promises "a 0-based index into class_names" for a
-    fine-tuned model. It is not. Its COCO loader remaps sparse category ids to
-    contiguous labels for TRAINING and then maps them BACK to the original
-    category_id at predict time, so a model trained on ids 1..N predicts 1..N.
-    Subtracting one is not a fix either - it is the same guess with a different
-    off-by-one waiting on the next dataset.
+    WHAT predict() ACTUALLY RETURNS
+    -------------------------------
+    A RAW model label: PostProcess computes `labels = topk_indexes %
+    out_logits.shape[2]`, and `label2cat` is used only by rfdetr's COCO
+    evaluator, never by predict(). So the value is a 0-based label, and the
+    dataset's COCO category ids never appear in a prediction.
 
-    So the id -> name mapping is READ, never inferred: from `category_ids` in
-    the run config, or failing that from the COCO annotations the run was built
-    from. Neither present means the run predates this and must be re-exported;
-    it is not something to guess at when the cost of being wrong is a laser
-    aimed at the crop.
+    Those labels come from the loader's `cat2label`, which is
+    `{cat_id: i for i, cat_id in enumerate(sorted(coco.cats))}` - label i is
+    the i-th category in ASCENDING CATEGORY-ID order. That is the mapping
+    inverted here. Recording the ids rather than assuming them keeps it exact
+    for a non-contiguous id set too.
+
+    THE EXTRA LOGIT
+    ---------------
+    num_classes=4 builds a FIVE-output classifier - LW-DETR allocates
+    num_classes + 1. Slot 4 is never a training target, since cat2label emits
+    0..3, so it is an unused logit that can still win a top-k slot at a low
+    threshold. It is dropped, not treated as an error: it is structural, and
+    erroring on it would make the AP sweep unrunnable. Anything ABOVE that slot
+    is a genuine disagreement and still stops the run.
 
     train_seg_rfdetr.py writes all three to `rfdetr_train_config.json` beside
     the checkpoint, and this reads them back. Passing them explicitly overrides
@@ -408,7 +415,7 @@ class RFDETRSegmenter:
             return {}
 
     def _category_ids(self, cfg):
-        """{predicted class id -> class name}.
+        """{COCO category id -> class name}.
 
         Preferred source is `category_ids` in the run config. A run made before
         that was recorded falls back to the COCO annotations sitting in the run
@@ -483,48 +490,66 @@ class RFDETRSegmenter:
                               names=names)
 
         ids = np.asarray(det.class_id, int)
-        idx = self.map_class_ids(ids, names)
+        idx, keep = self.map_class_ids(ids, names)
 
-        xyxy = np.asarray(det.xyxy, float)
+        xyxy = np.asarray(det.xyxy, float)[keep]
         boxes = np.stack([xyxy[:, 0], xyxy[:, 1],
                           xyxy[:, 2] - xyxy[:, 0], xyxy[:, 3] - xyxy[:, 1]], 1)
-        order = np.argsort(-np.asarray(det.confidence, float))[: self.max_det]
-        return Detections(np.asarray(masks, bool)[order], boxes[order],
-                          idx[order], np.asarray(det.confidence, float)[order],
+        conf = np.asarray(det.confidence, float)[keep]
+        msk = np.asarray(masks, bool)[keep]
+        order = np.argsort(-conf)[: self.max_det]
+        return Detections(msk[order], boxes[order], idx[order], conf[order],
                           w, h, names=names)
 
-    def map_class_ids(self, ids, names):
-        """Predicted category ids -> indices into `names`.
+    def label_order(self):
+        """Class names in the order the model labels them.
 
-        Read from the recorded mapping, never inferred from the values. An id
-        the mapping cannot explain, or a name not in this model's class list,
-        stops the run: a silently mislabelled plant here is a laser pointed at
-        an onion, which is not a failure to discover in the field."""
+        rfdetr's loader assigns label i to the i-th category in ascending
+        category-id order, so this is `cat2label` inverted. Derived from the
+        recorded ids rather than from `self.classes` directly, because the two
+        only coincide when the ids happen to be ascending in class order."""
+        if self._id_to_name:
+            return [n for _, n in sorted(self._id_to_name.items())]
+        return list(self.classes or [])
+
+    def map_class_ids(self, ids, names):
+        """Raw model labels -> indices into `names`, dropping the unused slot.
+
+        Returns (indices, keep_mask). A label equal to len(order) is the
+        num_classes+1 logit that has no training target; it is discarded. A
+        label beyond that, or one naming a class this model does not have, is a
+        real disagreement and stops the run - a silently mislabelled plant here
+        is a laser pointed at an onion."""
         ids = np.asarray(ids, int)
         if not len(ids):
-            return ids
-        if not self._id_to_name:
+            return ids, np.ones(0, bool)
+        order = self.label_order()
+        if not order:
             raise SystemExit(
-                f"ERROR: {self.weights} has no recorded category-id mapping.\n"
-                f"Expected 'category_ids' in "
+                f"ERROR: {self.weights} has no recorded class list.\n"
+                f"Expected 'classes'/'category_ids' in "
                 f"{Path(self.weights).parent / 'rfdetr_train_config.json'}, or "
                 f"the COCO annotations under "
-                f"{Path(self.weights).parent / 'coco'}.\n"
-                f"rfdetr predicts the ORIGINAL COCO category_id, not a 0-based "
-                f"index, so without this the class of every prediction - "
-                f"including the crop - would be a guess.")
-        out = np.empty(len(ids), int)
-        for k, i in enumerate(ids):
-            name = self._id_to_name.get(int(i))
-            if name is None or name not in names:
+                f"{Path(self.weights).parent / 'coco'}.")
+
+        keep = ids != len(order)          # the unused num_classes+1 slot
+        out = np.empty(int(keep.sum()), int)
+        for k, i in enumerate(ids[keep]):
+            if not 0 <= i < len(order):
                 raise SystemExit(
-                    f"ERROR: {self.weights} predicted class id {int(i)}, which "
+                    f"ERROR: {self.weights} predicted label {int(i)}, outside "
+                    f"the {len(order)} classes it records {order}.\n"
+                    f"The checkpoint and its recorded class list disagree; "
+                    f"re-export the dataset and retrain rather than trusting "
+                    f"this mapping.")
+            name = order[int(i)]
+            if name not in names:
+                raise SystemExit(
+                    f"ERROR: {self.weights} predicted label {int(i)}, which "
                     f"maps to {name!r} - not one of this model's classes "
-                    f"{names}.\nThe checkpoint and its recorded mapping "
-                    f"disagree; re-export the dataset and retrain rather than "
-                    f"trusting this.")
+                    f"{names}.")
             out[k] = names.index(name)
-        return out
+        return out, keep
 
 
 # Backend registry. `ultralytics` is present but never selected by default -

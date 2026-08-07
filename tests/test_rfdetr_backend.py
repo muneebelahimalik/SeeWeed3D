@@ -418,7 +418,7 @@ def test_predictions_carry_the_models_own_class_list(tmp_path):
     """Without names= the Detections falls back to the FULL ontology while the
     model emits indices into the 4-class active list."""
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [1, 4])
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [0, 3])
     det = s(_np.zeros((8, 8, 3), _np.uint8))
     assert det.names == ACTIVE
     assert det.class_name(1) == CROP_CLASS
@@ -430,7 +430,7 @@ def test_the_crop_is_still_the_crop_under_the_reduced_class_list(tmp_path):
     mask would come back empty and every onion would be handed to the laser."""
     assert ACTIVE.index(CROP_CLASS) != CLASSES.index(CROP_CLASS)
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [4, 2])
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [3, 1])
     det = s(_np.zeros((8, 8, 3), _np.uint8))
     assert det.crop_index() == 3
     assert det.onion_safety_mask().any(), "crop mask lost"
@@ -441,8 +441,8 @@ def test_a_class_id_outside_the_recorded_list_fails_loudly(tmp_path):
     """Silently mislabelling a plant here is a crop-safety failure, so an
     index the class list cannot explain must stop the run."""
     d = _run_dir(tmp_path)
-    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [1, 9])
-    with pytest.raises(SystemExit, match="class id"):
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [0, 9])
+    with pytest.raises(SystemExit, match="outside the 4 classes"):
         s(_np.zeros((8, 8, 3), _np.uint8))
 
 
@@ -503,53 +503,89 @@ def _mapped(tmp_path, ids, **kw):
     cfg = s.sidecar()
     s.classes = list(cfg["classes"])
     s._id_to_name = s._category_ids(cfg)
-    return s.map_class_ids(_np.asarray(ids), s.classes)
+    idx, keep = s.map_class_ids(_np.asarray(ids), s.classes)
+    return idx, keep
 
 
-def test_ids_are_one_based_category_ids_not_zero_based_indices(tmp_path):
-    """The bug that stopped the first evaluation: id 4 with 4 classes."""
-    assert _mapped(tmp_path, [1, 2, 3, 4]).tolist() == [0, 1, 2, 3]
+def test_labels_are_zero_based_raw_model_outputs(tmp_path):
+    """PostProcess computes `labels = topk_indexes % out_logits.shape[2]`, and
+    label2cat is used only by rfdetr's COCO evaluator - never by predict(). So
+    the dataset's category ids never appear in a prediction."""
+    idx, _ = _mapped(tmp_path, [0, 1, 2, 3])
+    assert idx.tolist() == [0, 1, 2, 3]
 
 
-def test_the_crop_id_maps_to_the_crop(tmp_path):
-    idx = _mapped(tmp_path, [4])
+def test_the_crop_label_maps_to_the_crop(tmp_path):
+    idx, _ = _mapped(tmp_path, [3])
     assert ACTIVE[idx[0]] == CROP_CLASS
 
 
-def test_the_mapping_is_read_not_inferred_by_subtracting_one(tmp_path):
-    """Subtracting 1 is the same guess with a different off-by-one waiting on
-    the next dataset. A non-contiguous id set must still resolve."""
-    d = _run_dir(tmp_path, category_ids={"7": "grass_weed", "9": CROP_CLASS})
+def test_the_unused_extra_logit_is_dropped_not_treated_as_an_error(tmp_path):
+    """num_classes=4 builds a FIVE-output classifier - LW-DETR allocates
+    num_classes + 1 - and slot 4 has no training target. It can still win a
+    top-k slot at a low threshold, so erroring on it makes the AP sweep, which
+    scores down to 0.05, unrunnable."""
+    idx, keep = _mapped(tmp_path, [0, 4, 3])
+    assert keep.tolist() == [True, False, True]
+    assert idx.tolist() == [0, 3]
+
+
+def test_a_label_beyond_the_extra_slot_still_stops_the_run(tmp_path):
+    with pytest.raises(SystemExit, match="outside the 4 classes"):
+        _mapped(tmp_path, [9])
+
+
+def test_labels_follow_ascending_category_id_order(tmp_path):
+    """cat2label is {cat_id: i for i, cat_id in enumerate(sorted(cats))}, so
+    label i is the i-th category BY ID - not the i-th entry of the class list.
+    With ids out of class order the two differ, and only one is right."""
+    d = _run_dir(tmp_path, category_ids={"9": "grass_weed", "3": CROP_CLASS})
     s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
     cfg = s.sidecar()
     s.classes, s._id_to_name = list(cfg["classes"]), s._category_ids(cfg)
-    assert s.map_class_ids(_np.asarray([9, 7]), s.classes).tolist() == [3, 1]
+    assert s.label_order() == [CROP_CLASS, "grass_weed"]     # id 3 then id 9
+    idx, _ = s.map_class_ids(_np.asarray([0, 1]), s.classes)
+    assert [s.classes[i] for i in idx] == [CROP_CLASS, "grass_weed"]
 
 
 def test_an_older_run_falls_back_to_its_coco_annotations(tmp_path):
     """A checkpoint trained before category_ids was recorded stays usable: the
     COCO tree in the run directory carries the same information."""
-    assert _mapped(tmp_path, [1, 4], coco_only=True).tolist() == [0, 3]
+    idx, _ = _mapped(tmp_path, [0, 3], coco_only=True)
+    assert idx.tolist() == [0, 3]
 
 
-def test_no_mapping_anywhere_refuses_to_guess(tmp_path):
-    s = sg.RFDETRSegmenter(tmp_path / "loose.pth", classes=ACTIVE)
-    with pytest.raises(SystemExit, match="no recorded category-id mapping"):
-        s.map_class_ids(_np.asarray([1]), ACTIVE)
+def test_no_class_list_anywhere_refuses_to_guess(tmp_path):
+    s = sg.RFDETRSegmenter(tmp_path / "loose.pth")
+    with pytest.raises(SystemExit, match="no recorded class list"):
+        s.map_class_ids(_np.asarray([0]), [])
 
 
-def test_an_id_naming_a_class_this_model_lacks_is_refused(tmp_path):
+def test_a_label_naming_a_class_this_model_lacks_is_refused(tmp_path):
     d = _run_dir(tmp_path, category_ids={"1": "bindweed"})
     s = sg.RFDETRSegmenter(d / "checkpoint_best_total.pth")
     cfg = s.sidecar()
     s.classes, s._id_to_name = list(cfg["classes"]), s._category_ids(cfg)
     with pytest.raises(SystemExit, match="not one of this model's classes"):
-        s.map_class_ids(_np.asarray([1]), s.classes)
+        s.map_class_ids(_np.asarray([0]), s.classes)
+
+
+def test_dropping_the_extra_slot_keeps_masks_boxes_and_scores_aligned(tmp_path):
+    """The unused slot is removed from the ids AND from everything indexed
+    alongside them; a length mismatch would silently pair a mask with another
+    instance's class."""
+    d = _run_dir(tmp_path)
+    s = _stub(sg.RFDETRSegmenter(d / "checkpoint_best_total.pth"), [0, 4, 3])
+    det = s(_np.zeros((8, 8, 3), _np.uint8))
+    assert len(det) == 2
+    assert len(det.masks) == len(det.boxes) == len(det.classes) == 2
+    assert {det.class_name(i) for i in range(len(det))} == \
+        {ACTIVE[0], CROP_CLASS}
 
 
 def test_the_export_records_the_ids_it_assigned(tmp_path):
     """coco_export is the only place that knows which id each class got, so it
-    is the only honest source for the reverse mapping."""
+    is the only honest source for the label order."""
     ds = _dataset(tmp_path, classes=("grass_weed", "onion_plant"))
     s = ce.export(ds, tmp_path / "coco")
     assert s["category_ids"] == {"1": "grass_weed", "2": "onion_plant"}
@@ -577,9 +613,7 @@ def test_the_learning_rate_actually_decays():
 
 def test_the_schedule_reaches_the_trainer(tmp_path, monkeypatch):
     seen = {}
-    monkeypatch.setattr(rf, "train", lambda *a, **k: seen.update(k))
     tm = load_script("training/train_model_rfdetr.py")
-    monkeypatch.setattr(tm, "CONFIG", dict(tm.CONFIG))
     import training.train_seg_rfdetr as _t
     monkeypatch.setattr(_t, "train", lambda *a, **k: seen.update(k))
     ds = _dataset(tmp_path)
@@ -598,3 +632,12 @@ def test_patience_outlasts_the_dead_head_epochs():
     class was still improving."""
     tm = load_script("training/train_model_rfdetr.py")
     assert tm.CONFIG["PATIENCE"] >= 20
+
+
+def test_the_classifier_really_has_one_more_output_than_num_classes():
+    """The premise of dropping slot len(classes). If rfdetr ever stops
+    allocating num_classes + 1, this test fails and the drop becomes wrong."""
+    from rfdetr import RFDETRSegNano
+    m = RFDETRSegNano(num_classes=3, resolution=504)
+    w = dict(m.model.model.named_parameters())["class_embed.weight"]
+    assert w.shape[0] == 4
