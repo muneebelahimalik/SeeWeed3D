@@ -73,6 +73,13 @@ onnxruntime>=1.18
 #   ------------   ------------   ------------------------------------------
 #   maskrcnn       BSD-3-Clause   (none - torchvision, already above) DEFAULT
 #   rfdetr         Apache-2.0     python -m pip install rfdetr
+#                                 Verified working at 1.9.1: Dice+CE mask loss
+#                                 coefficients, EMA, early stopping,
+#                                 multi-scale, gradient accumulation and native
+#                                 tensorboard/mlflow flags are all exposed.
+#                                 Train with training/train_model_rfdetr.py -
+#                                 and SET THE RESOLUTION, since its 432 default
+#                                 is well below what small weeds survive.
 #   ultralytics    AGPL-3.0 (!)   python -m pip install ultralytics
 #
 # RF-DETR-Seg (Roboflow) is the recommended real-time upgrade once the prototype
@@ -85,7 +92,7 @@ onnxruntime>=1.18
 # conflict on Seg-XL/2XL, which may fall under Roboflow's Platform Model License
 # 1.0 - verify the licence of the specific checkpoint before shipping. The
 # smaller variants are the ones worth using here regardless.
-# rfdetr>=1.4
+# rfdetr>=1.9
 #
 # RTMDet-Ins (MMDetection, Apache-2.0) is a credible alternative - 52.8 AP at
 # 300+ FPS on a 3090 - but it is NOT wired up as a backend, because mmcv's CUDA
