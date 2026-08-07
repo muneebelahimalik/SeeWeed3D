@@ -143,12 +143,20 @@ def test_each_prediction_claims_a_different_ground_truth():
 EVAL_CLASSES = ["grass_weed", CROP_CLASS]
 
 
-def _crop_safety_dataset(tmp_path):
-    """One 20x20 frame whose top half (200 px) is ground-truth onion."""
+def _crop_safety_dataset(tmp_path, with_weed_gt=False):
+    """One 20x20 frame whose top half (200 px) is ground-truth onion.
+
+    with_weed_gt adds a weed in the bottom half, needed by any test that reads
+    a weed recall - without it that figure is undefined, not zero."""
     import cv2
     root = tmp_path / "sessions" / "s1" / "rgb"
     root.mkdir(parents=True)
     cv2.imwrite(str(root / "f.png"), np.zeros((20, 20, 3), np.uint8))
+    inst = [{"class_name": CROP_CLASS,
+             "polygons": [[0, 0, 19, 0, 19, 9, 0, 9]]}]
+    if with_weed_gt:
+        inst.append({"class_name": "grass_weed",
+                     "polygons": [[0, 10, 19, 10, 19, 19, 0, 19]]})
     ds = tmp_path / "ds"
     ds.mkdir()
     (ds / "seg_manifest.json").write_text(json.dumps({
@@ -156,13 +164,13 @@ def _crop_safety_dataset(tmp_path):
         "classes": EVAL_CLASSES,
         "frames": [{"session_id": "s1", "item_id": "f", "image_path": "f.png",
                     "width": 20, "height": 20, "split": "val",
-                    "instances": [{"class_name": CROP_CLASS,
-                                   "polygons": [[0, 0, 19, 0, 19, 9, 0, 9]]}]}],
+                    "instances": inst}],
     }))
     return ds
 
 
-def _run_with_predictions(tmp_path, monkeypatch, specs):
+def _run_with_predictions(tmp_path, monkeypatch, specs, full=False,
+                          sweep=(), scores=None, weed_gt=False):
     """specs: [(class_name, (y0, y1))] - each becomes a full-width band."""
     masks, cls = [], []
     for name, (y0, y1) in specs:
@@ -173,8 +181,9 @@ def _run_with_predictions(tmp_path, monkeypatch, specs):
     n = len(specs)
     det = seg.Detections(
         np.asarray(masks, bool) if n else np.zeros((0, 20, 20), bool),
-        np.zeros((n, 4)), np.asarray(cls, int), np.ones(n), 20, 20,
-        names=list(EVAL_CLASSES))
+        np.zeros((n, 4)), np.asarray(cls, int),
+        np.asarray(scores if scores is not None else [1.0] * n, float),
+        20, 20, names=list(EVAL_CLASSES))
 
     class _Fake:
         classes = list(EVAL_CLASSES)
@@ -185,8 +194,9 @@ def _run_with_predictions(tmp_path, monkeypatch, specs):
     # exist before it can be patched.
     import perception.segmenter as _ps
     monkeypatch.setattr(_ps, "build_segmenter", lambda *a, **k: _Fake())
-    return ev.evaluate("unused.pt", _crop_safety_dataset(tmp_path), None,
-                       split="val", device="cpu")["crop_safety"]
+    res = ev.evaluate("unused.pt", _crop_safety_dataset(tmp_path, weed_gt),
+                      None, split="val", device="cpu", sweep=sweep)
+    return res if full else res["crop_safety"]
 
 
 def test_onion_the_model_ignores_is_risk_but_not_damage(tmp_path, monkeypatch):
@@ -279,3 +289,95 @@ def test_images_root_may_come_from_the_manifest(tmp_path, monkeypatch):
 
 _EMPTY = {"summary": {}, "detection": {}, "operating_point": {},
           "crop_safety": {}}
+
+
+# --------------------------------------------------------------------------- #
+# the confidence sweep
+#
+# run4 moved small-weed recall from 0.28 to 0.73 between conf 0.5 and 0.25 on
+# UNCHANGED weights. A single-threshold table hides that the operating point,
+# not the model, is often what the number is measuring.
+# --------------------------------------------------------------------------- #
+def test_the_sweep_reports_every_requested_confidence(tmp_path, monkeypatch):
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (10, 20))], full=True,
+                              sweep=[0.2, 0.4, 0.6])
+    assert [r["conf"] for r in c["conf_sweep"]] == [0.2, 0.4, 0.5, 0.6]
+
+
+def test_the_primary_conf_is_always_in_the_sweep(tmp_path, monkeypatch):
+    """Otherwise the printed table and the swept table disagree about the
+    threshold the run is actually reported at."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (10, 20))], full=True,
+                              sweep=[0.9])
+    assert 0.5 in [r["conf"] for r in c["conf_sweep"]]
+
+
+def test_raising_the_threshold_cannot_increase_recall(tmp_path, monkeypatch):
+    """The monotonicity that makes the table meaningful. A prediction kept at
+    0.6 is kept at 0.2, so recall can only fall as the threshold rises."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (10, 20)), (CROP_CLASS, (0, 10))],
+                              full=True, sweep=[0.1, 0.3, 0.5, 0.7, 0.95],
+                              scores=[0.6, 0.9], weed_gt=True)
+    rec = [r["weed_recall"] for r in c["conf_sweep"]]
+    assert rec == sorted(rec, reverse=True), rec
+    assert rec[0] == 1.0, "the weed is found at the lowest threshold"
+    assert rec[-1] == 0.0, "and dropped once the threshold passes its score"
+
+
+def test_the_operating_point_matches_its_row_in_the_sweep(tmp_path,
+                                                          monkeypatch):
+    """Two code paths computing the same thing must not drift."""
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (10, 20))], full=True,
+                              sweep=[0.25, 0.5])
+    row = next(r for r in c["conf_sweep"] if r["conf"] == 0.5)
+    assert row["small_weed_recall"] == \
+        c["operating_point"]["small_weed_recall"]
+    assert row["missed_onion_fraction"] == \
+        c["crop_safety"]["missed_onion_fraction"]
+
+
+def test_no_sweep_requested_still_reports_the_single_operating_point(
+        tmp_path, monkeypatch):
+    c = _run_with_predictions(tmp_path, monkeypatch,
+                              [("grass_weed", (10, 20))], full=True)
+    assert len(c["conf_sweep"]) == 1
+    assert c["conf_sweep"][0]["conf"] == 0.5
+
+
+def test_the_sweep_table_is_only_printed_when_there_is_something_to_compare():
+    base = {"summary": {"split": "val", "n_frames": 1, "classes": [],
+                        "map50": None, "map50_95": None,
+                        "classes_without_ground_truth": []},
+            "detection": {},
+            "operating_point": {"conf": 0.5, "small_weed_recall": None,
+                                "small_weed_n": 0},
+            "crop_safety": {"note": "no onion_plant ground truth"}}
+    one = ev.format_report({**base, "conf_sweep": [{"conf": 0.5}]})
+    assert "CONFIDENCE SWEEP" not in one
+
+    rows = [{"conf": t, "small_weed_recall": 0.5, "weed_recall": 0.5,
+             "weed_precision": 0.5, "crop_recall": 0.5,
+             "missed_onion_fraction": 0.1, "weed_on_crop_fraction": 0.001}
+            for t in (0.25, 0.5)]
+    many = ev.format_report({**base, "conf_sweep": rows})
+    assert "CONFIDENCE SWEEP" in many
+    assert "ONION BURNED" in many
+
+
+def test_weed_recall_pools_classes_rather_than_averaging_them():
+    """A class with three instances must not swing the number that decides the
+    deployment threshold."""
+    classes = ["grass_weed", "other_weed", CROP_CLASS]
+    o = {"grass_weed": {"tp": 90, "n_gt": 100, "n_pred": 95},
+         "other_weed": {"tp": 0, "n_gt": 3, "n_pred": 1},
+         CROP_CLASS: {"tp": 50, "n_gt": 50, "n_pred": 50}}
+    pooled = ev._weed_recall(o, classes)
+    assert pooled == pytest.approx(90 / 103)
+    per_class_mean = (0.9 + 0.0) / 2
+    assert pooled > per_class_mean          # the rare class no longer dominates
+    # and the crop is excluded from a WEED figure
+    assert ev._weed_precision(o, classes) == pytest.approx(90 / 96)

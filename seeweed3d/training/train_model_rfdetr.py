@@ -93,7 +93,15 @@ CONFIG = {
     "GRAD_ACCUM": 8,
 
     "LR": 1e-4,          # RF-DETR's own default; far lower than Mask R-CNN's
-    "WORKERS": 2,
+
+    # 0 ON WINDOWS. rfdetr trains through pytorch-lightning, and a lightning
+    # dataloader worker that fails to start on Windows kills the process with
+    # NO Python traceback - training simply stops after the model-summary table
+    # and you are back at the prompt. Workers load in the parent instead, which
+    # at 62 frames costs almost nothing.
+    #
+    # On Linux, or once a run is known to work, raise it to 2-4.
+    "WORKERS": 0,
 
     # -- Advanced features -----------------------------------------------------
     "USE_EMA": True,             # averaged weights; usually a small free gain

@@ -722,6 +722,25 @@ what `make_dataset.py` recorded in `seg_manifest.json`, which is normally right.
 Add `--backend rfdetr` when scoring an RF-DETR checkpoint — it must match the
 backend that produced the file.
 
+### Choosing the deployment confidence — `--sweep`
+
+The single most misleading thing a metrics table can do is report one threshold.
+`run4` moved small-weed recall from **0.28 at conf 0.5 to 0.73 at conf 0.25** on
+unchanged weights: the number was measuring the operating point, not the model.
+
+```powershell
+python -m seeweed3d.evaluation.eval_seg --checkpoint <run>/best.pt `
+    --dataset <dir> --split val --device cuda --sweep
+```
+
+Bare `--sweep` walks `0.15 … 0.7`; pass explicit values to narrow it. The model
+runs **once per frame** either way — only the thresholding and matching repeat —
+so the whole table costs almost nothing beyond the single-threshold run.
+
+Read it as a decision, not a score. A missed weed survives to set seed; a false
+weed costs one laser pulse. That asymmetry favours recall — as far as
+**ONION BURNED** lets you go, and no further.
+
 Three tables, deliberately not combined into one score:
 
 | Table | What it answers |
@@ -829,12 +848,16 @@ python seeweed3d/perception/predict_images.py
 | `IMAGES` | a session folder (uses its `rgb/`), a folder of images, or one file |
 | `STRIDE` | **use this.** Consecutive ZED frames are near-identical, so `LIMIT` alone gives you N pictures of the same plant |
 | `CONF` | lower than the 0.5 the metrics table uses — to see failures you want what the model *nearly* said |
+| `LABELS` | `class_score` / `class` / `none`. A dense frame carries 50 instances; at that point the text is the noise |
 | `BACKEND` | `maskrcnn` or `rfdetr`, must match the checkpoint |
 | `MODE` | `segmentation` (RGB only) or `full` (depth → LEP → 3D → safety decision) |
 
-Writes `overlays/*.png` and `predictions.json`. Colours match the evaluation
-report: **orange** crop, **green** weed, **magenta** a weed touching predicted
-onion.
+Writes `overlays/*.png` and `predictions.json`. **One colour per class** (see
+`CLASS_COLOURS`), with `onion_plant` orange and drawn thickest, and a key
+appended below the frame rather than painted over a corner of it. A weed
+touching predicted onion gets an extra **white** outline and a `!CROP` tag
+instead of being recoloured — the class and the hazard are separate facts, and
+you want to know *which* weed is sitting on the crop.
 
 > **What this cannot tell you.** Without labels there is no recall. An empty
 > frame means *the model found nothing*, which is indistinguishable from *there

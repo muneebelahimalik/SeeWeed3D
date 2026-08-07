@@ -24,11 +24,17 @@ MODES
                   reasons. Needs a session laid out as <session>/rgb, /depth
                   and /meta/calibration.json.
 
-The overlay marks any weed whose mask touches predicted onion. In "full" mode
-that judgement comes from safety.py and the laser spot geometry; in
-"segmentation" mode it is a cruder mask-overlap test, because without a LEP
-there is no spot to test. Both are shown in magenta, and neither is a substitute
-for the crop-safety numbers in eval_seg.
+COLOURS
+-------
+One colour per CLASS (see CLASS_COLOURS), with onion_plant orange and drawn
+thickest - it is the one thing in the frame that must not be hit. A weed
+touching predicted onion gets an extra WHITE outline and a "!CROP" tag rather
+than being recoloured, so you can still see WHICH weed is sitting on the crop.
+
+In "full" mode that crop judgement comes from safety.py and the laser spot
+geometry; in "segmentation" mode it is a cruder mask-overlap test, because
+without a LEP there is no spot to test. Neither is a substitute for the
+crop-safety numbers in eval_seg.
 """
 from __future__ import annotations
 
@@ -84,6 +90,13 @@ CONFIG = {
     # Shrink the saved overlays. ZED frames are 2208x1242; 0.5 keeps them
     # readable and the folder small. 1.0 saves full size.
     "OVERLAY_SCALE": 0.5,
+
+    # "class_score" | "class" | "none". A dense frame can carry 50 instances,
+    # and at that point the text is the noise - set "none" and read the colours.
+    "LABELS": "class_score",
+
+    # Colour key in the corner, so an overlay can be read on its own.
+    "LEGEND": True,
 }
 
 # #############################################################################
@@ -92,10 +105,35 @@ CONFIG = {
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
-#: Same palette as evaluation/report.py, so the two are read the same way.
-C_CROP = (0, 165, 255)        # orange  - the crop
-C_WEED = (80, 200, 80)        # green   - a weed the system would treat
-C_CONFLICT = (220, 80, 220)   # magenta - a weed overlapping predicted crop
+#: One colour per class, BGR. Chosen to stay apart both in hue and in
+#: brightness, so they remain distinguishable on the grey-green soil these
+#: frames are mostly made of - and for anyone who reads red and green alike.
+#:
+#: onion_plant is orange and drawn thickest: it is the one thing in the frame
+#: that must not be hit, and it should be findable without reading a legend.
+CLASS_COLOURS = {
+    "cutleaf_evening_primrose": (255, 128, 0),     # blue
+    "wild_radish":              (0, 220, 255),     # yellow
+    "grass_weed":               (80, 200, 80),     # green
+    "weed_cluster":             (200, 90, 200),    # purple
+    "other_weed":               (60, 60, 235),     # red
+    "onion_plant":              (0, 165, 255),     # orange - the crop
+}
+C_UNKNOWN = (200, 200, 200)   # grey    - a class not in the ontology
+C_CONFLICT = (255, 255, 255)  # white   - outline on a weed touching the crop
+
+
+def class_colour(name):
+    """Colour for a class, stable across runs and frames.
+
+    A class absent from the ontology gets grey rather than an arbitrary colour:
+    an unexpected label should look unexpected."""
+    return CLASS_COLOURS.get(name, C_UNKNOWN)
+
+
+def legend(names):
+    """[(class_name, colour)] for the classes actually drawn."""
+    return [(n, class_colour(n)) for n in names]
 
 
 def find_images(spec, limit=0, stride=1):
@@ -133,32 +171,103 @@ def _session_of(path):
     return None
 
 
-def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35):
-    """Tint and outline every instance. Crop thickest - it is what must not be
-    hit."""
+def _put_label(img, text, org, colour):
+    """Text on a filled dark plate.
+
+    Coloured text straight onto the frame is unreadable: these scenes are grey
+    soil and green foliage, so a green label on a green plant disappears exactly
+    where there is something to read."""
     import cv2
-    import numpy as np
+    f, sc, th = cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
+    (tw, tht), base = cv2.getTextSize(text, f, sc, th)
+    x, y = int(org[0]), int(max(tht + 3, org[1]))
+    x = max(0, min(x, img.shape[1] - tw - 5))
+    cv2.rectangle(img, (x, y - tht - 3), (x + tw + 4, y + base - 1),
+                  (0, 0, 0), -1)
+    cv2.putText(img, text, (x + 2, y - 2), f, sc, colour, th, cv2.LINE_AA)
+
+
+def _legend_strip(img, names, pad=10, row=26, font=0.5):
+    """Return img with a key APPENDED BELOW it.
+
+    Drawn on extra canvas rather than over a corner of the frame: a legend
+    painted onto the image hides whatever was underneath, and in these scenes
+    the corners hold plants. A key that costs you a detection is a bad trade.
+    """
+    import cv2
+    w = img.shape[1]
+    entries = [(n + ("  (CROP)" if n == CROP_CLASS else ""), class_colour(n))
+               for n in names]
+    widths = [cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, font, 1)[0][0]
+              + 34 + pad for t, _ in entries]
+
+    rows, cur, cur_w = [], [], pad
+    for e, ew in zip(entries, widths):
+        if cur and cur_w + ew > w - pad:
+            rows.append(cur)
+            cur, cur_w = [], pad
+        cur.append((e, ew))
+        cur_w += ew
+    if cur:
+        rows.append(cur)
+
+    strip = np.zeros((pad + row * len(rows) + pad // 2, w, 3), np.uint8)
+    for r, items in enumerate(rows):
+        x, y = pad, pad + row * r + 14
+        for (text, colour), ew in items:
+            cv2.rectangle(strip, (x, y - 10), (x + 22, y + 3), colour, -1)
+            cv2.putText(strip, text, (x + 30, y + 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, font, (255, 255, 255), 1,
+                        cv2.LINE_AA)
+            x += ew
+    return np.vstack([img, strip])
+
+
+def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
+         show_legend=True):
+    """Tint and outline every instance, ONE COLOUR PER CLASS.
+
+    Crop proximity is drawn as an extra WHITE outline rather than by recolouring
+    the instance. The class and the hazard are two different facts, and
+    overwriting one with the other loses information at the moment it matters
+    most - you would no longer be able to see WHICH weed is sitting on an onion.
+    """
+    import cv2
     out = bgr.copy()
+    drawn = []
     for i in range(len(det)):
         m = np.asarray(det.masks[i]).astype(bool)
         if not m.any():
             continue
-        is_crop = det.class_name(i) == CROP_CLASS
-        colour = (C_CROP if is_crop
-                  else C_CONFLICT if i in conflict_idx else C_WEED)
+        name = det.class_name(i)
+        colour = class_colour(name)
+        is_crop = name == CROP_CLASS
+        drawn.append(name)
+
         tint = np.zeros_like(out)
         tint[m] = colour
         out = cv2.addWeighted(out, 1.0, tint, alpha, 0)
         cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
+        if i in conflict_idx:
+            cv2.drawContours(out, cnts, -1, C_CONFLICT, 5)
         cv2.drawContours(out, cnts, -1, colour, 3 if is_crop else 2)
-        ys, xs = np.nonzero(m)
-        cv2.putText(out, f"{det.class_name(i)} {det.scores[i]:.2f}",
-                    (int(xs.min()), max(14, int(ys.min()) - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 2)
+
+        if labels != "none":
+            ys, xs = np.nonzero(m)
+            text = (f"{name} {det.scores[i]:.2f}" if labels == "class_score"
+                    else name)
+            if i in conflict_idx:
+                text += "  !CROP"
+            _put_label(out, text, (int(xs.min()), int(ys.min()) - 4), colour)
+
+    # Resize FIRST, then add the key: a legend drawn before a 0.5 downscale
+    # comes out at half the font size and is the one thing you cannot zoom into.
     if scale and scale != 1.0:
         out = cv2.resize(out, None, fx=scale, fy=scale,
                          interpolation=cv2.INTER_AREA)
+    if show_legend and drawn:
+        out = _legend_strip(out, sorted(set(drawn)))
     return out
 
 
@@ -228,7 +337,9 @@ def predict(cfg=None):
             counts[inst["class_name"]] = counts.get(inst["class_name"], 0) + 1
         n_conflict += len(conflicts)
 
-        vis = draw(bgr, det, conflicts, c.get("OVERLAY_SCALE", 1.0))
+        vis = draw(bgr, det, conflicts, c.get("OVERLAY_SCALE", 1.0),
+                   labels=c.get("LABELS", "class_score"),
+                   show_legend=c.get("LEGEND", True))
         dst = out_dir / "overlays" / f"{path.stem}.png"
         cv2.imwrite(str(dst), vis)
         rec.update({"image": str(path), "overlay": str(dst)})
@@ -326,6 +437,8 @@ def main(argv=None):
     p.add_argument("--conf", type=float)
     p.add_argument("--limit", type=int)
     p.add_argument("--stride", type=int)
+    p.add_argument("--labels", choices=["class_score", "class", "none"])
+    p.add_argument("--no-legend", action="store_true")
     a = p.parse_args(argv)
 
     c = dict(CONFIG)
@@ -333,10 +446,12 @@ def main(argv=None):
                       ("out", "OUT_DIR"), ("backend", "BACKEND"),
                       ("mode", "MODE"), ("device", "DEVICE"),
                       ("conf", "CONF"), ("limit", "LIMIT"),
-                      ("stride", "STRIDE")):
+                      ("stride", "STRIDE"), ("labels", "LABELS")):
         v = getattr(a, flag)
         if v is not None:
             c[key] = v
+    if a.no_legend:
+        c["LEGEND"] = False
     return predict(c)
 
 

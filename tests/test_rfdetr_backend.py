@@ -306,3 +306,11 @@ def test_a_missing_lightning_does_not_disable_mlflow(tmp_path, monkeypatch):
     monkeypatch.setattr(rf, "_rebind_lightning_tracking_uri",
                         lambda _u: False)
     assert rf._mlflow_store_is_reachable(run, uri) is True
+
+
+def test_the_shipped_config_uses_no_dataloader_workers(tmp_path):
+    """A lightning worker that fails to start on Windows kills the process with
+    no traceback - training stops after the model-summary table and there is
+    nothing to read. At 62 frames the parent can do the loading."""
+    tm = load_script("training/train_model_rfdetr.py")
+    assert tm.CONFIG["WORKERS"] == 0
