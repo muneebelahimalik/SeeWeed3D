@@ -45,6 +45,35 @@ def _flatten(d, prefix=""):
     return out
 
 
+#: MLflow experiment every backend logs into, so a Mask R-CNN run and an
+#: RF-DETR run appear in ONE comparison table rather than two.
+EXPERIMENT = "seeweed3d"
+
+
+def mlflow_store_uri(out_dir, create=False):
+    """The one definition of where MLflow runs are stored.
+
+    Returns ``(uri, artifacts_dir_or_None)``. artifacts is None when the URI
+    came from the environment, since then the store is not ours to lay out.
+
+    SQLite, NOT the bare './mlruns' file store: MLflow 3 refuses the filesystem
+    backend outright ("in maintenance mode"), so the obvious local choice raises
+    on start. This lives here rather than inline in Tracker because the RF-DETR
+    backend has to point pytorch-lightning's own MLFlowLogger at the SAME store
+    - and a second copy of this path expression is a second store that only
+    looks like the first one.
+    """
+    env = os.environ.get("MLFLOW_TRACKING_URI")
+    if env:
+        return env, None
+    store = (Path(out_dir).parent / "mlruns").resolve()
+    artifacts = store / "artifacts"
+    if create:
+        store.mkdir(parents=True, exist_ok=True)
+        artifacts.mkdir(parents=True, exist_ok=True)
+    return "sqlite:///" + store.joinpath("mlflow.db").as_posix(), artifacts
+
+
 class Tracker:
     """One handle over zero or more local tracking backends.
 
@@ -114,19 +143,8 @@ class Tracker:
             return None
 
     def _start_mlflow_inner(self, mlflow):
-        uri = os.environ.get("MLFLOW_TRACKING_URI")
-        artifacts = None
-        if not uri:
-            # SQLite, NOT the bare './mlruns' file store. MLflow 3 refuses the
-            # filesystem backend outright ("in maintenance mode"), so the
-            # obvious local choice raises on start. SQLite is a plain file
-            # alongside it, needs no server, and is what `mlflow migrate-
-            # filestore` targets - so this stays local with nothing uploaded.
-            store = (self.out_dir.parent / "mlruns").resolve()
-            store.mkdir(parents=True, exist_ok=True)
-            uri = "sqlite:///" + store.joinpath("mlflow.db").as_posix()
-            artifacts = store / "artifacts"
-            artifacts.mkdir(parents=True, exist_ok=True)
+        # SQLite, NOT the bare './mlruns' file store - see mlflow_store_uri.
+        uri, artifacts = mlflow_store_uri(self.out_dir, create=True)
         mlflow.set_tracking_uri(uri)
 
         # With a database backend the artifact root is NOT implied by the

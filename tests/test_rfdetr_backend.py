@@ -215,3 +215,94 @@ def test_the_config_effective_batch_is_sane():
     tm = load_script("training/train_model_rfdetr.py")
     eff = tm.CONFIG["BATCH"] * tm.CONFIG["GRAD_ACCUM"]
     assert 8 <= eff <= 32, f"effective batch {eff}"
+
+
+# --------------------------------------------------------------------------- #
+# MLflow: the store rfdetr's lightning logger points at
+#
+# rfdetr builds pytorch-lightning's MLFlowLogger without a tracking_uri, so
+# lightning falls back to the './mlruns' FILE store - which MLflow 3 refuses
+# outright, killing the run before the first epoch.
+# --------------------------------------------------------------------------- #
+def test_the_tracking_uri_is_sqlite_not_the_file_store(tmp_path):
+    """A bare directory is what MLflow 3 rejects; nothing else here matters if
+    this is wrong."""
+    uri = rf._point_lightning_at_our_mlflow_store(tmp_path / "run" / "rfdetr_v1")
+    assert uri.startswith("sqlite:///")
+    assert not uri.startswith("file:")
+
+
+def test_rfdetr_and_maskrcnn_resolve_to_the_same_store(tmp_path, monkeypatch):
+    """Two run folders under one training dir must share a store, or the
+    comparison table the second backend exists for never materialises."""
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    tk = load_script("training/tracking.py")
+    mask, _ = tk.mlflow_store_uri(tmp_path / "training1" / "run3")
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    detr = rf._point_lightning_at_our_mlflow_store(
+        tmp_path / "training1" / "rfdetr_v1")
+    assert mask == detr
+
+
+def test_the_uri_is_exported_before_rfdetr_could_be_imported(tmp_path,
+                                                             monkeypatch):
+    """Lightning captures os.getenv("MLFLOW_TRACKING_URI") as a DEFAULT
+    ARGUMENT, evaluated once at import. Setting it after the fact is too
+    late, so this must be an environment variable and not a return value
+    alone."""
+    import os
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    uri = rf._point_lightning_at_our_mlflow_store(tmp_path / "run")
+    assert os.environ["MLFLOW_TRACKING_URI"] == uri
+
+
+def test_an_explicit_tracking_uri_is_not_overridden(tmp_path, monkeypatch):
+    """Someone pointing at a shared MLflow server has made a decision."""
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://mlflow.internal:5000")
+    assert rf._point_lightning_at_our_mlflow_store(tmp_path / "run") == \
+        "http://mlflow.internal:5000"
+
+
+def test_setting_up_the_store_creates_its_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    run = tmp_path / "training1" / "rfdetr_v1"
+    uri = rf._point_lightning_at_our_mlflow_store(run)
+    assert rf._mlflow_store_is_reachable(run, uri)
+    assert (tmp_path / "training1" / "mlruns").is_dir()
+
+
+def test_a_broken_store_disables_mlflow_instead_of_killing_the_run(
+        tmp_path, monkeypatch, capsys):
+    """Losing hours of training to a charting library is never the right
+    trade - the same rule the Mask R-CNN tracker already follows."""
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    run = tmp_path / "training1" / "rfdetr_v1"
+    uri = rf._point_lightning_at_our_mlflow_store(run)
+    import mlflow
+    monkeypatch.setattr(mlflow, "set_tracking_uri",
+                        lambda *_a, **_k: (_ for _ in ()).throw(
+                            RuntimeError("locked")))
+    assert rf._mlflow_store_is_reachable(run, uri) is False
+    assert "mlflow disabled" in capsys.readouterr().out
+
+
+def test_both_backends_log_into_one_experiment():
+    """rfdetr names the MLflow experiment after `project`; a different name
+    means two tables that cannot be compared."""
+    tk = load_script("training/tracking.py")
+    import inspect
+    assert (inspect.signature(tk.Tracker.__init__)
+            .parameters["experiment"].default) == tk.EXPERIMENT
+
+
+def test_a_missing_lightning_does_not_disable_mlflow(tmp_path, monkeypatch):
+    """The environment variable is the supported mechanism and works on its
+    own; the lightning rebind is only a guard against import order. Treating
+    its absence as a store failure would silently drop tracking for a reason
+    that has nothing to do with the store."""
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    run = tmp_path / "training1" / "rfdetr_v1"
+    uri = rf._point_lightning_at_our_mlflow_store(run)
+    monkeypatch.setattr(rf, "_rebind_lightning_tracking_uri",
+                        lambda _u: False)
+    assert rf._mlflow_store_is_reachable(run, uri) is True

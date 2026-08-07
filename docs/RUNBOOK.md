@@ -712,11 +712,15 @@ weeds are found or onions are protected. Run this instead:
 
 ```powershell
 python -m seeweed3d.evaluation.eval_seg `
-    --checkpoint  E:/Dataset_Vidalia/runs/seg_v1/best.pt `
-    --dataset     E:/Dataset_Vidalia/training/mixed_v1 `
-    --images-root E:/Dataset_Vidalia/sessions `
+    --checkpoint E:/Dataset_Vidalia/runs/seg_v1/best.pt `
+    --dataset    E:/Dataset_Vidalia/training/mixed_v1 `
     --split val --device cuda --conf 0.5
 ```
+
+`--images-root` is optional in both `eval_seg` and `report`: omit it and they use
+what `make_dataset.py` recorded in `seg_manifest.json`, which is normally right.
+Add `--backend rfdetr` when scoring an RF-DETR checkpoint — it must match the
+backend that produced the file.
 
 Three tables, deliberately not combined into one score:
 
@@ -898,7 +902,9 @@ python seeweed3d/annotation/regen_cvat_labels.py
 # Environment B (sw-train): training + deployment
 python -m seeweed3d.training.prepare_dataset --datumaro-root <exports> --images-root <sessions> --out <dir>
 python -m seeweed3d.training.train_seg_torchvision --dataset <dir> --images-root <sessions> --out <run>
-python -m seeweed3d.evaluation.eval_seg --checkpoint <run>/best.pt --dataset <dir> --images-root <sessions> --split val
+python seeweed3d/training/train_model_rfdetr.py                    # RF-DETR-Seg, config block
+python -m seeweed3d.evaluation.eval_seg --checkpoint <run>/best.pt --dataset <dir> --split val
+python -m seeweed3d.evaluation.report   --checkpoint <run>/best.pt --dataset <dir> --split val
 python -m seeweed3d.training.train_lep --manifest <dir>/lep_manifest.json --images-root <sessions> --out <run>
 python -m seeweed3d.deploy.export --checkpoint <run>/best.pt --out <run>/export --precision fp16
 python -m seeweed3d.deploy.benchmark --checkpoint <run>/best.pt --device cuda

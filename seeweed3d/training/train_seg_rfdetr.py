@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -107,6 +108,20 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     from common.torch_utils import require_device
     device = require_device(device)
 
+    # Decide on tracking, and point lightning at our store, BEFORE importing
+    # rfdetr - see _point_lightning_at_our_mlflow_store for why the order is
+    # load-bearing. Only find_spec and an environment variable here; nothing
+    # touches the disk until every guard below has passed.
+    want_tb = track in ("auto", "all", "tensorboard")
+    want_mf = track in ("auto", "all", "mlflow")
+    if track in ("mlflow", "all") and not _installed("mlflow"):
+        raise SystemExit(f"ERROR: --track {track} needs mlflow:\n"
+                         f'    "{sys.executable}" -m pip install mlflow')
+    if track == "auto":
+        want_tb, want_mf = _installed("tensorboard"), _installed("mlflow")
+    mlflow_uri = (_point_lightning_at_our_mlflow_store(out_dir)
+                  if want_mf else None)
+
     try:
         import rfdetr  # noqa: F401
     except ImportError:
@@ -148,18 +163,14 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     for k, v in summary["splits"].items():
         print(f"    {k:<6} {v['frames']:>4} frames  {v['instances']:>5} inst")
 
-    # rfdetr's own tensorboard/mlflow flags. Reusing them rather than wrapping
-    # its Lightning loop keeps this backend thin - and its MLflow runs land in
-    # the same store as the Mask R-CNN ones, so the two are comparable in one
-    # table, which is the whole reason for having a tracker.
-    want_tb = track in ("auto", "all", "tensorboard")
-    want_mf = track in ("auto", "all", "mlflow")
-    if track in ("mlflow", "all") and not _installed("mlflow"):
-        raise SystemExit(f"ERROR: --track {track} needs mlflow:\n"
-                         f'    "{sys.executable}" -m pip install mlflow')
-    if track == "auto":
-        want_tb, want_mf = _installed("tensorboard"), _installed("mlflow")
+    # Now that every guard has passed, create the store and confirm lightning
+    # will use it. rfdetr's own tensorboard/mlflow flags do the logging -
+    # reusing them rather than wrapping its Lightning loop keeps this backend
+    # thin.
+    if want_mf:
+        want_mf = _mlflow_store_is_reachable(out, mlflow_uri)
 
+    from training.tracking import EXPERIMENT
     cfg = {
         "dataset_dir": str(coco),
         "output_dir": str(out),
@@ -176,6 +187,11 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
         "multi_scale": multi_scale,
         "tensorboard": want_tb,
         "mlflow": want_mf,
+        # rfdetr names the MLflow experiment after `project` and the run after
+        # `run`. Matching the Mask R-CNN tracker's experiment is what puts both
+        # backends in one comparison table instead of two.
+        "project": EXPERIMENT,
+        "run": out.name,
     }
     for key, val in (("mask_ce_loss_coef", mask_ce_coef),
                      ("mask_dice_loss_coef", mask_dice_coef),
@@ -205,6 +221,82 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
 def _installed(mod):
     import importlib.util
     return importlib.util.find_spec(mod) is not None
+
+
+def _point_lightning_at_our_mlflow_store(out_dir):
+    """Return the tracking URI, and make pytorch-lightning use it.
+
+    rfdetr does not build its MLFlowLogger with a tracking_uri, so lightning
+    falls back to `save_dir`, i.e. the './mlruns' FILE store - which MLflow 3
+    refuses outright, killing the run before the first epoch. Setting the
+    variable is also what makes the claim "RF-DETR runs land in the same store
+    as the Mask R-CNN runs" true rather than aspirational; without it they
+    would go to whatever directory python happened to be launched from.
+
+    MUST be called before rfdetr (hence lightning) is imported: lightning
+    captures os.getenv("MLFLOW_TRACKING_URI") as a DEFAULT ARGUMENT, evaluated
+    once when its module is imported. No I/O here for that reason - the store
+    is only created once every other guard has passed.
+    """
+    from training.tracking import mlflow_store_uri
+    uri, _ = mlflow_store_uri(out_dir)
+    os.environ["MLFLOW_TRACKING_URI"] = uri
+    return uri
+
+
+def _mlflow_store_is_reachable(out_dir, uri):
+    """Create the store, register the shared experiment, and confirm lightning
+    will actually use the URI. Returns False to mean "log without MLflow",
+    never an exception: losing a training run to a charting library is never
+    the right trade."""
+    try:
+        import mlflow
+        from training.tracking import EXPERIMENT, mlflow_store_uri
+        _, artifacts = mlflow_store_uri(out_dir, create=True)
+        mlflow.set_tracking_uri(uri)
+        # With a database backend the artifact root is not implied by the
+        # tracking URI, so preview images would otherwise land next to the
+        # working directory.
+        if mlflow.get_experiment_by_name(EXPERIMENT) is None:
+            mlflow.create_experiment(
+                EXPERIMENT,
+                artifact_location=artifacts.as_uri() if artifacts else None)
+    except Exception as e:                      # noqa: BLE001
+        print(f"  [warn] mlflow disabled for this run: {type(e).__name__}: {e}")
+        return False
+
+    _rebind_lightning_tracking_uri(uri)
+    return True
+
+
+def _rebind_lightning_tracking_uri(uri):
+    """Belt-and-braces for the import-order hazard above.
+
+    The environment variable is the supported mechanism and works whenever
+    rfdetr is imported after us, which is the normal path. But lightning froze
+    its default at import time, so if something pulled it in first the variable
+    is ignored and rfdetr would reach the file store. Detect that and bind the
+    URI at the call site rfdetr actually uses.
+
+    Failure here is not a reason to give up MLflow: in the ordinary case the
+    variable alone is enough, and a missing lightning means rfdetr cannot train
+    at all - a problem this function is not the right place to report.
+    """
+    try:
+        import inspect
+
+        from pytorch_lightning.loggers import MLFlowLogger
+        baked = inspect.signature(
+            MLFlowLogger.__init__).parameters["tracking_uri"].default
+        if str(baked or "") == uri:
+            return True
+        import rfdetr.training.trainer as T
+        original = T.MLFlowLogger
+        T.MLFlowLogger = (lambda *a, _o=original, **k:
+                          _o(*a, **{"tracking_uri": uri, **k}))
+        return True
+    except Exception:                           # noqa: BLE001
+        return False
 
 
 def main(argv=None):

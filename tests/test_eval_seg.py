@@ -245,3 +245,37 @@ def test_the_table_names_the_burn_rather_than_burying_it(tmp_path, monkeypatch):
                             "crop_safety": c})
     assert "ONION CALLED WEED" in txt
     assert "100" in txt
+
+
+# --------------------------------------------------------------------------- #
+# the CLI actually reaching evaluate()
+# --------------------------------------------------------------------------- #
+def test_the_backend_flag_reaches_evaluate(tmp_path, monkeypatch):
+    """--backend was parsed and then dropped, so an RF-DETR checkpoint was
+    loaded through the Mask R-CNN builder - which silently makes the one
+    comparison the second backend exists for meaningless."""
+    seen = {}
+    monkeypatch.setattr(ev, "evaluate",
+                        lambda *a, **k: seen.update(k) or _EMPTY)
+    monkeypatch.setattr(ev, "format_report", lambda r: "")
+    ev.main(["--checkpoint", str(tmp_path / "c.pth"),
+             "--dataset", str(tmp_path), "--backend", "rfdetr",
+             "--out", str(tmp_path / "m.json")])
+    assert seen.get("backend") == "rfdetr"
+
+
+def test_images_root_may_come_from_the_manifest(tmp_path, monkeypatch):
+    """report.py already defaults to the manifest's images_root. eval_seg
+    required it, so the two tools needed different command lines for the same
+    checkpoint and the shorter one just failed."""
+    seen = {}
+    monkeypatch.setattr(ev, "evaluate",
+                        lambda *a, **k: seen.update(roots=a[2]) or _EMPTY)
+    monkeypatch.setattr(ev, "format_report", lambda r: "")
+    ev.main(["--checkpoint", str(tmp_path / "c.pth"),
+             "--dataset", str(tmp_path), "--out", str(tmp_path / "m.json")])
+    assert seen["roots"] is None       # evaluate() falls back to the manifest
+
+
+_EMPTY = {"summary": {}, "detection": {}, "operating_point": {},
+          "crop_safety": {}}
