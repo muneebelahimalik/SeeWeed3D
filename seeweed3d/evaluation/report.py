@@ -199,11 +199,12 @@ def png_data_uri(bgr, quality=82):
 
 
 def collect(checkpoint, dataset_dir, images_root, split="val", device="cpu",
-            conf=0.5, min_area_px=16, mask_threshold=0.5, iou_threshold=0.5):
+            conf=0.5, min_area_px=16, mask_threshold=0.5, iou_threshold=0.5,
+            backend="maskrcnn"):
     """Run the model over a split and record per-instance outcomes."""
     import cv2
     from common.torch_utils import require_device
-    from perception.segmenter import MaskRCNNSegmenter
+    from perception.segmenter import build_segmenter
     from training.seg_dataset import polygons_to_mask, resolve_image
 
     device = require_device(device)
@@ -216,8 +217,10 @@ def collect(checkpoint, dataset_dir, images_root, split="val", device="cpu",
     if not frames:
         raise SystemExit(f"ERROR: split {split!r} has no frames.")
 
-    seg = MaskRCNNSegmenter(checkpoint, conf=conf, device=device,
-                            mask_threshold=mask_threshold).load()
+    seg = build_segmenter(backend, checkpoint, conf=conf, device=device,
+                          **({"mask_threshold": mask_threshold}
+                             if backend == "maskrcnn" else {}))
+    seg.load()
     classes = list(seg.classes or doc.get("classes") or CLASSES)
     manifest_classes = list(doc.get("classes") or CLASSES)
     if classes != manifest_classes:
@@ -486,6 +489,9 @@ def main(argv=None):
                         "recorded")
     p.add_argument("--split", default="val", choices=["train", "val", "test"])
     p.add_argument("--device", default="cpu")
+    p.add_argument("--backend", default="maskrcnn",
+                   choices=["maskrcnn", "rfdetr"],
+                   help="must match the backend that produced the checkpoint")
     p.add_argument("--conf", type=float, default=0.5)
     p.add_argument("--iou", type=float, default=0.5,
                    help="IoU at which a prediction counts as matching")
@@ -500,11 +506,11 @@ def main(argv=None):
 
     records, classes, doc = collect(a.checkpoint, a.dataset, images_root,
                                     a.split, a.device, conf=a.conf,
-                                    iou_threshold=a.iou)
+                                    iou_threshold=a.iou, backend=a.backend)
     try:
         from evaluation.eval_seg import evaluate
         metrics = evaluate(a.checkpoint, a.dataset, images_root, a.split,
-                           a.device, conf=a.conf)
+                           a.device, conf=a.conf, backend=a.backend)
     except Exception as e:
         print(f"[warn] metric table unavailable: {e}")
         metrics = None

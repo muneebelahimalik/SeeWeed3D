@@ -21,6 +21,7 @@ on PATH.
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
 | [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
 | [6. Train Stage A](#6-train-stage-a-segmentation) | crop-vs-weed segmentation | **yes** |
+| [6b. RF-DETR-Seg](#6b-train-stage-a-on-rf-detr-seg-the-advanced-path) | same, on the real-time transformer backend | **yes** |
 | [7. Train Stage B](#7-train-stage-b-lep) | LEP localization | **yes** |
 | [8. Evaluate](#8-evaluate) | metrics by session | no |
 | [9. Inference](#9-run-inference) | full RGB-D pipeline | yes (practically) |
@@ -559,26 +560,16 @@ the tools that were rejected: [experiment tracking](experiment_tracking.md).
 
 ### Choosing a different backend
 
-| Backend | Licence | Real-time? | When |
-|---|---|---|---|
-| **`maskrcnn`** (default) | **BSD-3** | no | **prototyping — start here** |
-| `rfdetr` | **Apache-2.0** | **yes** | the real-time upgrade, ships commercially |
-| `ultralytics` | **AGPL-3.0** | yes | research only — see below |
+| Backend | Licence | Real-time? | Configurable losses? | When |
+|---|---|---|---|---|
+| **`maskrcnn`** (default) | **BSD-3** | no | no — internal to torchvision | **prototyping — start here** |
+| `rfdetr` | **Apache-2.0** | **yes** | **yes** — Dice/CE/cls coefficients | the upgrade, ships commercially |
+| `ultralytics` | **AGPL-3.0** | yes | partial | research only — see below |
 
 `rtmdet` is **not** implemented. RTMDet-Ins is a credible Apache-2.0 alternative
-on paper, but mmcv's CUDA build is a recurring problem on Jetson, so it was not
-wired up. Don't pass `backend="rtmdet"` expecting it to work.
-
-```powershell
-# Real-time upgrade once the prototype works (Apache-2.0, no obligation)
-python -m pip install rfdetr
-```
-
-RF-DETR-Seg's full Nano..2XL family shipped January 2026 — DINOv2 ViT backbone,
-MaskDINO-style mask head, no NMS, ONNX/TensorRT export. Sizing, the licence
-caveat on the XL variants, the resolution problem for small weeds, and why
-**INT8 is the wrong move on Orin for a transformer**:
-[edge model research](edge_model_research.md).
+on paper, but MMDetection's last release was v3.3.0 in **May 2024** and mmcv's
+CUDA build is a recurring problem on Jetson, so it was not wired up. Don't pass
+`backend="rtmdet"` expecting it to work.
 
 > **Ultralytics is AGPL-3.0.** Commercial or proprietary use requires an
 > Ultralytics Enterprise Licence — they state this applies even to internal
@@ -586,6 +577,100 @@ caveat on the XL variants, the resolution problem for small weeds, and why
 > laser weeder that is a real cost, and unlike a code defect it cannot be fixed
 > after distribution. It is not installed by default; `build_segmenter()` prints
 > a loud warning if you select it.
+
+---
+
+## 6b. Train Stage A on RF-DETR-Seg (the advanced path)
+
+Same dataset, same `seg_manifest.json`, same evaluation table — so the two
+backends are directly comparable. Nothing here changes or invalidates a
+Mask R-CNN run already in progress.
+
+```powershell
+conda activate sw-train
+python -m pip install rfdetr
+```
+
+Then **edit the config block** at the top of
+`seeweed3d/training/train_model_rfdetr.py` and run it:
+
+```powershell
+python seeweed3d/training/train_model_rfdetr.py
+```
+
+It converts `seg_manifest.json` into the Roboflow COCO layout RF-DETR expects
+(`train/`, `valid/`, `test/`, each with `_annotations.coco.json`), hardlinking
+images rather than copying where the filesystem allows, then trains.
+
+### ⚠️ RESOLUTION is the setting that decides whether this is an upgrade
+
+RF-DETR-Seg's own default is **432×432**. On a 2208×1242 ZED frame that is a
+5× downscale — worse than the 1333 px Mask R-CNN default that already cost this
+project most of its small-weed recall. Adopting the model at its default would
+**regress the exact metric it looks like an upgrade for**, which is why
+`train_seg_rfdetr.py` refuses to start at the default and requires an explicit
+`--allow-default-resolution` to override.
+
+Resolution must be a multiple of `patch_size × num_windows` for the variant —
+**24** for medium/large, **12** for nano/small. The runner reads those values
+out of the installed package rather than hard-coding them, and an invalid value
+names the valid neighbours instead of failing deep inside training.
+
+| Value | = | Note |
+|---|---|---|
+| `1008` | 24 × 42 | sensible first try (the shipped default) |
+| `1248` | 24 × 52 | close to the 1333 the Mask R-CNN path used |
+| `1344` | 24 × 56 | above it |
+
+VRAM cost grows with the **square** of resolution. If you run out, raise
+`GRAD_ACCUM` — do **not** lower `RESOLUTION`. `BATCH × GRAD_ACCUM` is the
+effective batch and should stay near 16; the shipped `BATCH: 2, GRAD_ACCUM: 8`
+trains at 1008 px with an effective batch of 16 on modest VRAM.
+
+### What the config block exposes that Mask R-CNN cannot
+
+| Setting | What it does |
+|---|---|
+| `MASK_CE_COEF` / `MASK_DICE_COEF` | weights the mask loss. torchvision computes Mask R-CNN's losses internally — changing them there means forking its ROI heads |
+| `CLS_COEF` | classification loss weight (IA-BCE, designed for DETR set prediction) |
+| `USE_EMA` | exponential moving average weights — usually a small free gain |
+| `MULTI_SCALE` | trains across scales; helps small objects |
+| `EARLY_STOPPING` / `PATIENCE` | built in |
+| `GRAD_ACCUM` | effective batch 16 on small VRAM, instead of actually training at batch 2 |
+| — | no anchors at all: DETR set prediction, so the anchor-size trap that cost the Mask R-CNN path its small weeds cannot occur in the same form |
+
+Leave the three loss coefficients at `None` for the first run — that uses the
+model's own defaults (`mask_ce 5.0`, `mask_dice 5.0`, `cls 1.0`) and gives you a
+baseline to move from. Raise `MASK_DICE_COEF` relative to `MASK_CE_COEF` when
+the report shows masks roughly the right shape but with poor boundaries: Dice is
+computed over the whole mask and is insensitive to how many background pixels
+surround it, so it does not get swamped by a large empty frame the way per-pixel
+cross-entropy can.
+
+### Scoring it against the Mask R-CNN run
+
+`TRACK: "auto"` routes RF-DETR's own tensorboard/mlflow output into the **same**
+MLflow store as the Mask R-CNN runs, so both appear in one comparison table.
+The evaluation path is identical apart from one flag:
+
+```powershell
+python -m seeweed3d.evaluation.eval_seg --backend rfdetr `
+    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_ema.pth `
+    --dataset E:/Dataset_Vidalia/training1 --split val --device cuda
+
+python -m seeweed3d.evaluation.report --backend rfdetr `
+    --checkpoint E:/Dataset_Vidalia/training1/rfdetr_v1/checkpoint_best_ema.pth `
+    --dataset E:/Dataset_Vidalia/training1 --split val --device cuda
+```
+
+Compare the **recall-by-size** table, not overall mAP. Overall mAP is dominated
+by the large easy instances; small-weed recall is the number this system is
+actually limited by.
+
+Sizing, the licence caveat on the XL variants (Nano..Large are Apache-2.0;
+XL/2XL may fall under Roboflow's Platform Model License and are deliberately not
+offered), and why **INT8 is the wrong move on Orin for a transformer**:
+[edge model research](edge_model_research.md).
 
 ---
 

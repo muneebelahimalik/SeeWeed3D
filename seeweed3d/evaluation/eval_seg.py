@@ -91,10 +91,10 @@ def match_for_ap(pred_masks, pred_scores, gt_masks, iou_threshold):
 
 def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
              conf=0.5, ap_conf=0.05, small_area_px=1500, min_area_px=16,
-             mask_threshold=0.5):
+             mask_threshold=0.5, backend="maskrcnn"):
     import cv2
     from common.torch_utils import require_device
-    from perception.segmenter import MaskRCNNSegmenter
+    from perception.segmenter import build_segmenter
     from training.seg_dataset import polygons_to_mask, resolve_image
 
     device = require_device(device)
@@ -112,8 +112,13 @@ def evaluate(checkpoint, dataset_dir, images_root, split="val", device="cpu",
     # ap_conf, not conf: AP integrates a precision/recall curve, so it needs the
     # low-scoring tail. Thresholding at the operating point first would truncate
     # the curve and inflate AP.
-    seg = MaskRCNNSegmenter(checkpoint, conf=min(conf, ap_conf), device=device,
-                            mask_threshold=mask_threshold).load()
+    # Backend-agnostic: an RF-DETR run must be scored by the same table as a
+    # Mask R-CNN run, or the two cannot be compared and the second backend is
+    # decorative. mask_threshold is Mask R-CNN's alone.
+    seg = build_segmenter(backend, checkpoint, conf=min(conf, ap_conf),
+                          device=device, **({"mask_threshold": mask_threshold}
+                                            if backend == "maskrcnn" else {}))
+    seg.load()
     classes = list(seg.classes or doc.get("classes") or CLASSES)
     manifest_classes = list(doc.get("classes") or CLASSES)
     if classes != manifest_classes:
@@ -312,6 +317,9 @@ def main(argv=None):
                         "not captured under a common parent")
     p.add_argument("--split", default="val", choices=["train", "val", "test"])
     p.add_argument("--device", default="cpu")
+    p.add_argument("--backend", default="maskrcnn",
+                   choices=["maskrcnn", "rfdetr"],
+                   help="must match the backend that produced the checkpoint")
     p.add_argument("--conf", type=float, default=0.5,
                    help="deployment confidence, for the P/R table")
     p.add_argument("--mask-threshold", type=float, default=0.5)
