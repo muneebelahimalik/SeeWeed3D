@@ -187,6 +187,27 @@ def _resolve_images_root(c, manifest_path):
     return roots[0] if len(roots) == 1 else roots
 
 
+def _analyze(run, ds, c):
+    """Figures and the visual report for a finished run.
+
+    Wrapped because it comes AFTER the weights and the metrics are already on
+    disk: a plotting failure at this point must cost you the pictures, never a
+    run that has finished."""
+    try:
+        from evaluation.analyze_run import analyze
+        analyze({"RUN_DIR": str(run), "DATASET_DIR": str(ds),
+                 "SPLIT": c["EVAL_SPLIT"], "DEVICE": c["DEVICE"],
+                 "CONF": c["EVAL_CONF"], "CHECKPOINT": "", "BACKEND": "",
+                 "TRACK": c.get("TRACK", "auto")})
+    # SystemExit too: analyze() raises it for a missing run directory, and
+    # BaseException would sail straight past `except Exception` and kill a run
+    # whose weights and metrics are already safely on disk.
+    except (Exception, SystemExit) as e:                # noqa: BLE001
+        print(f"\n[warn] analysis skipped: {type(e).__name__}: {e}\n"
+              f"    the run is fine - rerun it alone with:\n"
+              f"    python seeweed3d/evaluation/analyze_run.py")
+
+
 def main(cfg=None):
     c = dict(CONFIG if cfg is None else cfg)
 
@@ -227,14 +248,15 @@ def main(cfg=None):
         return
 
     import json
-    from evaluation.eval_seg import evaluate, format_report
+    from evaluation.eval_seg import DEFAULT_SWEEP, evaluate, format_report
     print("\n" + "=" * 74)
     res = evaluate(ckpt, ds, images, c["EVAL_SPLIT"], c["DEVICE"],
-                   conf=c["EVAL_CONF"])
+                   conf=c["EVAL_CONF"], sweep=DEFAULT_SWEEP)
     print(format_report(res))
     out = run / f"metrics_{c['EVAL_SPLIT']}.json"
     out.write_text(json.dumps(res, indent=2), encoding="utf-8")
     print(f"\n-> {out}")
+    _analyze(run, ds, c)
     print("\nSingle-session splits: val comes from the same drive as train - "
           "same light,\nsame soil, often the same plants. These numbers show "
           "training WORKS. They are\nnot evidence it generalises; only a "

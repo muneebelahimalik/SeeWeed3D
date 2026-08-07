@@ -186,7 +186,17 @@ def main(cfg=None):
     # the EMA file would silently score the loser whenever the regular weights
     # were better - which is the run this project has already seen.
     best = _best_checkpoint(run)
-    print(f"\nNext, score it with the SAME table the Mask R-CNN runs use:\n"
+    try:
+        from evaluation.analyze_run import analyze
+        analyze({"RUN_DIR": str(run), "DATASET_DIR": str(ds), "SPLIT": "val",
+                 "DEVICE": c["DEVICE"], "CONF": 0.25, "CHECKPOINT": str(best),
+                 "BACKEND": "rfdetr", "TRACK": c.get("TRACK", "auto")})
+    # SystemExit too - it is a BaseException, so `except Exception` would let
+    # it kill a run that has already finished training.
+    except (Exception, SystemExit) as e:                # noqa: BLE001
+        print(f"\n[warn] analysis skipped: {type(e).__name__}: {e}")
+
+    print(f"\nScored with the SAME table the Mask R-CNN runs use:\n"
           f"  python -m seeweed3d.evaluation.eval_seg --backend rfdetr "
           f"--checkpoint {best} --dataset {ds} "
           f"--split val --device {c['DEVICE']} --sweep\n"

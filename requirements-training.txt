@@ -54,6 +54,13 @@ mlflow>=2.14
 # you cannot tell a model-bound epoch from one where the dataloader is starving
 # the GPU, which is the first thing worth knowing when an epoch is slow.
 psutil>=5.9
+# The figures a finished run leaves behind (evaluation/plots.py): loss curves,
+# per-class AP, the confidence sweep, crop safety over training, recall by size.
+# No tracker draws these - W&B, MLflow and TensorBoard all store scalars and
+# images, but none of them knows what a missed onion is - so they are computed
+# here and the tracker only files the PNG.
+matplotlib>=3.7
+
 # nvidia-ml-py, NOT pynvml: it provides the same `pynvml` module and is the
 # maintained package - torch emits a deprecation warning if the old one is
 # installed. Skipped on aarch64 (Jetson), where NVML ships with JetPack.
