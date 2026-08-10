@@ -135,10 +135,25 @@ def test_a_missing_dice_symbol_is_named_rather_than_silently_skipped(
         rf._install_tversky(0.3, 0.7, 1.0)
 
 
-def test_the_shipped_config_defaults_to_dice():
+def test_the_shipped_config_leans_towards_recall_not_away_from_it():
+    """A missed weed sets seed; a spurious one costs a laser pulse. The shipped
+    weighting must never be the one that penalises invented pixels harder."""
     tm = load_script("training/train_model_rfdetr.py")
-    assert (tm.CONFIG["TVERSKY_ALPHA"], tm.CONFIG["TVERSKY_BETA"],
-            tm.CONFIG["FOCAL_GAMMA"]) == (0.5, 0.5, 1.0)
+    assert tm.CONFIG["TVERSKY_BETA"] >= tm.CONFIG["TVERSKY_ALPHA"]
+
+
+def test_the_shipped_weights_still_sum_to_one():
+    """alpha + beta = 1 keeps the index comparable to Dice, which is the only
+    reason a run under it can be read against the Dice baseline at all."""
+    tm = load_script("training/train_model_rfdetr.py")
+    assert tm.CONFIG["TVERSKY_ALPHA"] + tm.CONFIG["TVERSKY_BETA"] == 1.0
+
+
+def test_the_shipped_config_leaves_the_focal_exponent_off():
+    """Focal is a second variable. On 62 frames it is noisy, and changing two
+    things at once means neither run answers anything."""
+    tm = load_script("training/train_model_rfdetr.py")
+    assert tm.CONFIG["FOCAL_GAMMA"] == 1.0
 
 
 # --------------------------------------------------------------------------- #

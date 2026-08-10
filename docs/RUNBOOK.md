@@ -707,6 +707,27 @@ Change one thing at a time. `0.3/0.7` with `GAMMA 1.0` first, and read
 `small_weed_recall` and `weed_on_crop_fraction` — not overall mAP, which will
 barely move.
 
+**Read precision alongside recall, or the comparison lies.** Raising `BETA`
+buys recall *with* precision — that is the whole mechanism, not a side effect.
+The RF-DETR runs already emit far more low-score predictions per frame than the
+Mask R-CNN run does at the same confidence, so run `eval_seg --sweep` on both
+and compare `weed_recall` and `weed_precision` at a *matched* operating point.
+If precision falls further than recall rises, the fix is a higher operating
+confidence or a return to `0.5/0.5` — not a higher `BETA`.
+
+Because the loss is patched into rfdetr at runtime, nothing rfdetr itself
+writes records which one trained. `rfdetr_train_config.json` carries a
+`mask_loss` block for exactly this reason — on Dice runs too, so a missing
+block never has to be read as "probably the default":
+
+```json
+"mask_loss": {"kind": "tversky", "tversky_alpha": 0.3,
+              "tversky_beta": 0.7, "focal_gamma": 1.0}
+```
+
+Check it before comparing two runs. Sidecars that differ only in `run` name
+mean the loss did not actually change.
+
 Leave the three loss coefficients at `None` for the first run — that uses the
 model's own defaults (`mask_ce 5.0`, `mask_dice 5.0`, `cls 1.0`) and gives you a
 baseline to move from. Raise `MASK_DICE_COEF` relative to `MASK_CE_COEF` when

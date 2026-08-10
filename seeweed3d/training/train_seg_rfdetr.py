@@ -234,13 +234,9 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     if tversky:
         print(f"  mask loss: Tversky alpha={tversky_alpha} beta={tversky_beta}"
               f" gamma={focal_gamma}  (beta>alpha penalises MISSED pixels)")
-    # category_ids travels with the run because rfdetr predicts the ORIGINAL
-    # COCO category_id, not a 0-based index - see coco_export. Without it the
-    # segmenter has to guess an offset, and the wrong guess points crop safety
-    # at the wrong class.
     (out / "rfdetr_train_config.json").write_text(
-        json.dumps({**cfg, "variant": variant, "classes": summary["classes"],
-                    "category_ids": summary["category_ids"]},
+        json.dumps(run_config(cfg, variant, summary, tversky,
+                              tversky_alpha, tversky_beta, focal_gamma),
                    indent=2), encoding="utf-8")
 
     import rfdetr as R
@@ -249,6 +245,31 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     model.train(**cfg)
     print(f"\n-> {out}")
     return cfg
+
+
+def run_config(cfg, variant, summary, tversky,
+               tversky_alpha, tversky_beta, focal_gamma):
+    """The sidecar the run is read back through.
+
+    category_ids travels with the run because rfdetr predicts the ORIGINAL
+    COCO category_id, not a 0-based index - see coco_export. Without it the
+    segmenter has to guess an offset, and the wrong guess points crop safety
+    at the wrong class.
+
+    The mask loss is patched into rfdetr at runtime, so NOTHING in cfg records
+    it: two runs differing only in alpha/beta would otherwise ship identical
+    sidecars and be indistinguishable a week later, which is exactly why an
+    earlier run could not be attributed to the code that produced it. Recorded
+    for Dice runs too, so "absent" never has to be read as "probably default".
+    """
+    return {**cfg,
+            "variant": variant,
+            "classes": summary["classes"],
+            "category_ids": summary["category_ids"],
+            "mask_loss": {"kind": "tversky" if tversky else "dice",
+                          "tversky_alpha": tversky_alpha,
+                          "tversky_beta": tversky_beta,
+                          "focal_gamma": focal_gamma}}
 
 
 def _install_tversky(alpha, beta, gamma):
