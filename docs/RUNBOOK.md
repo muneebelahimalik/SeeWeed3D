@@ -681,6 +681,32 @@ trains at 1008 px with an effective batch of 16 on modest VRAM.
 | `PATIENCE` | **25, not rfdetr's 10.** The re-initialised head leaves whole classes at AP 0.000 for the first several epochs; patience 10 stopped a 60-epoch run at 23 with a class still improving |
 | — | no anchors at all: DETR set prediction, so the anchor-size trap that cost the Mask R-CNN path its small weeds cannot occur in the same form |
 
+### Tversky: breaking Dice's symmetry
+
+Dice weights a false positive and a false negative **equally**. This system does
+not — a missed weed survives to set seed, a spurious one costs one laser pulse,
+and onion the model fails to mark is onion nothing protects.
+
+```
+TI = TP / (TP + ALPHA*FP + BETA*FN)          loss = (1 - TI)^GAMMA
+```
+
+| Setting | Effect |
+|---|---|
+| `TVERSKY_ALPHA` / `TVERSKY_BETA` | `0.5/0.5` **is exactly Dice** and patches nothing at all. `0.3/0.7` penalises missed pixels harder — the natural first try here. `0.2/0.8` is aggressive; watch precision and the burn fraction |
+| `FOCAL_GAMMA` | `>1` concentrates gradient on the masks the model gets *wrong*, which here means small weeds. Noisier on 62 frames, so off by default; 1.33–2.0 is the usual range |
+
+The equivalence at `0.5/0.5` is pinned by a test against rfdetr's own
+`dice_loss`, so a Tversky run and a Dice run stay comparable. It works by
+rebinding rfdetr's module-level `dice_loss_jit` rather than forking its
+criterion; if a future version computes its mask loss differently, training
+**stops and says so** rather than quietly using Dice while the config claims
+otherwise.
+
+Change one thing at a time. `0.3/0.7` with `GAMMA 1.0` first, and read
+`small_weed_recall` and `weed_on_crop_fraction` — not overall mAP, which will
+barely move.
+
 Leave the three loss coefficients at `None` for the first run — that uses the
 model's own defaults (`mask_ce 5.0`, `mask_dice 5.0`, `cls 1.0`) and gives you a
 baseline to move from. Raise `MASK_DICE_COEF` relative to `MASK_CE_COEF` when

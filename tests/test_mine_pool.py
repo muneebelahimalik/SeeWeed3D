@@ -223,3 +223,19 @@ def test_a_class_outside_the_ontology_is_dropped_not_guessed(tmp_path):
     ex = mp.export_batch([{"frame_id": "f1"}], preds, tmp_path / "out",
                          ACTIVE)
     assert ex["n_instances"] == 0
+
+
+def test_speck_fragments_are_cleaned_out_of_the_prelabels():
+    """At CONF 0.20 a mask is often one plant plus sigmoid noise on soil, and
+    every speck is a polygon someone deletes by hand."""
+    m = np.zeros((200, 200), bool)
+    m[50:150, 50:150] = True
+    m[5:8, 5:8] = True
+    assert len(mp.mask_to_polygons(mp._clean(m, 0.15))) == 1
+    assert len(mp.mask_to_polygons(mp._clean(m, 0.0), min_area_px=4)) == 2
+
+
+def test_cleaning_is_off_when_the_fraction_is_zero():
+    m = np.zeros((100, 100), bool)
+    m[10:20, 10:20] = True
+    assert np.array_equal(mp._clean(m, 0), m)

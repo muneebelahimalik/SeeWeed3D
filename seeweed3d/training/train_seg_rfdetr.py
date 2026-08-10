@@ -101,7 +101,8 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
           early_stopping=True, patience=25, use_ema=True,
           mask_ce_coef=None, mask_dice_coef=None, cls_coef=None,
           multi_scale=True, track="auto", allow_default_resolution=False,
-          lr_scheduler="cosine", warmup_epochs=1.0, extra=None):
+          lr_scheduler="cosine", warmup_epochs=1.0,
+          tversky_alpha=0.5, tversky_beta=0.5, focal_gamma=1.0, extra=None):
     if variant not in VARIANTS:
         raise SystemExit(f"ERROR: --variant must be one of "
                          f"{sorted(VARIANTS)}; got {variant!r}")
@@ -213,6 +214,8 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
             cfg[key] = val
     cfg.update(extra or {})
 
+    tversky = _install_tversky(tversky_alpha, tversky_beta, focal_gamma)
+
     if workers and sys.platform == "win32":
         print(f"\n  [!] workers={workers} on Windows. If training stops right "
               f"after the\n      model-summary table with no traceback, that "
@@ -228,6 +231,9 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     print(f"  schedule: lr {lr} {lr_scheduler} | warmup {warmup_epochs} ep | "
           f"{epochs} epochs | early stop "
           f"{f'patience {patience}' if early_stopping else 'off'}")
+    if tversky:
+        print(f"  mask loss: Tversky alpha={tversky_alpha} beta={tversky_beta}"
+              f" gamma={focal_gamma}  (beta>alpha penalises MISSED pixels)")
     # category_ids travels with the run because rfdetr predicts the ORIGINAL
     # COCO category_id, not a 0-based index - see coco_export. Without it the
     # segmenter has to guess an offset, and the wrong guess points crop safety
@@ -243,6 +249,34 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     model.train(**cfg)
     print(f"\n-> {out}")
     return cfg
+
+
+def _install_tversky(alpha, beta, gamma):
+    """Swap rfdetr's Dice mask loss for Tversky. Returns True if swapped.
+
+    Dice weights a false positive and a false negative equally; this system
+    does not. A missed weed survives to set seed, a spurious one costs a laser
+    pulse, and onion the model fails to mark is onion nothing protects. Tversky
+    is Dice with that symmetry broken open, and alpha=beta=0.5 IS Dice - so at
+    the defaults nothing is patched at all and the run is bit-identical.
+
+    rfdetr's loss_masks() calls the module-level `dice_loss_jit`, so the swap
+    is a name rebind rather than a fork of its criterion. Fragile in the sense
+    that it depends on that symbol existing - hence the explicit check and the
+    refusal to pretend it worked."""
+    if (alpha, beta, gamma) == (0.5, 0.5, 1.0):
+        return False
+    from training.losses import make_tversky
+    import rfdetr.models.criterion as C
+    if not hasattr(C, "dice_loss_jit"):
+        raise SystemExit(
+            "ERROR: rfdetr.models.criterion has no `dice_loss_jit` to replace, "
+            "so the Tversky mask loss cannot be installed.\n"
+            "This version of rfdetr computes its mask loss differently. Set "
+            "TVERSKY_ALPHA/BETA back to 0.5 and FOCAL_GAMMA to 1.0 to train "
+            "with its own Dice loss.")
+    C.dice_loss_jit = make_tversky(alpha, beta, gamma)
+    return True
 
 
 def _installed(mod):
@@ -361,6 +395,13 @@ def main(argv=None):
                    help="'cosine' (decays over --epochs) or 'step' (rfdetr's "
                         "default, which never fires below 100 epochs)")
     p.add_argument("--warmup-epochs", type=float, default=1.0)
+    p.add_argument("--tversky-alpha", type=float, default=0.5,
+                   help="weight on FALSE POSITIVES in the mask loss")
+    p.add_argument("--tversky-beta", type=float, default=0.5,
+                   help="weight on FALSE NEGATIVES. beta>alpha buys recall; "
+                        "alpha=beta=0.5 is exactly Dice and patches nothing")
+    p.add_argument("--focal-gamma", type=float, default=1.0,
+                   help="focal exponent on the Tversky index; 1.0 = off")
     p.add_argument("--no-ema", action="store_true")
     p.add_argument("--mask-ce-coef", type=float, default=None)
     p.add_argument("--mask-dice-coef", type=float, default=None)
@@ -381,6 +422,8 @@ def main(argv=None):
           mask_dice_coef=a.mask_dice_coef, cls_coef=a.cls_coef,
           multi_scale=not a.no_multi_scale, track=a.track,
           lr_scheduler=a.lr_scheduler, warmup_epochs=a.warmup_epochs,
+          tversky_alpha=a.tversky_alpha, tversky_beta=a.tversky_beta,
+          focal_gamma=a.focal_gamma,
           allow_default_resolution=a.allow_default_resolution)
 
 
