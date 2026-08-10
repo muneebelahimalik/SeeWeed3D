@@ -1,0 +1,264 @@
+# Mixed-scene prelabeling — precise masks, classes assigned by hand
+
+For building a dataset of scenes that contain **both onions and weeds**, which
+is what the field actually looks like and what neither existing prelabeler can
+be pointed at.
+
+`seeweed3d/annotation/prelabel_mixed_sam3.py` has exactly one job: **one precise
+mask per plant**. It emits a single class, `plant`, and you assign the real
+classes in CVAT with one keystroke per shape.
+
+---
+
+## Why a separate module rather than a flag on the weed prelabeler
+
+The two prelabelers already in the repo both rest on an assumption that a mixed
+scene breaks:
+
+| Module | Assumption | In a mixed scene |
+|---|---|---|
+| `prelabel_weeds_sam3.py` | vegetation == weed | every onion becomes a weed |
+| `prelabel_onions_sam3.py` | vegetation == onion | every weed becomes crop |
+
+Turning that off is not a flag, it is a different pipeline: it removes the class
+proposal entirely and moves all of the effort onto separation and boundaries.
+
+## Why one homogeneous class is the right answer, not a shortcut
+
+This was your call and it holds up for three independent reasons:
+
+1. **Shape cannot tell an onion from a grass weed — and would get it backwards.**
+   The one morphology call the weed prelabeler makes confidently is
+   *elongation → `grass_weed`* (a blade has aspect ~20, a rosette ~1). An onion
+   *is* a blade. Auto-classifying in a mixed scene would systematically label
+   the crop as a weed, which is the single worst error this project can make.
+
+2. **A plausible wrong label survives review; a blank one does not.** Annotators
+   confirm what looks right and re-examine what looks empty. A neutral class
+   forces a decision on every shape.
+
+3. **The cheap half is the half being automated the wrong way round.**
+   Reassigning a class is one keystroke. Fixing a boundary is a minute of mouse
+   work. Spend the pipeline on boundaries.
+
+`plant` deliberately sits **outside** `common/ontology.CLASSES`, with category id
+`100`. So it can never be trained on by accident, and any shape still carrying
+it is a shape nobody has reviewed — which is a number you can count.
+
+---
+
+## The mask logic: vegetation owns the boundary, SAM owns the identity
+
+These are two different questions and the pipeline is bad at them in opposite
+directions.
+
+**Where a plant ends** is nearly free. Top-down field imagery is green tissue on
+brown soil; a colour index answers that per pixel, at full resolution, with no
+model. What it cannot do is say *which* green pixel belongs to *which* plant — a
+colour index sees one blob where two rosettes touch.
+
+**SAM 3 is the reverse.** Concept segmentation returns instances, so identity is
+what it is good at. Its boundaries are a learned prior at its own working
+resolution: it clips leaf tips, rounds off dissected margins, and bleeds onto
+soil. Intersecting is not enough on its own either — a clipped tip is already
+gone before the intersection happens.
+
+So each is used only for what it is good at:
+
+```
+1. vegetation prior          -> veg          the set of plant pixels
+2. SAM 3 proposals           -> seeds        proposal ∩ veg, eroded
+3. marker-controlled watershed over veg, seeded by those markers,
+   flooding the INVERTED DISTANCE TRANSFORM
+```
+
+Step 3 is what produces the masks:
+
+- a seed that **undershot** grows out to the true leaf edge
+- a proposal that **bled onto soil** is cut back to `veg` by construction, and
+  can never re-acquire soil because the flood runs only inside `veg`
+- two plants sharing **one green blob** are cut apart where the blob is
+  thinnest, which is where they actually touch
+
+Flooding the *image gradient* instead sounds more principled and is worse:
+inside a canopy the strongest gradients are leaf veins, shadow edges and
+specular highlights, so the cut chases texture within one plant instead of the
+join between two.
+
+### Why this split is safe when the weed prelabeler's was not
+
+`prelabel_weeds_sam3.py` ships `SPLIT_TOUCHING_INSTANCES: False` because
+splitting on distance-transform **peaks** fragmented single plants — a leaf
+reaching away from the crown raises a second peak, and one rosette became two
+annotations.
+
+Nothing here splits on peaks. **The markers come from SAM**, so a blob is
+divided only where SAM saw two distinct plants, and a leaf reaching away from a
+crown is not a second SAM detection. The watershed decides only *where* the cut
+falls, never *whether* there is one. A test pins this: a six-armed rosette with
+one seed comes out as one instance.
+
+### Two implementation details that cost real tissue
+
+Both were found by measurement and are guarded by regression tests.
+
+**No background marker.** Seeding the soil as a background label looks like the
+careful thing to do and destroys thin tissue: soil is flat ground at the top of
+the relief, so a background flood reaches a near-flat arm tip before the flood
+coming up the arm from the crown does. On a synthetic six-armed rosette that
+marker ate **four of the six tips**. Plant-versus-soil is not the watershed's
+question anyway — the prior already answered it, and intersecting with `veg`
+enforces it exactly.
+
+**Ridge reclamation.** Watershed marks its boundary pixels `-1`, and OpenCV also
+stamps the image border. Left alone that shaves a pixel off every instance —
+along the join between two plants, where it belongs, but also off any plant
+running to the frame edge, where it does not. Ridge pixels are reclaimed only
+where unambiguous: a ridge pixel whose 8-neighbourhood touches exactly **one**
+instance is an outer edge and goes to it; one touching **two** is a real join
+and stays unassigned. So adjacent instances end up separated by a one-pixel line
+and **no pixel belongs to two instances**.
+
+---
+
+## Recall: unclaimed green becomes an instance
+
+A vegetation component containing no seed is a plant SAM missed entirely. Those
+are recovered as instances of their own, gated on mean vegetation score
+(`RECOVER_MIN_VEG_SCORE`).
+
+The weed prelabeler disables its equivalent backstop. That reasoning does not
+carry over: **there**, a recovered instance also had to be given a class from
+colour alone, so a green-tinted mineral fleck entered the training set as a
+labelled weed. **Here** every instance is `plant` and every instance is reviewed
+before it becomes training data, so a phantom costs one keypress to delete while
+a missed plant is a plant the annotator is never shown — in a prelabelled task
+nobody draws what is not already there.
+
+Read the previews for the first session anyway. If you see instances on bare
+ground, raise `RECOVER_MIN_VEG_SCORE` or set `RECOVER_UNSEEDED: False`.
+
+---
+
+## Running it
+
+```powershell
+conda activate dl
+
+# edit the top of the file
+#   DATASET_ROOT  = r"E:\Dataset_Vidalia\Mixed_1"
+#   CONFIG["ONLY_SESSIONS"]     = ["vid1_20260108_101500"]
+#   CONFIG["LIMIT_PER_SESSION"] = 20        # trial first, then None
+
+python seeweed3d/annotation/prelabel_mixed_sam3.py
+```
+
+**Do a 20-frame trial and look at `preview/` before committing to a full run.**
+Previews are coloured **by instance index**, not by class — every instance here
+has the same class, so a per-class palette would paint the frame one colour and
+show nothing. Two adjacent plants in two different colours is the whole signal.
+A white halo marks an instance SAM never proposed (the recall backstop).
+
+### Output, per session under `auto_labels_mixed/<session>/`
+
+| Item | Use |
+|---|---|
+| `cvat_ready/` | **upload this folder to CVAT** |
+| `instances_default.json` | COCO import for CVAT (one category, `plant`) |
+| `mixed_cvat_labels.json` | paste into CVAT's Raw label editor |
+| `preview/` | judge separation and boundaries before a full run |
+| `review_first.txt` | frames whose numbers say the masks are wrong — **do these first** |
+| `flagged_rgb/` | colour-cast/glare frames, not exported |
+| `instances.csv` | per-instance area, seed area, growth factor, source |
+| `masks/` | the exported union, for a quick visual diff |
+
+Same layout as the weed and onion prelabelers, so anything already built around
+those directories keeps working.
+
+### The console readout to actually watch
+
+```
+[sess] 62 frames | 431 instances | 0 flagged | 1 with none
+    coverage: 97.3% of vegetation inside an instance | 402 from SAM + 29 recovered
+    3 frame(s) to review first -> review_first.txt
+```
+
+**Coverage, not instance count.** Vegetation left outside every instance is
+plant the annotator will never be shown. A pipeline can look productive while
+quietly missing plants; the instance count cannot tell you that and coverage
+can.
+
+---
+
+## Correcting in CVAT
+
+1. Create the task from `cvat_ready/`.
+2. Paste `mixed_cvat_labels.json` into the **Raw** label editor.
+3. Import `instances_default.json` as **COCO 1.0**.
+4. Work through `review_first.txt` first, then the rest.
+
+Every shape arrives labelled `plant`. Reassign with the number keys — the schema
+puts the real classes **first** precisely because CVAT assigns label shortcuts in
+list order:
+
+| Key | Class |
+|---|---|
+| 1 | `cutleaf_evening_primrose` |
+| 2 | `wild_radish` |
+| 3 | `grass_weed` |
+| 4 | `weed_cluster` |
+| 5 | `other_weed` |
+| 6 | `onion_plant` |
+
+`plant` sits last and is never chosen, only cleared. **Anything still labelled
+`plant` when you export is unreviewed** — that is the sentinel's second job, and
+it is worth grepping the export for before merging.
+
+No LEP point label is offered. A shape type nobody draws still costs a slot in
+that shortcut list, and LEP is better estimated over corrected masks anyway — an
+LEP computed on a mask that turns out to be two plants is wasted work.
+
+### Merging into the training set
+
+`prepare_dataset.py` reads the CVAT export as usual. Nothing special is needed —
+by the time it is exported, every shape carries a real ontology class. If a
+`plant` shape survives, the category id `100` shows up as an unknown class
+rather than silently becoming class 1.
+
+---
+
+## Tuning for mask quality
+
+In rough order of how much they matter.
+
+| Setting | When to change it |
+|---|---|
+| `EXG_THRESHOLD` | **The first thing to tune.** It decides every boundary. Onion is *bluer* than most broadleaf weeds — if previews show onion blades eroded while weeds look right, this is the cause, not SAM. Lower it to catch pale or shadowed tissue, at the cost of soil speckle |
+| `VEG_MIN_COMPONENT_PX` | 60 here vs 150 in the weed prelabeler. This floor deletes tissue outright and nothing downstream recovers it. Raise it only if lowering `EXG_THRESHOLD` brought in speckle |
+| `VEG_FILL_HOLES_MAX_PX` | Specular highlights read as non-green and punch holes through the prior, which come out as holes in the polygon. Raise if you see them; a genuine gap between leaves is soil and is protected by the area bound |
+| `SEED_NMS_IOU` | Lower merges more duplicate proposals into one plant; raise keeps more distinct instances. Symptom of too high: one plant with two overlapping outlines |
+| `SEED_ERODE_PX` | Only affects where two instances meet. Raise if the cut between touching plants looks like SAM's boundary rather than the neck |
+| `RECOVER_MIN_VEG_SCORE` | Raise if the backstop is inventing plants on bare ground |
+| `REVIEW_*` | Triage thresholds only — they change which frames get listed, never a mask |
+
+### `instances.csv` tells you which failure you have
+
+`growth` is the ratio of final area to seed area — how far the watershed had to
+carry each seed.
+
+- **`growth` near 1 everywhere** — SAM already had the plants; the watershed is
+  doing nothing. Fine, but check that boundaries actually look right.
+- **`growth` very large on a few instances** — the signature of two plants
+  merged into one instance, because SAM only proposed one of them. These are
+  flagged into `review_first.txt` by `REVIEW_MAX_GROWTH`. The pipeline cannot
+  fix this itself; splitting the shape in CVAT is the correction.
+- **many `source: vegetation` rows** — SAM is under-detecting. Check the
+  exemplar gates before trusting the backstop to carry the session.
+
+---
+
+## What this deliberately does not do
+
+No LEP, no growth stage, no instance crops, no depth, no species proposal. All
+of it belongs to the weed prelabeler and can be run later over **corrected**
+masks, which is the better order anyway.

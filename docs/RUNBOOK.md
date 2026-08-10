@@ -18,6 +18,7 @@ on PATH.
 | [1. Extract](#1-extract-recordings) | recordings → indexed frame pool | no |
 | [2. Curate](#2-curate-the-pool-optional) | drop redundant/bad frames | no |
 | [3. Prelabel with SAM 3](#3-prelabel-with-sam-3) | auto-annotations to correct | **yes** |
+| [3a. Mixed scenes](#3a-mixed-scenes-onions-and-weeds--prelabel_mixed_sam3py) | precise masks only, classes assigned in CVAT | **yes** |
 | [3b. Mine the pool](#3b-mine-the-pool-for-the-next-batch) | pick the frames worth annotating next | **yes** |
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
 | [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
@@ -29,6 +30,7 @@ on PATH.
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
 **Related:** [growing the dataset](dataset_growth.md) ·
+[mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
 [LEP localization explained](lep_localization_explained.md)
@@ -188,8 +190,45 @@ false-positiving on your substrate and you should tighten
 | `flagged_rgb/` | colour-cast/glare frames — annotate separately or skip |
 
 > `vegetation == weed` holds only in **weed-only** recordings, and
-> `vegetation == onion` only in **onion-only** ones. Never point a prelabeler at
-> a mixed scene.
+> `vegetation == onion` only in **onion-only** ones. Never point either of these
+> two at a mixed scene — use §3a.
+
+---
+
+### 3a. Mixed scenes (onions *and* weeds) — `prelabel_mixed_sam3.py`
+
+Neither prelabeler above can be pointed at a mixed scene: one would call every
+onion a weed, the other would call every weed crop. This module drops the class
+proposal entirely and does one job — **one precise mask per plant** — emitting a
+single class, `plant`, that you reassign in CVAT with one keystroke per shape.
+
+```powershell
+# edit DATASET_ROOT and CONFIG["ONLY_SESSIONS"] at the top, then
+python seeweed3d/annotation/prelabel_mixed_sam3.py
+```
+
+Output lands under `auto_labels_mixed/<session>/` in the same layout as above,
+plus `review_first.txt` — the frames whose numbers say the masks are wrong.
+Correct those first.
+
+The line to watch in the console is **coverage**, not the instance count:
+
+```
+coverage: 97.3% of vegetation inside an instance | 402 from SAM + 29 recovered
+```
+
+Vegetation outside every instance is plant the annotator is never shown, because
+in a prelabelled task nobody draws what is not already there.
+
+Previews are coloured **by instance index**, not by class — every instance has
+the same class here, so a per-class palette would show nothing. Two adjacent
+plants in two different colours is the signal.
+
+**`docs/mixed_prelabeling.md` is the full guide**: why one homogeneous class is
+correct rather than a shortcut (shape says *blade → grass*, and an onion **is** a
+blade), how the vegetation prior and SAM are combined so each only answers what
+it is good at, why the split that fragmented plants in `prelabel_weeds_sam3.py`
+cannot happen on this path, and which knob to turn for each mask symptom.
 
 **The onion prelabeler does not write its own label file.** It produces
 `cvat_ready/`, `instances_default.json`, `preview/` and `flagged_rgb/` under
