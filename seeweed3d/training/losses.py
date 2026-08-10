@@ -100,3 +100,67 @@ class LEPLoss(nn.Module):
                  + self.w.targetability * parts["targetability"]
                  + self.w.outside_mask * parts["outside_mask"])
         return total, {k: float(v.detach()) for k, v in parts.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Mask losses for Stage A
+#
+# WHY TVERSKY AND NOT JUST DICE
+# -----------------------------
+# Dice weights a false positive and a false negative EQUALLY. This system does
+# not: a missed weed survives to set seed, while a spurious weed costs one
+# laser pulse. The same asymmetry runs the other way for the crop - onion the
+# model fails to mark is onion the targeting stage has no reason to protect.
+#
+# Tversky is Dice with that symmetry broken open:
+#
+#     TI = TP / (TP + alpha*FP + beta*FN)
+#
+# beta > alpha penalises MISSING pixels harder than inventing them, which is
+# the direction this project cares about on both classes. alpha = beta = 0.5 is
+# exactly Dice, so this generalises rather than replaces - and the test suite
+# pins that equivalence against rfdetr's own dice_loss rather than asserting it
+# in a comment.
+#
+# Focal Tversky adds (1 - TI)^gamma, which down-weights masks the model already
+# gets right and concentrates the gradient on the hard ones. gamma = 1 is plain
+# Tversky. Small weeds are the hard ones here, so gamma > 1 aims the loss at
+# exactly the instances the recall-by-size figure says are being lost - at the
+# cost of noisier gradients on a 62-frame set, which is why it is not the
+# default.
+# --------------------------------------------------------------------------- #
+def tversky_loss(inputs, targets, num_masks, alpha=0.5, beta=0.5, gamma=1.0,
+                 smooth=1.0):
+    """Tversky / Focal-Tversky loss over flattened mask logits.
+
+    Signature matches rfdetr's `dice_loss` so it can stand in for it directly.
+
+    inputs:  raw logits, any shape, batch-first.
+    targets: same shape, 1.0 for foreground.
+    num_masks: denominator, as in the DETR criterion.
+    alpha: weight on FALSE POSITIVES  (predicted foreground that is not).
+    beta:  weight on FALSE NEGATIVES  (missed foreground). beta > alpha buys
+           recall, which is what a weeder wants.
+    gamma: focal exponent. 1.0 is plain Tversky.
+    """
+    p = inputs.sigmoid().flatten(1)
+    t = targets.flatten(1)
+    tp = (p * t).sum(-1)
+    fp = (p * (1 - t)).sum(-1)
+    fn = ((1 - p) * t).sum(-1)
+    # smooth/2 on both sides so that alpha = beta = 0.5 reproduces the standard
+    # (2*TP + smooth) / (P + T + smooth) Dice exactly - see the test.
+    half = smooth / 2.0
+    ti = (tp + half) / (tp + alpha * fp + beta * fn + half)
+    loss = (1.0 - ti)
+    if gamma != 1.0:
+        loss = loss.clamp_min(0.0) ** gamma
+    return loss.sum() / num_masks
+
+
+def make_tversky(alpha=0.5, beta=0.5, gamma=1.0):
+    """A drop-in for rfdetr's `dice_loss_jit(inputs, targets, num_masks)`."""
+    def _loss(inputs, targets, num_masks):
+        return tversky_loss(inputs, targets, num_masks, alpha, beta, gamma)
+    _loss.tversky = (alpha, beta, gamma)
+    return _loss

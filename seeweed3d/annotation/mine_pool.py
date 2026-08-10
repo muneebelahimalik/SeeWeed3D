@@ -104,6 +104,14 @@ CONFIG = {
 
     # Hardlink images instead of copying. Same volume only; falls back to copy.
     "LINK_IMAGES": True,
+
+    # Drop disconnected mask fragments smaller than this fraction of the
+    # instance's largest component before writing polygons. At CONF 0.20 a
+    # predicted mask is often one plant plus a scattering of specks where the
+    # sigmoid crossed threshold on soil texture, and every speck is a polygon
+    # someone has to delete by hand. Relative, not absolute, so a genuine
+    # cotyledon survives whole. 0 disables.
+    "MIN_FRAGMENT_FRAC": 0.15,
 }
 
 # #############################################################################
@@ -192,6 +200,13 @@ def frame_result(det, session_id, frame_id):
     return {"session_id": session_id, "frame_id": frame_id,
             "width": det.width, "height": det.height,
             "n_instances": len(det), "targets": targets}
+
+
+def _clean(mask, min_frac):
+    if not min_frac:
+        return mask
+    from perception.segmenter import drop_fragments
+    return drop_fragments(mask, min_frac)
 
 
 def mask_to_polygons(mask, min_area_px=24, epsilon_frac=0.004):
@@ -315,7 +330,8 @@ def mine(cfg=None):
                 {"class_name": det.class_name(i),
                  "score": float(det.scores[i]),
                  "area_px": int(np.asarray(det.masks[i]).astype(bool).sum()),
-                 "polygons": mask_to_polygons(det.masks[i])}
+                 "polygons": mask_to_polygons(
+                     _clean(det.masks[i], c.get("MIN_FRAGMENT_FRAC", 0.0)))}
                 for i in range(len(det))],
         }
         if (k + 1) % 50 == 0:

@@ -126,6 +126,35 @@ class Detections:
         return [i for i in range(len(self)) if int(self.classes[i]) != crop_idx]
 
 
+def drop_fragments(mask, min_frac=0.15, min_px=0):
+    """Keep the largest connected component and anything comparable to it.
+
+    A predicted mask is often one plant plus a scattering of specks - the tail
+    of the sigmoid crossing threshold on soil texture. Those specks cost
+    something concrete here: each one is a polygon an annotator has to delete
+    in a prelabelled frame, and a speck landing on onion tissue creates a
+    crop conflict the targeting stage then has to resolve.
+
+    `min_frac` is a fraction of the LARGEST component, not an absolute area, so
+    it scales with the plant instead of quietly deleting genuine cotyledons -
+    the small instances this project is already losing. A component at 15% of
+    the main body is a speck; a second true lobe of a lobed leaf is not.
+
+    Two parts of one plant separated by an occluding leaf are BOTH kept, which
+    is why this is not simply "take the largest".
+    """
+    import cv2
+    m = np.asarray(mask).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    if n <= 2:                                  # background + at most one blob
+        return m.astype(bool)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    biggest = int(areas.max())
+    thresh = max(float(min_frac) * biggest, float(min_px))
+    keep = {i + 1 for i, a in enumerate(areas) if a >= thresh}
+    return np.isin(labels, list(keep))
+
+
 class UltralyticsSegmenter:
     """Loads a YOLO26-seg checkpoint and returns Detections."""
 

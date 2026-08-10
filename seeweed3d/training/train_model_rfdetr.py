@@ -136,6 +136,27 @@ CONFIG = {
     "MASK_DICE_COEF": None,
     "CLS_COEF": None,
 
+    # -- Tversky mask loss -----------------------------------------------------
+    # Dice weights a false positive and a false negative EQUALLY. This system
+    # does not: a missed weed survives to set seed, a spurious one costs one
+    # laser pulse, and onion the model fails to mark is onion nothing protects.
+    #
+    #     TI = TP / (TP + ALPHA*FP + BETA*FN)
+    #
+    # BETA > ALPHA penalises MISSED pixels harder. 0.5/0.5 is exactly Dice and
+    # patches nothing at all, so the default run is unchanged.
+    #
+    #   0.5 / 0.5   Dice. The baseline.
+    #   0.3 / 0.7   recall-leaning. The natural first try here.
+    #   0.2 / 0.8   aggressive; watch precision and the burn fraction.
+    "TVERSKY_ALPHA": 0.5,
+    "TVERSKY_BETA": 0.5,
+
+    # Focal exponent on (1 - TI). >1 concentrates gradient on the masks the
+    # model gets WRONG, which here means small weeds. Noisier on 62 frames,
+    # so it is off by default. 1.33-2.0 is the usual range.
+    "FOCAL_GAMMA": 1.0,
+
     # -- Monitoring ------------------------------------------------------------
     # RF-DETR's own tensorboard/mlflow flags, so its runs land in the SAME
     # MLflow store as the Mask R-CNN runs and the two are comparable in one
@@ -178,7 +199,9 @@ def main(cfg=None):
           use_ema=c["USE_EMA"], multi_scale=c["MULTI_SCALE"],
           lr_scheduler=c["LR_SCHEDULER"], warmup_epochs=c["WARMUP_EPOCHS"],
           mask_ce_coef=c["MASK_CE_COEF"], mask_dice_coef=c["MASK_DICE_COEF"],
-          cls_coef=c["CLS_COEF"], track=c["TRACK"])
+          cls_coef=c["CLS_COEF"], track=c["TRACK"],
+          tversky_alpha=c["TVERSKY_ALPHA"], tversky_beta=c["TVERSKY_BETA"],
+          focal_gamma=c["FOCAL_GAMMA"])
 
     # checkpoint_best_total.pth, NOT checkpoint_best_ema.pth. rfdetr keeps
     # three: _regular (best live weights), _ema (best averaged weights) and
