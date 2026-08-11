@@ -29,7 +29,8 @@ on PATH.
 | [9. Inference](#9-run-inference) | predict on unlabelled frames; full RGB-D pipeline | yes (practically) |
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
-**Related:** [growing the dataset](dataset_growth.md) ·
+**Related:** [project history](../CHANGELOG.md) ·
+[growing the dataset](dataset_growth.md) ·
 [mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
