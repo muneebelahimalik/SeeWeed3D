@@ -150,6 +150,53 @@ session, extracts RGB, and prints why. That session is still fully usable for
 segmentation — only 3D and LEP need real depth. Set it to `False` only if you
 have verified the writer actually stored millimetres.
 
+### If the 8-bit file is a depth *preview*
+
+"Not 16-bit" covers two very different things, and the difference decides
+whether the geometry is coarsely recoverable or gone. Find out which:
+
+```powershell
+python -m seeweed3d.validation.inspect_depth_video `
+    --video "E:\...\Depth_video.avi" --save-preview depth_frame.png
+```
+
+| Verdict | Meaning |
+|---|---|
+| `true_16bit` | metric depth — extract normally |
+| `grayscale_8bit` | a preview. Geometry present at 1/256 of its scale |
+| `colormapped_8bit` | a colourised preview. Same, and the colormap is named |
+| `unknown_8bit` | not a range image. Nothing to recover |
+
+For the two recoverable cases, `RECOVER_8BIT_DEPTH: True` inverts the capture
+GUI's display scaling and writes approximate millimetres:
+
+```python
+CONFIG["RECOVER_8BIT_DEPTH"] = True
+CONFIG["DEPTH_VIS_MAX_MM"]   = 3000.0   # the scale it was DRAWN at
+```
+
+**Read this before turning it on.**
+
+- Output goes to **`depth_approx/`, never `depth/`**. A file under `depth/` is
+  metric millimetres and everything downstream is entitled to assume so;
+  putting an approximation there would recreate by hand the exact silent
+  corruption `REQUIRE_16BIT_DEPTH` exists to prevent. The two directories hold
+  identical-looking uint16 PNGs, so the distinction lives in
+  `meta/session.json` → `depth_kind` (`metric` | `approximate` | `none`) and in
+  a `depth_kind` column in `registry.csv`. **Check it before using depth.**
+- `DEPTH_VIS_MAX_MM` is an *assumption* unless your sessions have a
+  `session_meta.txt` to take it from. Every recovered distance inherits it.
+- At 3000 mm one level is **11.8 mm**, before DCT ringing that concentrates at
+  exactly the depth discontinuities that matter. Fine for a ground plane,
+  camera height or row geometry. **Not** usable for the LEP canopy-height
+  channel, where the whole signal is a few centimetres of relief on one plant.
+- Approximate depth is deliberately **kept out of
+  `median_depth_valid_frac_veg`**, so that column keeps meaning one thing
+  across sessions.
+- If the run warns that the invalid sentinel did not survive the encode,
+  invalid regions are now indistinguishable from near distances, and any 3D
+  point built there is fiction.
+
 ---
 
 ## 2. Curate the pool (optional)
