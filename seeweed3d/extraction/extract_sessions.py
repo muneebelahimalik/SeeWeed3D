@@ -76,12 +76,12 @@ from common.progress import Progress  # noqa: E402
 
 INPUT_ROOTS = [
     {
-        "path":       r"C:\ZED\DataCollection\Vidalia2",
-        "trip":       "vid2",
-        "site":       "vidalia",
+        "path":       r"E:\Research (Muneeb)\Datasets\Vidalia\Vidalia 1 2025",
+        "trip":       "Visit1",
+        "site":       "vidalia_1",
         "field":      "field_A",
         "scene_hint": "mixed",        # mixed | onion_only | weed_only | unknown
-        "notes":      "March 2025 visit - v1 capture format",
+        "notes":      "Vidalia Visit One - mix",
     },
     # Add more visits by uncommenting and editing:
     # {
@@ -95,7 +95,7 @@ INPUT_ROOTS = [
 # ---------------------------------------------------------------------------
 # 2) OUTPUT DIRECTORY  -  the indexed, QC'd dataset is written here
 # ---------------------------------------------------------------------------
-OUTPUT_ROOT = r"M:\Research\Data\SeeWeed3D\dataset"
+OUTPUT_ROOT = r"E:\Dataset_Vidalia\Vidalia_visit_1_2025_all_sessions"
 
 # =============================================================================
 # Everything below is advanced tuning. The defaults are sensible.
