@@ -112,6 +112,44 @@ pick which sessions you will hold out for testing.
 > **Depth is raw uint16 millimetres, `0` = invalid.** Never rescale it. Always
 > read it via `common/depth_utils.load_depth_mm()`.
 
+### Mixed containers, and checking depth before you trust it
+
+A campaign may have written **AVI** in its early sessions and **MKV** in its
+later ones under one parent folder. Both are discovered — `VIDEO_SUFFIXES`
+covers `.mkv .avi .mp4 .mov`, and patterns match the file *stem*, so
+`RGB_video.avi` and `RGB_video.mkv` are found by the same rule. Anything in a
+container not on that list is reported as a `[SKIP]` line naming the extension,
+never silently dropped.
+
+**The container is not the issue; the depth pixel format is.** Depth is decoded
+by asking ffmpeg for `gray16le`, and ffmpeg will produce `gray16le` from *any*
+source — including an 8-bit lossy one, by scaling up values it invented. The
+result is a valid PNG full of plausible millimetres that are **fiction**, and
+nothing downstream can detect it: the QC fractions compute, the range looks
+sane, and the LEP's canopy-height channel reads the noise as terrain.
+
+AVI is why this matters. Its usual codecs (MJPEG, XVID, DIVX) have **no 16-bit
+grayscale format at all**. But FFV1 in AVI is perfectly fine and a badly
+remuxed MKV is not, so this is checked per session rather than assumed from the
+extension.
+
+Check yours before a full run:
+
+```powershell
+ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,pix_fmt `
+    -of csv=p=0 "E:\...\Session_20250221_130957\Depth_video.avi"
+```
+
+| Output | Meaning |
+|---|---|
+| `ffv1,gray16le` | real millimetres — extract normally |
+| `mjpeg,yuvj420p` / `mpeg4,yuv420p` / anything 8-bit | **not depth data.** RGB is still extracted; the session has no usable depth |
+
+`REQUIRE_16BIT_DEPTH: True` (the default) drops the depth stream for such a
+session, extracts RGB, and prints why. That session is still fully usable for
+segmentation — only 3D and LEP need real depth. Set it to `False` only if you
+have verified the writer actually stored millimetres.
+
 ---
 
 ## 2. Curate the pool (optional)

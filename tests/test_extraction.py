@@ -104,3 +104,108 @@ def test_batches_respect_holdout_and_reproducible(extracted_root):
     shutil.rmtree(extracted_root / "batches")
     files2 = _select(extracted_root, holdout)
     assert files2("b01") == train and files2("b_test") == test          # stable seed
+
+
+# --------------------------------------------------------------------------- #
+# Container discovery
+#
+# One field campaign wrote AVI in its early sessions and MKV in its later ones,
+# under the same parent folder. The patterns carried ".mkv", so the AVI
+# sessions were not merely skipped - discover() returned nothing for them AND
+# printed nothing, because the "looks like a recording" check used the same
+# extension list that had just failed. A run over the mixed folder looked like
+# a success while extracting two sessions out of nine.
+# --------------------------------------------------------------------------- #
+ex = load_script("extraction/extract_sessions.py")
+
+
+def _fake_session(root, name, ext, files=("RGB_video", "Depth_video")):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f"{f}{ext}").write_bytes(b"stub")
+    (d / "calibration_params.txt").write_text("Left Camera Intrinsic\nfx: 700, fy: 700\ncx: 640, cy: 360\n")
+    return d
+
+
+def _cfg(root, **over):
+    return dict(ex.CONFIG, INPUT_ROOTS=[{
+        "path": str(root), "trip": "vid1", "site": "vidalia",
+        "field": "field_A", "scene_hint": "mixed", "notes": ""}], **over)
+
+
+def test_avi_and_mkv_sessions_are_both_discovered(tmp_path):
+    _fake_session(tmp_path, "Session_20250221_130957", ".avi")
+    _fake_session(tmp_path, "Session_20250226_202127", ".mkv")
+    got = {s["folder"].name: s for s in ex.discover(_cfg(tmp_path))}
+    assert set(got) == {"Session_20250221_130957", "Session_20250226_202127"}
+    assert got["Session_20250221_130957"]["rgb"].suffix == ".avi"
+    assert got["Session_20250221_130957"]["depth"].suffix == ".avi"
+
+
+def test_the_right_stream_is_still_never_taken_for_the_left(tmp_path):
+    """The stem now carries the match, so the 'right' guard has to survive the
+    change - RGB_right_video is a different camera, not a fallback."""
+    d = _fake_session(tmp_path, "Session_20250221_130957", ".avi",
+                      files=("RGB_video", "RGB_right_video"))
+    assert ex.find_one(d, ex.CONFIG["RGB_PATTERNS"]).name == "RGB_video.avi"
+    assert ex.find_one(d, ex.CONFIG["RIGHT_PATTERNS"],
+                       want_right=True).name == "RGB_right_video.avi"
+
+
+def test_a_recording_in_an_unknown_container_is_reported_not_swallowed(
+        tmp_path, capsys):
+    _fake_session(tmp_path, "Session_20250221_130957", ".wmv")
+    assert ex.discover(_cfg(tmp_path)) == []
+    out = capsys.readouterr().out
+    assert "SKIP" in out and ".wmv" in out and "VIDEO_SUFFIXES" in out
+
+
+def test_an_ordinary_folder_stays_quiet(tmp_path):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "readme.txt").write_text("hi")
+    assert ex.discover(_cfg(tmp_path)) == []
+
+
+# --------------------------------------------------------------------------- #
+# Depth integrity
+#
+# The decoder asks ffmpeg for gray16le, and ffmpeg produces gray16le from ANY
+# input - including 8-bit lossy, by scaling up values it invented. The output
+# is a valid PNG full of plausible millimetres that are fiction, and nothing
+# downstream can tell.
+# --------------------------------------------------------------------------- #
+def test_sixteen_bit_depth_passes():
+    assert ex.depth_precision_problem({"pix_fmt": "gray16le",
+                                       "codec": "ffv1"}) is None
+
+
+def test_eight_bit_depth_is_refused_however_it_is_packaged():
+    for codec, pf in (("mjpeg", "yuvj420p"), ("mpeg4", "yuv420p"),
+                      ("ffv1", "gray"), ("rawvideo", "bgr24")):
+        why = ex.depth_precision_problem({"pix_fmt": pf, "codec": codec})
+        assert why and "not 16-bit" in why
+        assert pf in why and codec in why
+
+
+def test_the_container_decides_nothing_by_itself():
+    """FFV1 in AVI is fine; a badly remuxed MKV is not. Judging by extension
+    would reject good sessions and accept bad ones."""
+    assert ex.depth_precision_problem({"pix_fmt": "gray16le",
+                                       "codec": "ffv1"}) is None
+    assert ex.depth_precision_problem({"pix_fmt": "yuv420p",
+                                       "codec": "h264"}) is not None
+
+
+def test_a_stream_with_no_pixel_format_is_not_assumed_good():
+    why = ex.depth_precision_problem({"pix_fmt": None, "codec": "mjpeg"})
+    assert why and "cannot be confirmed" in why
+
+
+def test_the_guard_says_what_it_costs_and_how_to_override():
+    """A refusal that does not name its escape hatch gets worked around by
+    editing the check out, which is worse than the flag."""
+    src = (Path(ex.__file__).read_text(encoding="utf-8")
+           if hasattr(ex, "__file__") else "")
+    assert "REQUIRE_16BIT_DEPTH" in src
+    assert ex.CONFIG["REQUIRE_16BIT_DEPTH"] is True

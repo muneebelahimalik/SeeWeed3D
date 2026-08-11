@@ -113,10 +113,37 @@ CONFIG = {
     "FFPROBE": "ffprobe",
 
     # -- File discovery (case-insensitive). Covers every visit variant. --------
-    "RGB_PATTERNS":   ["rgb_video.mkv", "rgb.mkv", "left.mkv", "*left*.mkv"],
-    "RIGHT_PATTERNS": ["rgb_right_video.mkv", "right.mkv", "*right*.mkv"],
-    "DEPTH_PATTERNS": ["depth_video.mkv", "depth.mkv", "*depth*.mkv"],
-    "CONF_PATTERNS":  ["confidence_video.mkv", "confidence.mkv", "*conf*.mkv"],
+    # Patterns are matched against the file STEM, and the extension is checked
+    # separately against VIDEO_SUFFIXES. Earlier visits wrote AVI and later ones
+    # MKV; when the patterns carried ".mkv" the AVI sessions were not merely
+    # skipped, they were INVISIBLE - discover() returned them nowhere and
+    # printed nothing, so a run over a mixed folder looked like a success while
+    # silently extracting a fraction of it.
+    "RGB_PATTERNS":   ["rgb_video", "rgb", "left", "*left*"],
+    "RIGHT_PATTERNS": ["rgb_right_video", "right", "*right*"],
+    "DEPTH_PATTERNS": ["depth_video", "depth", "*depth*"],
+    "CONF_PATTERNS":  ["confidence_video", "confidence", "*conf*"],
+    "VIDEO_SUFFIXES": [".mkv", ".avi", ".mp4", ".mov"],
+
+    # -- Depth integrity -------------------------------------------------------
+    # Depth is decoded by asking ffmpeg for gray16le. ffmpeg will produce that
+    # from ANY source, including an 8-bit lossy one, by scaling values it made
+    # up - so a depth stream that is not genuinely 16-bit yields plausible-
+    # looking millimetres that are fiction. Nothing downstream can detect it:
+    # the PNGs are valid, the QC fractions are computed, and the LEP's canopy-
+    # height channel reads garbage as terrain.
+    #
+    # AVI is the reason this exists. Its usual codecs (MJPEG, XVID, DIVX) have
+    # no 16-bit grayscale format at all, so an AVI depth track is very likely
+    # 8-bit - but SOME writers do put FFV1 in AVI, which is fine. So this is
+    # checked per session rather than assumed from the container.
+    #
+    # True  = refuse to write depth for a session whose depth is not 16-bit,
+    #         extract RGB, and say so. The session is still usable for
+    #         segmentation; only 3D and LEP need real depth.
+    # False = write it anyway. Only correct if you have verified the pipeline
+    #         that produced the file actually stored millimetres.
+    "REQUIRE_16BIT_DEPTH": True,
 
     # -- What to write out (ignored when the session has no such stream) ------
     "WRITE_RIGHT": True,
@@ -176,10 +203,17 @@ def _glob_match(name, pat):
     return fnmatch.fnmatch(name, pat)
 
 
-def find_one(folder, patterns, want_right=False):
-    """Case-insensitive first match in priority order. Files with 'right' in the
-    name are only matched by right-hand patterns, so RGB_right_video.mkv can
-    never be mistaken for the left stream."""
+def find_one(folder, patterns, want_right=False, suffixes=None):
+    """Case-insensitive first match in priority order.
+
+    Patterns match the file STEM and the extension is checked separately, so
+    one pattern list covers every container a visit happened to be recorded in
+    - AVI in the early sessions, MKV in the later ones, sometimes both under
+    the same parent folder.
+
+    Files with 'right' in the name are only matched by right-hand patterns, so
+    RGB_right_video.mkv can never be mistaken for the left stream."""
+    suffixes = [s.lower() for s in (suffixes or CONFIG["VIDEO_SUFFIXES"])]
     try:
         files = [f for f in folder.iterdir() if f.is_file()]
     except (PermissionError, OSError):
@@ -187,10 +221,12 @@ def find_one(folder, patterns, want_right=False):
     for pat in patterns:
         pat_l = pat.lower()
         for f in files:
-            n = f.name.lower()
+            if f.suffix.lower() not in suffixes:
+                continue
+            n, stem = f.name.lower(), f.stem.lower()
             if ("right" in n) != want_right:
                 continue
-            if ("*" in pat_l and _glob_match(n, pat_l)) or n == pat_l:
+            if ("*" in pat_l and _glob_match(stem, pat_l)) or stem == pat_l:
                 return f
     return None
 
@@ -387,6 +423,39 @@ def frame_metrics(bgr, depth, conf, cfg):
     return m
 
 
+#: Pixel formats that genuinely carry 16 bits per sample. Anything else cannot
+#: hold a millimetre range, whatever the file is named.
+SIXTEEN_BIT_HINTS = ("16le", "16be", "16", "p010", "p016", "yuv420p10",
+                     "gray10", "gray12", "gray14")
+
+
+def depth_precision_problem(info):
+    """Why this depth stream cannot be trusted as millimetres, or None.
+
+    The decoder asks ffmpeg for gray16le, and ffmpeg will produce gray16le from
+    ANY input - including an 8-bit lossy one, by scaling up values it invented.
+    The result is a valid PNG full of plausible numbers that are fiction, and
+    nothing downstream can tell: the QC fractions compute, the depth range
+    looks sane, and the LEP's canopy-height channel reads the noise as terrain.
+
+    So the check happens here, where the pixel format is still visible, rather
+    than being inferred from the container. AVI's usual codecs (MJPEG, XVID,
+    DIVX) have no 16-bit grayscale format at all - but FFV1 in AVI is fine, and
+    a badly-remuxed MKV is not, so the container itself decides nothing.
+    """
+    if not info:
+        return None
+    pf = (info.get("pix_fmt") or "").lower()
+    codec = (info.get("codec") or "?").lower()
+    if not pf:
+        return (f"depth codec {codec} reports no pixel format, so 16-bit "
+                f"millimetres cannot be confirmed")
+    if any(h in pf for h in SIXTEEN_BIT_HINTS):
+        return None
+    return (f"depth is {codec}/{pf}, which is not 16-bit - decoding it as "
+            f"millimetres would invent values that look plausible and are not")
+
+
 def make_session_id(folder, trip):
     m = SESSION_RE.search(folder.name)
     if m:
@@ -404,16 +473,33 @@ def discover(cfg):
             print(f"  [SKIP] input root does not exist: {root}")
             continue
         for folder in [root] + [p for p in root.rglob("*") if p.is_dir()]:
-            rgb = find_one(folder, cfg["RGB_PATTERNS"])
+            sfx = cfg["VIDEO_SUFFIXES"]
+            rgb = find_one(folder, cfg["RGB_PATTERNS"], suffixes=sfx)
             if rgb is None:
-                # Flag folders that look like a recording but have no decodable
-                # left/RGB video (e.g. SVO-only), so they are not silently lost.
-                has_depth = find_one(folder, cfg["DEPTH_PATTERNS"]) is not None
+                # Flag anything that looks like a recording, so a folder is
+                # never lost without a line of output. The old version only
+                # spoke up when it found depth or an SVO - and since it looked
+                # for those with the same extension list that had just failed,
+                # a folder recorded in an unsupported container produced NO
+                # message at all.
+                has_depth = find_one(folder, cfg["DEPTH_PATTERNS"],
+                                     suffixes=sfx) is not None
                 has_svo = next((p for p in folder.glob("*.svo*")), None) is not None
-                if has_depth or has_svo:
-                    why = "SVO only - decode it to MKV first" if has_svo else \
-                          "depth present but no RGB/left MKV"
-                    print(f"  [SKIP] {folder} : no RGB video ({why})")
+                others = sorted({p.suffix.lower() for p in folder.iterdir()
+                                 if p.is_file() and p.suffix.lower()
+                                 not in [s.lower() for s in sfx]
+                                 and p.suffix.lower() not in (".txt", ".json",
+                                                              ".csv")})
+                if has_svo:
+                    why = "SVO only - decode it to MKV first"
+                elif has_depth:
+                    why = "depth present but no RGB/left video"
+                elif others:
+                    why = (f"video-looking files in an unsupported container "
+                           f"({', '.join(others)}) - add it to VIDEO_SUFFIXES")
+                else:
+                    continue                      # not a recording folder
+                print(f"  [SKIP] {folder} : no usable RGB video ({why})")
                 continue
 
             def opt(name):
@@ -422,9 +508,10 @@ def discover(cfg):
 
             found.append({
                 "folder": folder, "rgb": rgb,
-                "right": find_one(folder, cfg["RIGHT_PATTERNS"], want_right=True),
-                "depth": find_one(folder, cfg["DEPTH_PATTERNS"]),
-                "conf": find_one(folder, cfg["CONF_PATTERNS"]),
+                "right": find_one(folder, cfg["RIGHT_PATTERNS"],
+                                  want_right=True, suffixes=sfx),
+                "depth": find_one(folder, cfg["DEPTH_PATTERNS"], suffixes=sfx),
+                "conf": find_one(folder, cfg["CONF_PATTERNS"], suffixes=sfx),
                 "calib_txt": opt("calibration_params.txt"),
                 "calib_json": opt("calibration.json"),
                 "meta_txt": opt("session_meta.txt"),
@@ -457,6 +544,16 @@ def extract_session(sess, out_root, cfg):
             if (infos[key]["width"], infos[key]["height"]) != (W, H):
                 warnings.append(f"{key} resolution differs from RGB - stream dropped")
                 sess[key] = None
+
+    if sess["depth"] and cfg.get("REQUIRE_16BIT_DEPTH", True):
+        bad = depth_precision_problem(infos.get("depth"))
+        if bad:
+            warnings.append(f"depth stream dropped: {bad}")
+            print(f"  [!] {sid}: {bad}\n"
+                  f"      RGB is still extracted; this session has no depth. "
+                  f"Set REQUIRE_16BIT_DEPTH=False only if you have verified "
+                  f"the writer stored millimetres.")
+            sess["depth"] = None
 
     if sess["depth"] is None:
         warnings.append("no depth video - RGB only session")
