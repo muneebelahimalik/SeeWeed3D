@@ -191,9 +191,14 @@ CONFIG["DEPTH_VIS_MAX_MM"]   = 3000.0   # the scale it was DRAWN at
   the two depth distributions *is* the scale:
 
   ```powershell
+  # Straight from the source videos - nothing needs to be extracted yet, so
+  # the whole visit goes through in ONE extraction pass.
   python -m seeweed3d.validation.calibrate_preview_scale `
-      --metric-session E:\dataset\sessions\Visit1_20250228_151838 `
-      --preview "E:\...\Session_20250221_130957\Depth_video.avi"
+      --metric-video "E:\...\Session_20250226_202127\Depth_video.mkv" `
+      --preview      "E:\...\Session_20250221_130957\Depth_video.avi"
+
+  # Or against an already-extracted session, if you have one:
+  #   --metric-session E:\dataset\sessions\Visit1_20250228_151838
   ```
 
   It fits at seven percentiles rather than one, because a single-point ratio

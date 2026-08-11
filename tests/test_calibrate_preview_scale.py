@@ -170,7 +170,7 @@ def test_a_session_without_metric_depth_is_refused(tmp_path):
     """A session holding only depth_approx/ cannot calibrate anything - that
     is the output being calibrated."""
     (tmp_path / "sess" / "depth_approx").mkdir(parents=True)
-    with pytest.raises(SystemExit, match="depth_kind"):
+    with pytest.raises(SystemExit, match="the output being calibrated"):
         cal.metric_depth_percentiles(tmp_path / "sess")
 
 
@@ -182,3 +182,114 @@ def test_invalid_pixels_are_excluded_from_the_reference(tmp_path):
     cv2.imwrite(str(d / "f.png"), mm)
     pct, _ = cal.metric_depth_percentiles(tmp_path / "sess")
     assert all(v == pytest.approx(1500, abs=1) for v in pct.values())
+
+
+# --------------------------------------------------------------------------- #
+# Calibrating with nothing extracted
+#
+# Requiring an EXTRACTED session as the reference forces two passes: extract to
+# get a reference, set the scale, extract again for the recovery. The source
+# depth video carries the same millimetres, so the scale can be measured before
+# anything is extracted and a visit goes through once.
+# --------------------------------------------------------------------------- #
+def _mkv16(path, mm_frames, fps=15):
+    """A real lossless 16-bit depth video, as the MKV sessions have."""
+    import subprocess
+    h, w = mm_frames[0].shape
+    p = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+         "-pix_fmt", "gray16le", "-s", f"{w}x{h}", "-r", str(fps),
+         "-i", "pipe:0", "-c:v", "ffv1", "-pix_fmt", "gray16le", str(path)],
+        stdin=subprocess.PIPE)
+    for mm in mm_frames:
+        p.stdin.write(mm.astype(np.uint16).tobytes())
+    p.stdin.close()
+    p.wait()
+
+
+def _preview_avi_for_cal(path, mm_frames, vis_max=3000.0, fps=15):
+    import subprocess
+    h, w = mm_frames[0].shape
+    p = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+         "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+         "-c:v", "mpeg4", "-qscale:v", "2", "-pix_fmt", "yuv420p", str(path)],
+        stdin=subprocess.PIPE)
+    for mm in mm_frames:
+        c = np.clip(mm / vis_max, 0, 1) * 255.0
+        c[mm <= 0] = 0
+        g = c.astype(np.uint8)
+        p.stdin.write(np.dstack([g, g, g]).tobytes())
+    p.stdin.close()
+    p.wait()
+
+
+def test_the_scale_can_be_measured_from_source_videos_alone(tmp_path):
+    mm = _mm_scene(n=8, h=64, w=96)
+    _mkv16(tmp_path / "Depth_video.mkv", mm)
+    _preview_avi_for_cal(tmp_path / "Depth_video.avi", mm, vis_max=3000.0)
+    fit = cal.main(["--metric-video", str(tmp_path / "Depth_video.mkv"),
+                    "--preview", str(tmp_path / "Depth_video.avi")])
+    assert fit["linear"]
+    assert fit["vis_max_mm"] == pytest.approx(3000.0, rel=0.05)
+
+
+def test_a_preview_is_refused_as_the_metric_reference(tmp_path):
+    """The reference must be real millimetres. Pointing it at another preview
+    would calibrate one guess against another and report success."""
+    mm = _mm_scene(n=4, h=64, w=96)
+    _preview_avi_for_cal(tmp_path / "Depth_video.avi", mm)
+    with pytest.raises(SystemExit, match="not 16-bit"):
+        cal.metric_video_percentiles("ffmpeg", "ffprobe",
+                                     tmp_path / "Depth_video.avi")
+
+
+def test_the_two_reference_routes_agree(tmp_path):
+    """Same geometry, one read from a source video and one from extracted
+    PNGs. If they disagreed, one of the two paths would be wrong."""
+    mm = _mm_scene(n=6, h=64, w=96)
+    _mkv16(tmp_path / "Depth_video.mkv", mm)
+    d = tmp_path / "sess" / "depth"
+    d.mkdir(parents=True)
+    for i, f in enumerate(mm):
+        cv2.imwrite(str(d / f"f_{i:03d}.png"), f.astype(np.uint16))
+    a, _ = cal.metric_video_percentiles("ffmpeg", "ffprobe",
+                                        tmp_path / "Depth_video.mkv")
+    b, _ = cal.metric_depth_percentiles(tmp_path / "sess")
+    for p in a:
+        assert a[p] == pytest.approx(b[p], rel=0.02)
+
+
+# --------------------------------------------------------------------------- #
+# The error a deleted output directory produces
+#
+# Extracted output gets deleted between improvements to the pipeline, so this
+# is the common case, and "must be a session whose depth_kind is metric" sends
+# you looking for the wrong problem when the folder simply is not there.
+# --------------------------------------------------------------------------- #
+def test_a_missing_session_says_it_is_missing_and_names_the_way_round(tmp_path):
+    msg = cal.why_not_a_metric_reference(tmp_path / "gone")
+    assert "does not exist" in msg
+    assert "--metric-video" in msg and "no extraction is needed" in msg
+
+
+def test_an_approx_only_session_explains_the_circularity(tmp_path):
+    (tmp_path / "s" / "depth_approx").mkdir(parents=True)
+    msg = cal.why_not_a_metric_reference(tmp_path / "s")
+    assert "the output being calibrated" in msg
+
+
+def test_a_session_extracted_without_depth_says_so_from_its_metadata(tmp_path):
+    m = tmp_path / "s" / "meta"
+    m.mkdir(parents=True)
+    (m / "session.json").write_text('{"depth_kind": "none"}')
+    msg = cal.why_not_a_metric_reference(tmp_path / "s")
+    assert "extracted without depth" in msg and "depth_kind: none" in msg
+
+
+def test_unreadable_metadata_still_produces_a_usable_message(tmp_path):
+    m = tmp_path / "s" / "meta"
+    m.mkdir(parents=True)
+    (m / "session.json").write_text("{not json")
+    msg = cal.why_not_a_metric_reference(tmp_path / "s")
+    assert "not found" in msg and "--metric-video" in msg
