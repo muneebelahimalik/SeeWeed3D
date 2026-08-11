@@ -186,6 +186,23 @@ CONFIG["DEPTH_VIS_MAX_MM"]   = 3000.0   # the scale it was DRAWN at
   a `depth_kind` column in `registry.csv`. **Check it before using depth.**
 - `DEPTH_VIS_MAX_MM` is an *assumption* unless your sessions have a
   `session_meta.txt` to take it from. Every recovered distance inherits it.
+  **Measure it instead**, if any session from the same rig has metric depth —
+  the soil sits at the mount's working distance in both, so the ratio between
+  the two depth distributions *is* the scale:
+
+  ```powershell
+  python -m seeweed3d.validation.calibrate_preview_scale `
+      --metric-session E:\dataset\sessions\Visit1_20250228_151838 `
+      --preview "E:\...\Session_20250221_130957\Depth_video.avi"
+  ```
+
+  It fits at seven percentiles rather than one, because a single-point ratio
+  always returns a number whether or not code and distance are linearly
+  related. Agreement across the distribution is what makes the answer mean
+  something; **drift means no single scale will work** and the recovery should
+  not be enabled at all. It assumes the rig was mounted the same way for both
+  sessions — a result far from 3000 more likely means that failed than that
+  you have discovered something.
 - At 3000 mm one level is **11.8 mm**, before DCT ringing that concentrates at
   exactly the depth discontinuities that matter. Fine for a ground plane,
   camera height or row geometry. **Not** usable for the LEP canopy-height
