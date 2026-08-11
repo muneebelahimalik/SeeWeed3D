@@ -6,53 +6,69 @@ weeds, localizes each weed's biologically effective laser-treatment point
 (the LEP/AMT), and turns it into a 3D coordinate in the robot frame — while
 treating **crop safety** (never targeting onion tissue) as the primary outcome.
 
-This repository currently covers the **data pipeline**: field capture, dataset
-extraction, annotation-batch selection, and model-assisted onion prelabeling.
-Perception, localization, tracking, and evaluation are the next stages.
+The repository covers the pipeline end to end: field capture, extraction and
+curation, SAM 3 prelabeling, CVAT round trip, dataset building, Stage A
+segmentation training on two backends, evaluation, and inference. Stage B (the
+learned LEP head) is implemented and not yet trained.
+
+**→ [`CHANGELOG.md`](CHANGELOG.md) is the project history** — what changed, when,
+and the problem that forced each change. Several settings here look arbitrary
+until you know which failure produced them.
 
 ## Repository layout
 
 ```
 seeweed3d/
-  capture/      zed_capture.py            ZED field capture (v2: SVO + depth + confidence + logs)
-  extraction/   extract_sessions.py       recordings -> indexed, QC'd frame pool (v1 & v2)
+  capture/      zed_capture.py             ZED field capture (v2: SVO + depth + confidence + logs)
+  extraction/   extract_sessions.py        recordings -> indexed, QC'd frame pool (v1 & v2)
                 curate_pool.py             drop redundant/bad frames (manifest-only, reversible)
                 select_batches.py          pool -> CVAT-ready annotation batches (holdout-safe)
   annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
                 prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
+                prelabel_mixed_sam3.py     MIXED scenes: precise masks, one class, no guessing
+                mine_pool.py               model-in-the-loop: rank the pool, export the next batch
                 cvat_roundtrip.py          CVAT export -> training masks + auto-vs-verified IoU
                 regen_cvat_labels.py       refresh label schema files without re-running SAM 3
+                fix_coco_categories.py     repair pre-rename COCO category names before import
   perception/   lep.py                     multi-evidence LEP estimator (hand-engineered baseline)
                 segmenter.py               pluggable seg backends -> framework-free Detections
                 pipeline.py                full RGB-D inference: seg -> batched LEP -> 3D -> safety
+                predict_images.py          run a checkpoint on a folder of unlabelled frames
                 depth3d.py                 robust LEP depth sampling + 3D point with uncertainty
                 safety.py                  treatment-candidate decision (can only ABSTAIN)
                 schema.py                  structured WeedTarget / FrameResult output
-  training/     config.py                  dataclass configuration for every stage
+  training/     make_dataset.py            config-block runner: CVAT exports -> training dataset
+                train_model.py             config-block runner: Stage A on Mask R-CNN (default)
+                train_model_rfdetr.py      config-block runner: Stage A on RF-DETR-Seg
                 datumaro_multitask.py      CVAT Datumaro 1.0 -> masks + grouped LEPs + report
                 splits.py                  session-safe splits with leakage checks
-                roi.py                     invertible ROI transform + local-height geometry
-                lep_targets.py             Gaussian targets, soft-argmax, joint augmentation
-                lep_roinet.py              LEPRoiNet (heatmap + visibility + targetability)
-                losses.py                  multitask LEP losses
-                lep_dataset.py             torch Dataset driven by the LEP manifest
-                prepare_dataset.py         entry point: export -> trainable dataset
-                active_learning.py         rank the unlabelled pool: what to annotate NEXT
                 seg_dataset.py             torchvision-format instance segmentation dataset
-                train_seg_torchvision.py   Stage A training, BSD-3 backend (default)
-                train_seg.py / train_lep.py  Ultralytics (AGPL, opt-in) / LEP training
-  evaluation/   metrics.py                 segmentation, LEP, safety, 3D and latency metrics
+                coco_export.py             seg_manifest -> Roboflow-style COCO tree for rfdetr
+                train_seg_torchvision.py   Stage A training, BSD-3 backend
+                train_seg_rfdetr.py        Stage A training, Apache-2.0 real-time backend
+                losses.py                  multitask LEP losses + Tversky / focal Tversky
+                tracking.py                local-only TensorBoard + MLflow, with preview panels
+                active_learning.py         rank the unlabelled pool: what to annotate NEXT
+                roi.py lep_targets.py lep_roinet.py lep_dataset.py train_lep.py
+                                           Stage B: ROI transform, targets, model, training
+                train_seg.py               Ultralytics backend (AGPL, opt-in)
+  evaluation/   eval_seg.py                Stage A metrics + crop safety + confidence sweep
+                metrics.py                 segmentation, LEP, safety, 3D and latency metrics
+                report.py                  self-contained HTML report: misses, overlays, buckets
+                plots.py                   training curves, per-class AP, sweep, recall-by-size
+                analyze_run.py             one command: detect backend, emit every figure
   deploy/       export.py                  ONNX/TensorRT export with numerical parity checks
                 benchmark.py               latency benchmarking (records the device)
   common/       ontology.py                class names + stable COCO ids (single source of truth)
                 progress.py                dependency-free progress lines with rate + ETA
                 vegetation.py              shared ExG vegetation prior + white balance
                 depth_utils.py             canonical depth reader + robust 3D point sampling
+                torch_utils.py             device checks that fail before anything expensive
   validation/   depth_data_validation.py   sanity-check a raw session's depth stream
                 diagnose_blur.py           is blur MOTION or OPTICS? (decides from the frames)
-docs/           pipeline, capture, and prelabeling guides
+docs/           runbook, pipeline, prelabeling and dataset-growth guides
 legacy/         superseded scripts, kept for provenance
-tests/          synthetic end-to-end checks for the extraction + prelabel logic
+tests/          synthetic end-to-end checks for every stage above
 ```
 
 Each runnable script has a clearly marked **CONFIG block at the top** — set the
@@ -73,8 +89,23 @@ python seeweed3d/extraction/curate_pool.py
 # 4. Select CVAT-ready annotation batches (whole-session holdout enforced)
 python seeweed3d/extraction/select_batches.py
 
-# 5. (onion-only scenes) Prelabel onions with SAM 3, then verify in CVAT
-python seeweed3d/annotation/prelabel_onions_sam3.py
+# 5. Prelabel with SAM 3, then verify in CVAT. Pick the one that matches the scene:
+python seeweed3d/annotation/prelabel_onions_sam3.py   # onion-only
+python seeweed3d/annotation/prelabel_weeds_sam3.py    # weed-only
+python seeweed3d/annotation/prelabel_mixed_sam3.py    # BOTH in frame
+
+# 6. Build a training dataset from the corrected CVAT exports
+python seeweed3d/training/make_dataset.py
+
+# 7. Train Stage A (segmentation)
+python seeweed3d/training/train_model.py              # Mask R-CNN (default)
+python seeweed3d/training/train_model_rfdetr.py       # RF-DETR-Seg (real-time)
+
+# 8. Every figure and metric for a finished run, in one command
+python -m seeweed3d.evaluation.analyze_run <run_dir>
+
+# 9. Once a model exists, this replaces step 5 for each subsequent round
+python seeweed3d/annotation/mine_pool.py
 ```
 
 **→ [`docs/lep_localization_explained.md`](docs/lep_localization_explained.md)** explains LEP
@@ -86,30 +117,40 @@ step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging
 multiple CVAT tasks, training both stages, evaluation, inference and Jetson
 deployment — with all commands.
 
-See `docs/dataset_pipeline.md` for the full extraction/selection guide and
-`docs/onion_prelabeling.md` for the SAM 3 workflow. Capture rationale and the
-v1→v2 changes are in `docs/capture_changelog.md`.
+Other guides: `docs/dataset_pipeline.md` (extraction and selection),
+`docs/onion_prelabeling.md` and `docs/weed_prelabeling.md` (the SAM 3
+workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
+`docs/dataset_growth.md` (active learning, and how to grow the dataset well),
+`docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
+`docs/capture_changelog.md` (capture rationale, v1→v2).
 
-## Supervised perception baseline — status
+## Status
 
-The supervised stage (crop-vs-weed segmentation, learned LEP localization, RGB-D
-3D conversion, safety abstention) is implemented and unit-tested. **It has not
-been trained.** Full design, commands and limitations:
-`docs/supervised_perception_baseline.md`.
+Full design, commands and limitations for the supervised stage:
+`docs/supervised_perception_baseline.md`. Chronology and reasoning for every
+change: [`CHANGELOG.md`](CHANGELOG.md).
 
 | | Status |
 |---|---|
-| Datumaro multitask ingestion, contract validation, session-safe splits | **implemented, unit-tested** |
-| ROI transform, heatmap targets, joint augmentation, depth representation | **implemented, unit-tested** |
-| `LEPRoiNet` + losses (forward, backward, CPU training step, ONNX export) | **implemented, unit-tested** (torch 2.13 CPU) |
-| Depth→3D localization, safety abstention, structured output, full pipeline | **implemented, unit-tested** with mocked segmentation + synthetic RGB-D |
-| Evaluation metrics (segmentation, LEP, safety, 3D, latency) | **implemented, unit-tested** on synthetic inputs |
-| Stage A backends: `maskrcnn` (BSD-3, **default**), `rfdetr` (Apache-2.0), `ultralytics` (AGPL, opt-in) | **implemented, unit-tested**; Mask R-CNN train step + inference verified on CPU |
-| Stage A / Stage B **trained weights** | **requires verified CVAT annotations** — none exist yet |
-| Any accuracy / mAP / LEP-error number | **not measured** — nothing is trained |
+| Capture, extraction, curation, CVAT round trip | **in use on real field recordings** |
+| SAM 3 prelabeling: onion-only, weed-only, mixed | **in use** |
+| Dataset building from multiple CVAT exports | **in use** |
+| Stage A backends: `maskrcnn` (BSD-3, **default**), `rfdetr` (Apache-2.0), `ultralytics` (AGPL, opt-in) | **implemented; the first two trained on real data** |
+| Stage A **trained weights** | **exist** — Mask R-CNN and RF-DETR-Seg runs, evaluated and compared |
+| Stage A accuracy / mAP / crop-safety numbers | **measured**, but see the caveat below |
+| Model-in-the-loop mining + active-learning ranking | **implemented, wired end to end** |
+| `LEPRoiNet` + losses, ROI transform, heatmap targets, depth→3D, safety abstention | **implemented, unit-tested**; mocked segmentation + synthetic RGB-D |
+| Stage B (LEP) **trained weights** | **none** — needs human LEP annotations |
 | TensorRT engines, INT8 | **requires a GPU / Jetson Orin** — engines must be built on the device |
 | Jetson latency, GPU memory | **not measured** — desktop numbers do not transfer |
-| DINOv3 teacher / distillation, temporal tracking | **future work**, not started |
+| Teacher–student / distillation, temporal tracking | **deliberately not started** — see `docs/dataset_growth.md` for why pseudo-labelling the crop is unsafe here |
+
+> ⚠️ **Every Stage A number so far is same-session validation.** Adjacent frames
+> from one drive are near-identical, so the val split shares ground with train
+> even under a session-safe split when only a few sessions exist. Until a whole
+> session is held out and annotated, the metrics say the model fits this field
+> on this day — not that it generalises. This is the highest-value 40 frames
+> available, and it is the first recommendation in `docs/dataset_growth.md`.
 
 ```bash
 # Optional training/deployment stack. The unit suite does NOT need it.
@@ -125,8 +166,16 @@ python -m pip install -r requirements-training.txt
   video frame index.
 - **Split by whole session, never by frame.** Adjacent video frames are
   near-identical; a random split leaks the test set into training.
-- **`vegetation == onion` only in onion-only scenes.** In mixed scenes a missed
-  onion must never become a weed label.
+- **`vegetation == onion` only in onion-only scenes**, and `vegetation == weed`
+  only in weed-only ones. In a mixed scene neither holds — use
+  `prelabel_mixed_sam3.py`, which proposes no class at all rather than a wrong
+  one. A missed onion must never become a weed label.
+- **The operating confidence is part of any result.** The same weights scored
+  small-weed recall 0.277 at conf 0.5 and 0.732 at conf 0.25. Always report the
+  threshold, and choose it from `eval_seg --sweep`.
+- **Never pseudo-label the crop.** The model is already confidently wrong about
+  grass-as-onion; feeding that back improves every metric while making the
+  real failure worse.
 
 ## Requirements
 
@@ -134,9 +183,12 @@ python -m pip install -r requirements-training.txt
   `requirements.txt`.
 - Capture additionally needs the **ZED SDK** + `pyzed` (installed via the SDK,
   not pip).
-- Onion prelabeling additionally needs Meta's official `sam3` package (`pip
+- Prelabeling additionally needs Meta's official `sam3` package (`pip
   install "git+https://github.com/facebookresearch/sam3.git"`, which pulls in
   `torch`) and access to the gated `facebook/sam3` / `facebook/sam3.1` weights.
+- Training and deployment live in a **separate environment** on purpose, so a
+  training dependency can never break SAM 3's `numpy>=1.26,<2` pin. That pin is
+  load-bearing — see `docs/RUNBOOK.md` §0.
 
 ```bash
 pip install -r requirements.txt
@@ -147,7 +199,11 @@ pip install -r requirements.txt
 ```bash
 python -m pytest tests/ -v
 ```
-The tests build synthetic v1/v2 sessions with real FFV1 MKVs and run the
-extraction and prelabel logic end-to-end (lossless depth round-trip, index
-alignment, dropped-frame recovery, holdout isolation, reproducible selection,
-and COCO validity). SAM 3 itself is stubbed — it needs a GPU and gated weights.
+The tests build synthetic v1/v2 sessions with real FFV1 MKVs and run each stage
+end-to-end: lossless depth round-trip, index alignment, dropped-frame recovery,
+holdout isolation, reproducible selection, COCO validity, dataset splits, the
+segmentation training step, the metrics and the prelabel mask logic. SAM 3 and
+CUDA are stubbed — both need a GPU, and SAM 3 needs gated weights.
+
+Regression tests here are named after the failure they pin, not the function
+they call. If one breaks, its docstring says what went wrong the first time.

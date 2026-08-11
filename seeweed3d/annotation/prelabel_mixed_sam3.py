@@ -1,0 +1,768 @@
+#!/usr/bin/env python3
+"""
+SeeWeed3D - MIXED-scene instance prelabeling with SAM 3  (masks only)
+=====================================================================
+Builds one precise instance mask per plant - every weed and every onion
+separately - in scenes that contain both, and exports them for class
+assignment in CVAT.
+
+    Run extraction/extract_sessions.py first (this reads its output pool).
+
+WHAT THIS IS FOR, AND WHAT IT DELIBERATELY DOES NOT DO
+------------------------------------------------------
+One job: SEPARATION AND BOUNDARY QUALITY. Every plant its own mask, every mask
+on the plant and not on the soil.
+
+It emits a single homogeneous class, `plant`. It proposes no species, no
+crop/weed split and no growth point. That is not a limitation being worked
+around, it is the correct call for a mixed scene:
+
+  * Shape can separate a blade from a rosette, and an ONION IS A BLADE. The one
+    morphology call the weed-only prelabeler makes confidently would label the
+    crop as grass_weed - the single worst error this project can make.
+  * A wrong prelabel costs more than a neutral one. An annotator CONFIRMS a
+    plausible label and RE-EXAMINES a blank one, so a plausible-but-wrong class
+    is the one most likely to survive review.
+  * Reassigning a class in CVAT is one keystroke. Fixing a boundary is a minute
+    of mouse work. Spend the pipeline's effort on the expensive half.
+
+No LEP, no growth stage, no instance crops, no depth. Those belong to the weed
+prelabeler and can be run later over corrected masks, which is the better order
+anyway - an LEP estimated on a mask that turns out to be two plants is wasted.
+
+THE MASK LOGIC: VEGETATION OWNS THE BOUNDARY, SAM OWNS THE IDENTITY
+-------------------------------------------------------------------
+These are two different questions and the pipeline is bad at them in opposite
+directions.
+
+WHERE a plant ends is nearly free here. Top-down field imagery is green tissue
+on brown soil, and a colour index answers that per pixel, at full resolution,
+with no model. What it cannot do is say which green pixel belongs to WHICH
+plant - a colour index sees one blob where two rosettes touch.
+
+SAM 3 is the reverse. Concept segmentation returns instances, so it answers
+identity well. But its boundaries are a learned prior at its own working
+resolution: it clips leaf tips, rounds off dissected margins, and bleeds a few
+pixels onto soil. Intersecting is not enough either, because a clipped tip is
+already gone before the intersection happens.
+
+So each is used only for what it is good at:
+
+  1. Vegetation prior -> `veg`, the set of plant pixels. Boundary, done.
+  2. SAM 3 -> proposals. Each is reduced to a SEED: its overlap with `veg`,
+     eroded to its confident interior. The seed asserts "a distinct plant is
+     here", nothing about where it ends.
+  3. MARKER-CONTROLLED WATERSHED over `veg`, seeded by those markers, flooding
+     the inverted distance transform. Every vegetation pixel is assigned to
+     exactly one seed, and the surfaces meet at the NECK between plants.
+
+That last step is what produces the masks. A seed that undershot grows out to
+the true leaf edge; a proposal that bled onto soil is cut back to `veg` by
+construction; two plants sharing one green blob are cut apart where the blob is
+thinnest, which is where they actually touch.
+
+WHY THE SPLIT IS SAFE HERE WHEN IT WAS NOT IN prelabel_weeds_sam3
+------------------------------------------------------------------
+That module ships SPLIT_TOUCHING_INSTANCES off, because splitting on
+distance-transform PEAKS fragmented single plants: a leaf reaching away from
+the crown raises a second peak, and one rosette became two annotations.
+
+Nothing here splits on peaks. The markers come from SAM, so a blob is divided
+only where SAM saw two distinct plants - and a leaf reaching away from a crown
+is not a second SAM detection. The watershed then decides only WHERE the cut
+falls, never WHETHER there is one. The failure mode that closed that door does
+not exist on this path.
+
+RECALL: UNCLAIMED GREEN BECOMES AN INSTANCE
+-------------------------------------------
+A vegetation component containing no seed is a plant SAM missed entirely. Those
+are recovered as instances of their own, gated on mean vegetation score.
+
+The weed prelabeler disables its equivalent backstop, for a reason that does
+not carry over. There, a recovered instance also had to be given a CLASS from
+colour alone, and a green-tinted mineral fleck entered the training set as a
+labelled weed. Here every instance is `plant` and every instance is reviewed by
+a human before it becomes training data, so a phantom costs one keypress to
+delete, while a missed plant is a plant the annotator is never shown. Trust the
+gate, but read the previews for the first session.
+"""
+
+import csv
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from annotation.prelabel_weeds_sam3 import (link_or_copy,  # noqa: E402
+                                            load_sam3, mask_iou, mask_polygons,
+                                            pool_frames, sam3_instances)
+from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
+                             PRELABEL_CLASS, prelabel_categories,
+                             prelabel_cvat_labels)
+from common.progress import Progress  # noqa: E402
+from common.vegetation import (component_boxes, vegetation_mask,  # noqa: E402
+                               vegetation_score, white_balance)
+from perception.segmenter import drop_fragments  # noqa: E402
+
+# #############################################################################
+# ##   DATASET_ROOT   -  the OUTPUT_ROOT you gave extract_sessions.py        ##
+# ##   ONLY_SESSIONS  -  your MIXED (onion + weed) sessions                  ##
+# #############################################################################
+
+DATASET_ROOT   = r"E:\Dataset_Vidalia\Mixed_1"
+SAM_VERSION    = "sam3"
+SAM_CHECKPOINT = r"E:\Models\sam3.pt"
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+
+CONFIG = {
+    "DATASET_ROOT":   DATASET_ROOT,
+    "SAM_VERSION":    SAM_VERSION,
+    "SAM_CHECKPOINT": SAM_CHECKPOINT,
+    "OUTPUT_SUBDIR":  "auto_labels_mixed",
+
+    # Mixed sessions. Empty = every session under sessions/.
+    "ONLY_SESSIONS": [],
+
+    "CVAT_READY_SUBDIR":  "cvat_ready",
+    "FLAGGED_RGB_SUBDIR": "flagged_rgb",
+
+    # -- Preprocessing ---------------------------------------------------------
+    "WHITE_BALANCE": True,
+    "WB_CAST_RATIO": 1.15,
+
+    # -- Vegetation prior ------------------------------------------------------
+    # This decides every boundary in the output, so it is the setting to tune
+    # first and the one to check previews against. Lower EXG_THRESHOLD to catch
+    # pale or shadowed tissue at the cost of soil speckle; the speckle is then
+    # mostly removed by VEG_MIN_COMPONENT_PX, so the two move together.
+    #
+    # Onion is BLUER than most broadleaf weeds. If previews show onion blades
+    # eroded while weeds look right, that is this threshold, not SAM.
+    "EXG_THRESHOLD": 0.05,
+    "VEG_MIN_SATURATION": 40,
+    "VEG_MORPH_KERNEL": 3,
+    # Lower than the weed prelabeler's 150: this floor deletes tissue outright
+    # and, unlike there, nothing downstream can recover it. A cotyledon at this
+    # mount height is a few hundred px, so 60 keeps real seedlings while still
+    # clearing single-pixel colour noise.
+    "VEG_MIN_COMPONENT_PX": 60,
+    "VEG_SCORE_SOFTNESS": 0.04,
+    # Close pinholes inside leaves (specular highlights read as non-green).
+    # A hole left in the prior becomes a hole in the exported polygon.
+    "VEG_FILL_HOLES_MAX_PX": 400,
+
+    # -- SAM 3 prompting -------------------------------------------------------
+    "SAM_PROMPT_MODE": "auto_exemplar",     # auto_exemplar | text
+    "SAM_TEXT_PROMPTS": ["plant", "green plant", "weed"],
+    # Exemplar hygiene, carried over from the weed path where it was measured:
+    # SAM is asked to find every instance of "the same concept" across the whole
+    # frame, so ONE marginal exemplar (gravel, lichen, a shadowed pit) teaches a
+    # bad concept and produces phantoms everywhere, not just one bad box.
+    "EXEMPLAR_MIN_AREA_PX": 300,
+    "EXEMPLAR_MAX_BOXES": 30,
+    "EXEMPLAR_PAD_PX": 8,
+    "EXEMPLAR_MIN_VEG_SCORE": 0.85,
+    "SAM_CONF": 0.25,
+    "DEVICE": "cuda",
+
+    # -- Seeds (what SAM's proposals are reduced to) ---------------------------
+    # A seed only has to be inside the right plant and distinct from its
+    # neighbours. It does NOT have to be the whole plant - the watershed grows
+    # it - so these gates can be strict without costing extent.
+    "SEED_MIN_AREA_PX": 80,           # after intersecting with vegetation
+    "SEED_MAX_FRAC": 0.25,            # one plant covering >25% of frame = failure
+    "SEED_VEG_OVERLAP_MIN": 0.30,     # proposal must sit on vegetation
+    "SEED_NMS_IOU": 0.60,             # de-duplicate overlapping SAM proposals
+    # Erosion pulls the marker off the boundary so the flood decides the edge
+    # rather than inheriting SAM's. Skipped automatically for a seed too small
+    # to survive it - a cotyledon must not be erased for tidiness.
+    "SEED_ERODE_PX": 2,
+    "SEED_ERODE_MIN_AREA_PX": 300,
+
+    # -- Recall backstop -------------------------------------------------------
+    # Vegetation components holding no seed at all. ON here, unlike the weed
+    # prelabeler - see the module docstring for why the reasoning differs.
+    "RECOVER_UNSEEDED": True,
+    "RECOVER_MIN_AREA_PX": 150,
+    "RECOVER_MIN_VEG_SCORE": 0.90,
+
+    # -- Instance cleanup ------------------------------------------------------
+    # Relative, not absolute: a component at 15% of the main body is a speck, a
+    # second true lobe is not. An absolute floor deletes cotyledons.
+    "FRAGMENT_MIN_FRAC": 0.15,
+    "FILL_HOLES_MAX_PX": 400,
+    "MIN_INSTANCE_AREA_PX": 120,
+
+    # -- Frame-level safety ----------------------------------------------------
+    "MAX_VEG_FRACTION": 0.5,          # more green than this = colour cast/glare
+
+    # -- Review triage ---------------------------------------------------------
+    # Frames whose numbers say the masks are probably wrong, listed so they can
+    # be corrected first instead of found at random.
+    "REVIEW_MIN_COVERAGE": 0.90,      # vegetation left outside every instance
+    "REVIEW_MAX_GROWTH": 8.0,         # seed grown this many times = under-seeded
+    "REVIEW_MAX_INSTANCE_FRAC": 0.12,  # one instance this big is probably a merge
+
+    # -- Polygon export --------------------------------------------------------
+    "POLY_APPROX_EPS_FRAC": 0.010,
+    "POLY_APPROX_EPS_MIN": 0.5,
+    "POLY_APPROX_EPS_MAX": 1.5,
+    "POLY_MIN_PART_AREA_PX": 40,
+    # TRUE here, unlike the weed prelabeler. There, largest-part-only kept
+    # previews looking tidy. Here precision is the entire deliverable, and
+    # dropping a leaf that an occluding blade separated from its crown puts
+    # real plant into the training target as background - which is exactly the
+    # imprecision this pass exists to remove.
+    "POLY_ALL_PARTS": True,
+
+    # -- Run control -----------------------------------------------------------
+    "LIMIT_PER_SESSION": None,        # start small; None for the full pool
+    "SAVE_PREVIEWS": True,
+    "PREVIEW_SCALE": 0.5,
+}
+
+# =============================================================================
+
+
+# --------------------------------------------------------------------------- #
+# Vegetation prior
+# --------------------------------------------------------------------------- #
+def fill_holes(mask, max_px):
+    """Fill enclosed holes up to max_px.
+
+    A specular highlight on a leaf reads as non-green and punches a hole
+    through the prior; that hole survives every later step and comes out as a
+    hole in the exported polygon. Bounded by area so a genuine gap between two
+    leaves - which is soil, and should stay soil - is not filled in."""
+    m = np.asarray(mask).astype(np.uint8)
+    if max_px <= 0:
+        return m.astype(bool)
+    inv = 1 - m
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(inv, 4)
+    out = m.astype(bool).copy()
+    # Component 0 of the inverse touching the border is the outside world. Any
+    # inverse component NOT touching the border is enclosed, i.e. a hole.
+    h, w = m.shape
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area > max_px:
+            continue
+        if x == 0 or y == 0 or x + bw >= w or y + bh >= h:
+            continue
+        out |= labels == i
+    return out
+
+
+def plant_pixels(bgr, cfg):
+    """The vegetation prior that will own every boundary in this frame."""
+    veg = vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                          cfg["VEG_MORPH_KERNEL"], cfg["VEG_MIN_COMPONENT_PX"])
+    return fill_holes(veg, cfg["VEG_FILL_HOLES_MAX_PX"])
+
+
+# --------------------------------------------------------------------------- #
+# Seeds
+# --------------------------------------------------------------------------- #
+def seed_masks(sam_masks, veg, cfg):
+    """SAM proposals reduced to markers: on vegetation, sensible size, deduped.
+
+    Returned largest-first. Each is the proposal's INTERSECTION with the
+    vegetation prior, so a proposal that bled onto soil contributes no soil to
+    the marker - and since the watershed can only grow a marker within `veg`,
+    soil cannot re-enter later either."""
+    if veg.size == 0:
+        return []
+    h, w = veg.shape
+    frame_px = h * w
+    cand = []
+    for m in sam_masks:
+        m = np.asarray(m)
+        if m.ndim != 2 or 0 in m.shape:
+            continue
+        if m.shape != veg.shape:
+            m = cv2.resize(m.astype(np.uint8), (int(w), int(h)),
+                           interpolation=cv2.INTER_NEAREST).astype(bool)
+        m = m.astype(bool)
+        area = int(m.sum())
+        if area == 0 or area > cfg["SEED_MAX_FRAC"] * frame_px:
+            continue
+        # Judged BEFORE intersecting: a proposal mostly on soil is a bad
+        # detection, and its green sliver should not be promoted to a plant.
+        if float((m & veg).sum()) / area < cfg["SEED_VEG_OVERLAP_MIN"]:
+            continue
+        s = m & veg
+        if int(s.sum()) < cfg["SEED_MIN_AREA_PX"]:
+            continue
+        cand.append((int(s.sum()), s))
+
+    cand.sort(key=lambda t: -t[0])
+    kept = []
+    for _, s in cand:
+        if all(mask_iou(s, k) <= cfg["SEED_NMS_IOU"] for k in kept):
+            kept.append(s)
+    return kept
+
+
+def erode_seed(seed, cfg):
+    """Pull a marker back off its own boundary so the flood decides the edge.
+
+    Skipped for a seed small enough that erosion would take most of it: a
+    cotyledon that survives every other gate must not be erased here, and a
+    small seed is not near enough to a neighbour for its boundary to matter."""
+    if int(seed.sum()) < cfg["SEED_ERODE_MIN_AREA_PX"] or cfg["SEED_ERODE_PX"] <= 0:
+        return seed
+    k = 2 * int(cfg["SEED_ERODE_PX"]) + 1
+    e = cv2.erode(seed.astype(np.uint8),
+                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return e.astype(bool) if e.any() else seed
+
+
+def unseeded_components(veg, seeds, cfg, score):
+    """Vegetation components no seed touches - plants SAM returned nothing for.
+
+    Gated on MEAN vegetation score rather than the binary prior, because the
+    binary prior is what let them in: a component that only just crosses the
+    threshold everywhere is the profile of green-tinted mineral, while real
+    tissue clears it comfortably."""
+    if not cfg["RECOVER_UNSEEDED"]:
+        return []
+    claimed = np.zeros(veg.shape, bool)
+    for s in seeds:
+        claimed |= s
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(
+        veg.astype(np.uint8), 8)
+    out = []
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < cfg["RECOVER_MIN_AREA_PX"]:
+            continue
+        comp = labels == i
+        if (comp & claimed).any():
+            continue
+        if score is not None and float(score[comp].mean()) < cfg["RECOVER_MIN_VEG_SCORE"]:
+            continue
+        out.append(comp)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# The watershed that actually produces the masks
+# --------------------------------------------------------------------------- #
+def partition_vegetation(veg, seeds):
+    """Assign every vegetation pixel to exactly one seed.
+
+    Marker-controlled watershed flooding the INVERTED distance transform of the
+    vegetation mask, which puts the ridge line - where two floods meet - at the
+    thinnest part of a shared blob. That is where two plants touch.
+
+    The alternative, flooding the image gradient, sounds more principled and is
+    worse here: inside a canopy the strongest gradients are leaf veins, shadow
+    edges and specular highlights, so the cut chases texture within one plant
+    instead of the join between two.
+
+    Watershed marks its ridge pixels -1, and OpenCV also stamps the image
+    border. Left alone that shaves pixels off instances - along the join
+    between two plants, where it belongs, but also off any plant running to the
+    frame edge, where it does not.
+
+    So ridge pixels are reclaimed, but only where the answer is unambiguous: a
+    ridge pixel whose 8-neighbourhood touches exactly ONE instance is an outer
+    edge and goes to that instance, while one touching two instances is a real
+    join between plants and stays unassigned. Adjacent instances therefore end
+    up separated by a one-pixel line rather than sharing pixels, which is the
+    right answer for a training target - no pixel belongs to two instances.
+
+    Returns a list of masks, one per seed, in the order the seeds were given.
+    A seed whose territory vanishes returns an empty mask, so the caller can
+    still line results up with whatever metadata it kept per seed.
+    """
+    h, w = veg.shape
+    out = [np.zeros((h, w), bool) for _ in seeds]
+    if not seeds or not veg.any():
+        return out
+
+    # NO background marker, deliberately. Seeding the soil looks like the
+    # careful thing to do and quietly destroys thin tissue: soil is flat ground
+    # at the top of the relief, so a background flood arrives at an arm tip -
+    # which is also near-flat, being barely wider than the transform's reach -
+    # before the flood coming up the arm from the crown does. Measured on a
+    # six-armed synthetic rosette, that soil marker ate four of the six tips.
+    #
+    # Plant-versus-soil is not this step's question anyway; the vegetation
+    # prior already answered it, and intersecting with `veg` at the end
+    # enforces it exactly. The watershed is left to decide only which plant.
+    markers = np.zeros((h, w), np.int32)
+    for i, s in enumerate(seeds):
+        markers[s & veg] = i + 2
+
+    # Distance from soil, inverted: deep inside a plant is low ground, the neck
+    # between two plants is high ground. uint8 because cv2.watershed wants an
+    # 8-bit 3-channel surface.
+    dt = cv2.distanceTransform(veg.astype(np.uint8), cv2.DIST_L2, 5)
+    peak = float(dt.max()) or 1.0
+    relief = (255 - np.clip(dt / peak, 0, 1) * 255).astype(np.uint8)
+    cv2.watershed(cv2.cvtColor(relief, cv2.COLOR_GRAY2BGR), markers)
+
+    # Reclaim the ridge where it is unambiguous. lab holds instance labels
+    # only; a 3x3 dilate gives the largest neighbouring label and a 3x3 erode
+    # over the same array with non-instance pixels raised to a sentinel gives
+    # the smallest. Equal means the neighbourhood saw exactly one instance.
+    ridge = veg & (markers == -1)
+    if ridge.any():
+        lab = np.where(markers > 1, markers, 0).astype(np.float32)
+        k = np.ones((3, 3), np.uint8)
+        hi = cv2.dilate(lab, k)
+        sentinel = float(len(seeds) + 3)
+        lo = cv2.erode(np.where(lab > 0, lab, sentinel).astype(np.float32), k)
+        unique = ridge & (hi == lo) & (hi > 1)
+        markers[unique] = hi[unique].astype(np.int32)
+
+    for i, s in enumerate(seeds):
+        out[i] = _own_components((markers == i + 2) & veg, s)
+    return out
+
+
+def _own_components(claimed, seed):
+    """Keep only the parts of a territory that contain the seed itself.
+
+    With no background marker the flood runs across soil too, so an instance
+    can be handed a vegetation component on the far side of a gap that its
+    seed never touched. Intersecting with `veg` does not catch that - the
+    stolen component is real vegetation. Requiring a part to contain its own
+    seed does.
+
+    Tissue a leaf genuinely severed from its crown is dropped here rather than
+    absorbed by whichever plant happened to win it. That is not a loss in the
+    default configuration: an unclaimed vegetation component is exactly what
+    RECOVER_UNSEEDED turns into an instance of its own, so the tissue still
+    reaches the annotator - as a separate shape to merge rather than as a limb
+    silently attached to the wrong plant."""
+    if not claimed.any():
+        return claimed
+    n, labels, _, _ = cv2.connectedComponentsWithStats(claimed.astype(np.uint8), 8)
+    if n <= 2:
+        return claimed
+    keep = set(np.unique(labels[seed & claimed])) - {0}
+    return np.isin(labels, list(keep)) if keep else np.zeros_like(claimed)
+
+
+def clean_instance(mask, cfg):
+    """Fill pinholes, drop specks. Returns None if nothing plant-sized is left.
+
+    Runs AFTER the watershed, because both operations are about the shape of a
+    finished instance: filling before it would let a hole get assigned, and
+    dropping specks before it would delete markers."""
+    m = np.asarray(mask).astype(bool)
+    if not m.any():
+        return None
+    m = fill_holes(m, cfg["FILL_HOLES_MAX_PX"])
+    m = drop_fragments(m, min_frac=cfg["FRAGMENT_MIN_FRAC"])
+    return m if int(m.sum()) >= cfg["MIN_INSTANCE_AREA_PX"] else None
+
+
+def instance_bbox(mask):
+    ys, xs = np.nonzero(mask)
+    x, y = int(xs.min()), int(ys.min())
+    return [x, y, int(xs.max()) - x + 1, int(ys.max()) - y + 1]
+
+
+# --------------------------------------------------------------------------- #
+# One frame
+# --------------------------------------------------------------------------- #
+def analyze_frame(bgr, sam_masks, cfg):
+    """Vegetation prior -> seeds -> watershed -> cleaned instances.
+
+    Returns (instances, veg, qa). Pure CPU; the SAM call happens outside, which
+    is what makes every decision in this module testable without a GPU."""
+    veg = plant_pixels(bgr, cfg)
+    score = vegetation_score(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                             cfg["VEG_SCORE_SOFTNESS"])
+    seeds = seed_masks(sam_masks, veg, cfg)
+    recovered = unseeded_components(veg, seeds, cfg, score)
+    sources = ["sam"] * len(seeds) + ["vegetation"] * len(recovered)
+
+    allseeds = [erode_seed(s, cfg) for s in seeds] + list(recovered)
+    seed_px = [int(s.sum()) for s in allseeds]
+    grown = partition_vegetation(veg, allseeds)
+
+    instances = []
+    for m, src, sp in zip(grown, sources, seed_px):
+        m = clean_instance(m, cfg)
+        if m is None:
+            continue
+        area = int(m.sum())
+        instances.append({
+            "mask": m, "cls": PRELABEL_CLASS, "source": src,
+            "area_px": area, "seed_px": sp,
+            # How far the watershed had to carry this seed. Near 1 means SAM
+            # already had the plant; very large means one marker inherited a
+            # blob far bigger than itself, which is the signature of two plants
+            # merged into one instance.
+            "growth": round(area / max(1, sp), 2),
+            "bbox": instance_bbox(m)})
+
+    union = np.zeros(veg.shape, bool)
+    for inst in instances:
+        union |= inst["mask"]
+    veg_px = int(veg.sum())
+    frame_px = veg.size
+    qa = {
+        "instances": len(instances),
+        "from_sam": sum(1 for i in instances if i["source"] == "sam"),
+        "recovered": sum(1 for i in instances if i["source"] == "vegetation"),
+        "veg_px": veg_px,
+        # The number to watch. Vegetation outside every instance is plant an
+        # annotator will never be shown, and in a prelabelled task nobody draws
+        # what is not already there.
+        "veg_coverage": round(int((veg & union).sum()) / veg_px, 4) if veg_px else 0.0,
+        "max_growth": max((i["growth"] for i in instances), default=0.0),
+        "max_instance_frac": round(
+            max((i["area_px"] for i in instances), default=0) / frame_px, 4),
+    }
+    return instances, veg, qa
+
+
+def review_reasons(qa, cfg):
+    """Why this frame should be corrected before the others. Empty = looks fine.
+
+    Every one of these is a measurable symptom of a mask problem, not a guess
+    at annotation difficulty."""
+    why = []
+    if qa["instances"] == 0:
+        why.append("no instances")
+    if qa["veg_px"] and qa["veg_coverage"] < cfg["REVIEW_MIN_COVERAGE"]:
+        why.append(f"only {qa['veg_coverage']:.0%} of vegetation covered")
+    if qa["max_growth"] > cfg["REVIEW_MAX_GROWTH"]:
+        why.append(f"a seed grew {qa['max_growth']:.0f}x - possible merge")
+    if qa["max_instance_frac"] > cfg["REVIEW_MAX_INSTANCE_FRAC"]:
+        why.append(f"one instance covers {qa['max_instance_frac']:.0%} of the frame")
+    return why
+
+
+# --------------------------------------------------------------------------- #
+# Export
+# --------------------------------------------------------------------------- #
+class PrelabelCoco:
+    """COCO instance segmentation with the single `plant` category.
+
+    Its category id sits far above the ontology's so that a prelabel file and a
+    corrected file can be held side by side without either shadowing the
+    other's ids, and so a stray `plant` surviving into a merged dataset reads
+    as an unknown category instead of silently becoming class 1."""
+
+    def __init__(self):
+        self.images, self.anns = [], []
+        self.categories = prelabel_categories()
+        self._img = self._ann = 0
+
+    def add_image(self, file_name, h, w):
+        self._img += 1
+        self.images.append({"id": self._img, "file_name": file_name,
+                            "height": h, "width": w})
+        return self._img
+
+    def add_instance(self, image_id, polygons, bbox, area_px):
+        self._ann += 1
+        self.anns.append({"id": self._ann, "image_id": image_id,
+                          "category_id": PRELABEL_CATEGORY_ID,
+                          "segmentation": polygons, "area": float(area_px),
+                          "bbox": [float(v) for v in bbox], "iscrowd": 0})
+        return self._ann
+
+    def dump(self, path):
+        Path(path).write_text(json.dumps({
+            "info": {"description": "SeeWeed3D SAM 3 mixed-scene prelabels "
+                                    "(masks only, class assigned in CVAT)",
+                     "date_created": datetime.now(timezone.utc).isoformat()},
+            "licenses": [], "images": self.images, "annotations": self.anns,
+            "categories": self.categories}, indent=2), encoding="utf-8")
+
+
+def overlay(bgr, instances, scale):
+    """Preview built to answer one question: is each plant its own mask?
+
+    Instances are coloured by INDEX, not by class - every instance here has the
+    same class, so a per-class palette would paint the frame one colour and
+    show nothing. Adjacent instances in different colours is the whole signal.
+    A filled tint shows extent; a bright outline shows the boundary; a white
+    halo marks an instance SAM never proposed."""
+    vis = bgr.copy()
+    tint = np.zeros_like(bgr)
+    for k, inst in enumerate(instances):
+        # Golden-angle hue stepping keeps neighbouring indices far apart in
+        # colour, so two adjacent instances are never near-identical shades.
+        hue = int((k * 137) % 180)
+        col = cv2.cvtColor(np.uint8([[[hue, 200, 255]]]),
+                           cv2.COLOR_HSV2BGR)[0, 0].tolist()
+        tint[inst["mask"]] = col
+    vis = cv2.addWeighted(vis, 0.65, tint, 0.35, 0)
+    for k, inst in enumerate(instances):
+        hue = int((k * 137) % 180)
+        col = cv2.cvtColor(np.uint8([[[hue, 200, 255]]]),
+                           cv2.COLOR_HSV2BGR)[0, 0].tolist()
+        cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if inst["source"] == "vegetation":
+            cv2.drawContours(vis, cnts, -1, (255, 255, 255), 4)
+        cv2.drawContours(vis, cnts, -1, col, 2)
+    return cv2.resize(vis, None, fx=scale, fy=scale,
+                      interpolation=cv2.INTER_AREA) if scale != 1.0 else vis
+
+
+# --------------------------------------------------------------------------- #
+# Driver
+# --------------------------------------------------------------------------- #
+def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
+    frames = pool_frames(session_dir)
+    if cfg["LIMIT_PER_SESSION"]:
+        frames = frames[:cfg["LIMIT_PER_SESSION"]]
+    if not frames:
+        print(f"  [{sid}] no pool frames - run extract_sessions.py first")
+        return None
+
+    out = out_root / sid
+    cvat_dir = out / cfg["CVAT_READY_SUBDIR"]
+    flag_dir = out / cfg["FLAGGED_RGB_SUBDIR"]
+    for d in (cvat_dir, flag_dir, out / "masks"):
+        d.mkdir(parents=True, exist_ok=True)
+    if cfg["SAVE_PREVIEWS"]:
+        (out / "preview").mkdir(parents=True, exist_ok=True)
+
+    coco, rows, flagged, review = PrelabelCoco(), [], [], []
+    stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0,
+             "recovered": 0, "veg_px": 0, "veg_covered_px": 0}
+
+    prog = Progress(len(frames), f"[{sid}]", unit="frames")
+    for fn in frames:
+        rgb_path = session_dir / "rgb" / fn
+        bgr = cv2.imread(str(rgb_path))
+        if bgr is None:
+            prog.update(note="missing frame")
+            continue
+        proc = white_balance(bgr, cfg["WB_CAST_RATIO"]) if cfg["WHITE_BALANCE"] else bgr
+
+        veg_pre = plant_pixels(proc, cfg)
+        if float(veg_pre.mean()) > cfg["MAX_VEG_FRACTION"]:
+            # Colour cast or glare: the prior owns every boundary here, so if
+            # the prior has failed there is nothing trustworthy to export.
+            flagged.append(fn)
+            link_or_copy(rgb_path, flag_dir / fn)
+            stats["frames"] += 1
+            stats["flagged"] += 1
+            prog.update(note=f"{stats['instances']} inst, {stats['flagged']} flagged")
+            continue
+
+        if cfg["SAM_PROMPT_MODE"] == "auto_exemplar":
+            score_pre = vegetation_score(proc, cfg["EXG_THRESHOLD"],
+                                         cfg["VEG_MIN_SATURATION"],
+                                         cfg["VEG_SCORE_SOFTNESS"])
+            exemplars = component_boxes(veg_pre, cfg["EXEMPLAR_MIN_AREA_PX"],
+                                        cfg["EXEMPLAR_PAD_PX"],
+                                        cfg["EXEMPLAR_MAX_BOXES"],
+                                        confidence=score_pre,
+                                        min_confidence=cfg["EXEMPLAR_MIN_VEG_SCORE"])
+        else:
+            exemplars = None
+
+        sam_masks = sam_fn(predictor, proc, cfg, exemplars) if predictor else []
+        instances, veg, qa = analyze_frame(proc, sam_masks, cfg)
+
+        link_or_copy(rgb_path, cvat_dir / fn)
+        img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])
+        union = np.zeros(bgr.shape[:2], bool)
+        for k, inst in enumerate(instances):
+            polys = mask_polygons(inst["mask"], cfg)
+            if not polys:
+                continue
+            coco.add_instance(img_id, polys, inst["bbox"], inst["area_px"])
+            union |= inst["mask"]
+            rows.append({"session_id": sid, "filename": fn, "instance_idx": k,
+                         "source": inst["source"], "area_px": inst["area_px"],
+                         "seed_px": inst["seed_px"], "growth": inst["growth"],
+                         "bbox_x": inst["bbox"][0], "bbox_y": inst["bbox"][1],
+                         "bbox_w": inst["bbox"][2], "bbox_h": inst["bbox"][3]})
+
+        why = review_reasons(qa, cfg)
+        if why:
+            review.append((fn, "; ".join(why)))
+
+        cv2.imwrite(str(out / "masks" / fn), (union.astype(np.uint8) * 255))
+        if cfg["SAVE_PREVIEWS"]:
+            cv2.imwrite(str(out / "preview" / Path(fn).with_suffix(".jpg").name),
+                        overlay(proc, instances, cfg["PREVIEW_SCALE"]))
+        stats["frames"] += 1
+        stats["instances"] += len(instances)
+        stats["empty"] += int(not instances)
+        stats["recovered"] += qa["recovered"]
+        stats["veg_px"] += qa["veg_px"]
+        stats["veg_covered_px"] += int((veg & union).sum())
+        prog.update(note=f"{stats['instances']} inst, {stats['flagged']} flagged")
+
+    prog.close(note=f"{stats['instances']} inst, {stats['flagged']} flagged")
+    coco.dump(out / "instances_default.json")
+    (out / "mixed_cvat_labels.json").write_text(
+        json.dumps(prelabel_cvat_labels(), indent=2), encoding="utf-8")
+    if flagged:
+        (out / "flagged_for_manual.txt").write_text("\n".join(flagged),
+                                                    encoding="utf-8")
+    if review:
+        (out / "review_first.txt").write_text(
+            "\n".join(f"{f}\t{r}" for f, r in review), encoding="utf-8")
+    if rows:
+        with open(out / "instances.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+
+    print(f"  [{sid}] {stats['frames']} frames | {stats['instances']} instances "
+          f"| {stats['flagged']} flagged | {stats['empty']} with none")
+    if stats["veg_px"]:
+        cov = 100.0 * stats["veg_covered_px"] / stats["veg_px"]
+        sam_n = stats["instances"] - stats["recovered"]
+        # Coverage, not instance count, is the honest recall readout: the
+        # pipeline can look productive while quietly leaving plants out.
+        print(f"      coverage: {cov:.1f}% of vegetation inside an instance "
+              f"| {sam_n} from SAM + {stats['recovered']} recovered")
+    if review:
+        print(f"      {len(review)} frame(s) to review first -> review_first.txt")
+    print(f"      -> {out}")
+    return stats
+
+
+def main(predictor_factory=load_sam3, sam_fn=sam3_instances):
+    cfg = CONFIG
+    root = Path(cfg["DATASET_ROOT"])
+    sessions_root = root / "sessions"
+    if not sessions_root.exists():
+        sys.exit(f"ERROR: {sessions_root} not found. Run extract_sessions.py first.")
+    sids = sorted(p.name for p in sessions_root.iterdir() if p.is_dir())
+    if cfg["ONLY_SESSIONS"]:
+        sids = [s for s in sids if s in cfg["ONLY_SESSIONS"]]
+    if not sids:
+        sys.exit("No sessions selected. Set ONLY_SESSIONS to your mixed sessions.")
+
+    print(f"Mixed-scene instance prelabeling on {len(sids)} session(s) with SAM 3.")
+    print(f"  One class ({PRELABEL_CLASS!r}) - masks only. Assign classes in CVAT.\n")
+    predictor = predictor_factory(cfg)
+    out_root = root / cfg["OUTPUT_SUBDIR"]
+    for sid in sids:
+        prelabel_session(sid, sessions_root / sid, out_root, cfg, predictor, sam_fn)
+
+    print(f"\nDone -> {out_root}")
+    print(f"Next: CVAT task from <sid>/{cfg['CVAT_READY_SUBDIR']}/, paste "
+          f"<sid>/mixed_cvat_labels.json into the Raw label editor, import "
+          f"<sid>/instances_default.json (COCO 1.0), then reassign each shape's "
+          f"class. Anything still labelled {PRELABEL_CLASS!r} at the end is "
+          f"unreviewed. Start with the frames in review_first.txt.")
+    print(f"Shortcut order is the label order: "
+          f"{', '.join(f'{i + 1}={c}' for i, c in enumerate(CLASSES))}.")
+
+
+if __name__ == "__main__":
+    main()

@@ -317,6 +317,46 @@ def test_the_shipped_config_uses_no_dataloader_workers(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# what the sidecar has to remember
+#
+# The mask loss is monkeypatched into rfdetr at runtime, so it leaves no trace
+# in the config rfdetr itself is handed. Two runs differing only in alpha/beta
+# would ship byte-identical sidecars - the same provenance hole that made an
+# earlier run impossible to attribute to the code that produced it.
+# --------------------------------------------------------------------------- #
+SUMMARY = {"classes": ["grass_weed", "onion_plant"],
+           "category_ids": {"1": "grass_weed", "2": "onion_plant"}}
+
+
+def test_the_sidecar_records_the_mask_loss_that_actually_trained():
+    c = rf.run_config({"epochs": 60}, "medium", SUMMARY, True, 0.3, 0.7, 1.0)
+    assert c["mask_loss"] == {"kind": "tversky", "tversky_alpha": 0.3,
+                              "tversky_beta": 0.7, "focal_gamma": 1.0}
+
+
+def test_a_dice_run_says_so_rather_than_omitting_the_field():
+    """Absent must never have to be read as 'probably the default' - that is
+    the guess that cost the earlier run its attribution."""
+    c = rf.run_config({}, "medium", SUMMARY, False, 0.5, 0.5, 1.0)
+    assert c["mask_loss"]["kind"] == "dice"
+
+
+def test_two_runs_differing_only_in_the_loss_have_different_sidecars():
+    base = {"epochs": 60, "lr": 1e-4}
+    a = rf.run_config(base, "medium", SUMMARY, False, 0.5, 0.5, 1.0)
+    b = rf.run_config(base, "medium", SUMMARY, True, 0.3, 0.7, 1.0)
+    assert a != b
+
+
+def test_the_sidecar_still_carries_what_the_segmenter_loads_by():
+    c = rf.run_config({"resolution": 1008}, "medium", SUMMARY, True,
+                      0.3, 0.7, 1.0)
+    assert c["variant"] == "medium" and c["resolution"] == 1008
+    assert c["classes"] == SUMMARY["classes"]
+    assert c["category_ids"] == SUMMARY["category_ids"]
+
+
+# --------------------------------------------------------------------------- #
 # loading a trained checkpoint back
 #
 # Three things travel with rfdetr weights and none are inside the .pth: the

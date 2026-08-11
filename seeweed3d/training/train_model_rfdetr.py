@@ -144,13 +144,20 @@ CONFIG = {
     #     TI = TP / (TP + ALPHA*FP + BETA*FN)
     #
     # BETA > ALPHA penalises MISSED pixels harder. 0.5/0.5 is exactly Dice and
-    # patches nothing at all, so the default run is unchanged.
+    # patches nothing at all, which is what rfdetr_v3 trained under.
     #
-    #   0.5 / 0.5   Dice. The baseline.
-    #   0.3 / 0.7   recall-leaning. The natural first try here.
+    #   0.5 / 0.5   Dice. The baseline - rfdetr_v3.
+    #   0.3 / 0.7   recall-leaning. Set here for v4, the one variable changed.
     #   0.2 / 0.8   aggressive; watch precision and the burn fraction.
-    "TVERSKY_ALPHA": 0.5,
-    "TVERSKY_BETA": 0.5,
+    #
+    # WATCH PRECISION, not just recall. v3 already emits far more low-score
+    # predictions per frame than the Mask R-CNN run does at the same
+    # confidence, and raising BETA buys recall with precision. If
+    # weed_precision in the confidence sweep falls further than
+    # small_weed_recall rises, the answer is a higher operating confidence, or
+    # back to 0.5/0.5 - not a higher BETA.
+    "TVERSKY_ALPHA": 0.3,
+    "TVERSKY_BETA": 0.7,
 
     # Focal exponent on (1 - TI). >1 concentrates gradient on the masks the
     # model gets WRONG, which here means small weeds. Noisier on 62 frames,

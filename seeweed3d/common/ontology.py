@@ -45,6 +45,34 @@ ROSETTE_CLASSES = {"cutleaf_evening_primrose", "wild_radish", "other_weed"}
 LEP_LABEL = "weed_LEP"
 IGNORE_LABEL = "ignore_region"
 
+# The single homogeneous class a MIXED-scene prelabeler may emit.
+#
+# Deliberately OUTSIDE `CLASSES`, and its id is far above them, for two
+# reasons. It must never reach training - a model trained on "plant" has
+# learned nothing this project needs, and the crop-safety metrics have no crop
+# to measure. And it is the workflow's own progress signal: any shape still
+# carrying it is a shape nobody has reviewed, which is a property worth being
+# able to count rather than infer.
+#
+# In a mixed scene, guessing the class is worse than declining to. Shape
+# separates a blade from a rosette, and an onion IS a blade - so the one
+# morphology call the weed prelabeler can make confidently would label the crop
+# as grass_weed. A wrong prelabel also costs more than a neutral one: an
+# annotator confirms a plausible label and re-examines a blank one.
+PRELABEL_CLASS = "plant"
+PRELABEL_CATEGORY_ID = 100
+
+# Attributes for a class-assignment pass. Deliberately short: the job is to
+# press one key per shape, and every extra attribute is a field that defaults
+# quietly and is never looked at. `difficulty` earns its place because it is
+# the one thing the annotator can see and the pipeline cannot.
+PRELABEL_ATTRIBUTES = [
+    {"name": "difficulty", "input_type": "select", "mutable": True,
+     "values": ["normal", "overlapping", "blurred", "shadowed", "wet",
+                "truncated"],
+     "default_value": "normal"},
+]
+
 # Display colours, shared by CVAT schemas and preview overlays.
 CLASS_COLORS = {
     "cutleaf_evening_primrose": "#ff8c00",
@@ -93,6 +121,45 @@ def coco_categories(classes=None):
     return [{"id": CATEGORY_ID[n], "name": n,
              "supercategory": "crop" if n == CROP_CLASS else "weed"}
             for n in names]
+
+
+def prelabel_categories():
+    """COCO categories for a mixed-scene prelabel export: one class.
+
+    The sentinel keeps its own high id so that a prelabel file and a corrected
+    file can sit side by side without either shadowing the other's ids, and so
+    that a stray `plant` annotation surviving into a merged dataset shows up as
+    an unknown category rather than silently becoming class 1."""
+    return [{"id": PRELABEL_CATEGORY_ID, "name": PRELABEL_CLASS,
+             "supercategory": "unreviewed"}]
+
+
+def prelabel_cvat_labels(classes=None, shape_type="polygon"):
+    """CVAT schema for the class-assignment pass.
+
+    Real classes come FIRST because CVAT's label shortcuts are assigned in list
+    order - the whole point of the pass is that reassigning is one keystroke,
+    so the keystrokes have to land on the classes actually used. The sentinel
+    goes last: it is never chosen, only cleared.
+
+    No LEP point label. Adding a shape type nobody will draw costs a slot in
+    that same shortcut list."""
+    names = classes if classes is not None else CLASSES
+    labels = [{"name": n, "type": shape_type,
+               "color": CLASS_COLORS.get(n, "#aaaaaa"),
+               "attributes": [dict(a) for a in PRELABEL_ATTRIBUTES]}
+              for n in names]
+    labels.append({"name": PRELABEL_CLASS, "type": shape_type,
+                   "color": "#ffffff",
+                   "attributes": [dict(a) for a in PRELABEL_ATTRIBUTES]})
+    labels.append({"name": IGNORE_LABEL, "type": shape_type, "color": "#000000",
+                   "attributes": [
+                       {"name": "reason", "input_type": "select",
+                        "mutable": False,
+                        "values": ["severe_blur", "ambiguity",
+                                   "labeling_uncertainty", "out_of_range"],
+                        "default_value": "ambiguity"}]})
+    return labels
 
 
 def cvat_labels(classes=None, include_lep=True, shape_type="polygon"):
