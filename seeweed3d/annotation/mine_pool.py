@@ -156,8 +156,8 @@ def pool_frames(sessions_root, only=(), holdout=(), stride=1, limit=0,
         rgb = sess / "rgb" if (sess / "rgb").is_dir() else sess
         files = [f for f in sorted(rgb.rglob("*"))
                  if f.suffix.lower() in IMAGE_SUFFIXES
-                 and "depth" not in {q.name.lower()
-                                     for q in f.relative_to(rgb).parents}]
+                 and not any(q.name.lower().startswith("depth")
+                             for q in f.relative_to(rgb).parents)]
         files = files[::max(1, int(stride))]
         out.extend((sess.name, f) for f in files if f.stem not in exclude_ids)
     if limit:

@@ -153,8 +153,8 @@ def find_images(spec, limit=0, stride=1):
     root = p / "rgb" if (p / "rgb").is_dir() else p
     files = [f for f in sorted(root.rglob("*"))
              if f.suffix.lower() in IMAGE_SUFFIXES
-             and "depth" not in {q.name.lower()
-                                 for q in f.relative_to(root).parents}]
+             and not any(q.name.lower().startswith("depth")
+                         for q in f.relative_to(root).parents)]
     if not files:
         raise SystemExit(
             f"ERROR: no images under {root}.\n"
