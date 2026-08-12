@@ -69,7 +69,7 @@ from common.progress import Progress  # noqa: E402
 # ##  DRY_RUN       -  True = report only, write nothing. Run this first.    ##
 # #############################################################################
 
-DATASET_ROOT = r"E:\Dataset_Vidalia\Weeds_3_good"
+DATASET_ROOT = r"E:\Dataset_Vidalia\Vidalia_visit_1_2025_all_sessions"
 DRY_RUN = False
 
 CONFIG = {
@@ -90,7 +90,7 @@ CONFIG = {
 
     # Fallback when pose is missing/unreliable: minimum image shift between kept
     # frames as a fraction of frame width (resolution independent).
-    "MIN_SHIFT_FRAC": 0.6,
+    "MIN_SHIFT_FRAC": 0.25,
 
     # Phase correlation runs on a downscaled grayscale copy - the dominant
     # translation survives downscaling and it is far cheaper.
