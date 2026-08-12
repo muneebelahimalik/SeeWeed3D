@@ -523,6 +523,40 @@ Full treatment in [`docs/mixed_prelabeling.md`](docs/mixed_prelabeling.md).
 
 ---
 
+## 16. The Feb 2025 visit, and depth that never existed
+
+Extracting an earlier campaign turned up nine sessions where seven were AVI and
+two MKV, under one parent folder. Three things came out of it.
+
+**The AVI sessions were invisible, not skipped** (#65). The discovery patterns
+carried `.mkv`, and the "this looks like a recording" fallback searched for
+depth with the same extension list that had just failed — so `discover()`
+returned nothing for them *and printed nothing*. A run over the folder reported
+success after extracting two of nine.
+
+**Depth is now checked before it is decoded** (#65). ffmpeg will produce
+`gray16le` from an 8-bit source by scaling up values it invented, and the
+result is a valid PNG full of plausible millimetres that are fiction. The QC
+fractions compute, the range looks sane, and the LEP's canopy-height channel
+reads the noise as terrain.
+
+**Then a chain of tools to answer what the 8-bit files actually were**
+(#66–#70): what is in the file, how to recover a preview if it is one, how to
+measure the scale rather than assume it, and a control to say whether a failed
+calibration is the preview or just two sessions of different ground.
+
+The answer, in the end, came from the capture source: those builds wrote
+`depth / depth.max() * 255` with the max recomputed **every frame**. The scale
+is a property of each individual frame, so no constant could ever have
+recovered it — the calibration was right to refuse, and now says so on sight
+rather than after a fit that drifts.
+
+That visit's depth was destroyed at capture time. Its RGB is fine, and RGB is
+what segmentation needs, so the seven sessions are fully usable for everything
+currently being built.
+
+---
+
 ## Lessons this project paid for
 
 Each of these cost a run, a dataset, or a batch of annotation time.
@@ -555,4 +589,10 @@ Each of these cost a run, a dataset, or a batch of annotation time.
 
 7. **Read the package, don't reason about it.** The RF-DETR label mapping was
    wrong twice from plausible reasoning and right once from reading
-   `PostProcess`.
+   `PostProcess`. The same held for the Feb 2025 depth: four tools of
+   increasingly careful inference, and the capture source settled it in one
+   line.
+
+8. **A pipeline that skips input silently is worse than one that crashes.**
+   Seven of nine sessions vanished with no output at all, and the run looked
+   like a success.
