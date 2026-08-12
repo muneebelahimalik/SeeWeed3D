@@ -204,10 +204,32 @@ CONFIG["DEPTH_VIS_MAX_MM"]   = 3000.0   # the scale it was DRAWN at
   It fits at seven percentiles rather than one, because a single-point ratio
   always returns a number whether or not code and distance are linearly
   related. Agreement across the distribution is what makes the answer mean
-  something; **drift means no single scale will work** and the recovery should
-  not be enabled at all. It assumes the rig was mounted the same way for both
-  sessions — a result far from 3000 more likely means that failed than that
-  you have discovered something.
+  something.
+
+  **Always pass `--control-video`** — a *second* metric video from the same
+  rig. Drift has two possible causes and they look identical: the preview is
+  non-linear, or the two sessions simply do not frame the same geometry (a
+  different day, a different patch of row, more or less of the machine in
+  view). Two known-linear sessions compared the same way measure the second
+  cause on its own, since the map from real millimetres to real millimetres is
+  the identity. If the preview drifts no more than they do, the verdict is
+  **inconclusive**, not rejected — and abandoning recoverable data on a
+  rejection that was really about the weather is the expensive mistake.
+
+  ```powershell
+  python -m seeweed3d.validation.calibrate_preview_scale `
+      --metric-video  "E:\...\Session_20250226_202127\Depth_video.mkv" `
+      --preview       "E:\...\Session_20250221_131902\Depth_video.avi" `
+      --control-video "E:\...\Session_20250228_151838\Depth_video.mkv"
+  ```
+
+  Match the **capture mode** between preview and reference where you can. A
+  session recorded at 1920x1080@30 frames different ground from one at
+  2208x1242@15, and that difference alone can produce a bimodal code
+  distribution that has nothing to do with the preview's linearity.
+
+  Inconclusive is not permission: the scale was never confirmed, so leave
+  `RECOVER_8BIT_DEPTH` off either way.
 - At 3000 mm one level is **11.8 mm**, before DCT ringing that concentrates at
   exactly the depth discontinuities that matter. Fine for a ground plane,
   camera height or row geometry. **Not** usable for the LEP canopy-height

@@ -293,3 +293,80 @@ def test_unreadable_metadata_still_produces_a_usable_message(tmp_path):
     (m / "session.json").write_text("{not json")
     msg = cal.why_not_a_metric_reference(tmp_path / "s")
     assert "not found" in msg and "--metric-video" in msg
+
+
+# --------------------------------------------------------------------------- #
+# The control: is the drift the preview, or just two different scenes?
+#
+# A rejection is ambiguous without this. Drift can mean the preview is
+# non-linear, or that the two sessions do not frame the same geometry - a
+# different day, a different patch of row, more or less of the machine in view.
+# Both produce the same symptom, and abandoning recoverable data on the strength
+# of the wrong one is the expensive mistake.
+# --------------------------------------------------------------------------- #
+def test_identical_geometry_shows_no_drift():
+    a = _pcts(_mm_scene(seed=0))
+    assert cal.control_spread(a, a)["relative_spread"] == 0.0
+
+
+def test_two_different_scenes_drift_even_though_both_are_real_depth():
+    """Neither is a preview; the map between them is millimetres to
+    millimetres. Any drift here is scene difference by construction."""
+    a = _pcts(_mm_scene(near=500, far=2500, seed=0))
+    b = _pcts(_mm_scene(near=900, far=1900, seed=1))     # a narrower view
+    assert cal.control_spread(a, b)["relative_spread"] > cal.LINEARITY_TOL
+
+
+def test_a_rejection_is_downgraded_when_the_control_drifts_as_much():
+    """The whole point. If two REAL sessions drift as much as the preview, the
+    preview has not been shown to be non-linear."""
+    mm = _mm_scene()
+    fit = cal.fit_scale(_pcts(mm),
+                        cal.preview_code_percentiles(_codes(mm, 3000.0, gamma=0.8)))
+    assert not fit["linear"]
+    text = " ".join(cal.report(fit, control={"relative_spread":
+                                             fit["relative_spread"]}))
+    assert "INCONCLUSIVE" in text
+    assert "not evidence of a non-linear preview" in text
+    assert "REJECTED" not in text
+
+
+def test_a_rejection_stands_when_the_control_is_clean():
+    mm = _mm_scene()
+    fit = cal.fit_scale(_pcts(mm),
+                        cal.preview_code_percentiles(_codes(mm, 3000.0, gamma=0.45)))
+    text = " ".join(cal.report(fit, control={"relative_spread": 0.01}))
+    assert "REJECTED" in text
+    assert "this is the preview, not the scene" in text
+
+
+def test_an_inconclusive_result_still_refuses_to_enable_the_recovery():
+    """Inconclusive is not permission. The scale was never confirmed."""
+    mm = _mm_scene()
+    fit = cal.fit_scale(_pcts(mm),
+                        cal.preview_code_percentiles(_codes(mm, 3000.0, gamma=0.8)))
+    text = " ".join(cal.report(fit, control={"relative_spread":
+                                             fit["relative_spread"]}))
+    assert "do not enable RECOVER_8BIT_DEPTH" in text
+    assert "unrecovered rather than unrecoverable" in text
+
+
+def test_a_rejection_without_a_control_asks_for_one():
+    mm = _mm_scene()
+    fit = cal.fit_scale(_pcts(mm),
+                        cal.preview_code_percentiles(_codes(mm, 3000.0, gamma=0.45)))
+    text = " ".join(cal.report(fit))
+    assert "--control-video" in text
+    assert "this rejection means nothing" in text
+
+
+def test_the_control_does_not_touch_an_accepted_fit():
+    mm = _mm_scene()
+    fit = cal.fit_scale(_pcts(mm), cal.preview_code_percentiles(_codes(mm, 3000.0)))
+    a = " ".join(cal.report(fit))
+    b = " ".join(cal.report(fit, control={"relative_spread": 0.9}))
+    assert a == b
+
+
+def test_no_shared_percentiles_gives_no_control_rather_than_a_wrong_one():
+    assert cal.control_spread({20: 1.0}, {80: 1.0}) is None
