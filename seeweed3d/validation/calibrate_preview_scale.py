@@ -225,12 +225,67 @@ def fit_scale(metric_pct, code_pct):
                        "distance are NOT related by one linear map")}
 
 
-def report(fit, assumed=3000.0):
+def control_spread(mm_a, mm_b):
+    """How much this statistic drifts between two sessions that are BOTH real
+    metric depth - the null the preview's drift has to beat.
+
+    Without it, a rejection is ambiguous. Drift can mean the preview is
+    non-linear, or simply that the two sessions do not frame the same geometry:
+    a different day, a different patch of row, more or less of the machine in
+    view. Both produce exactly the same symptom.
+
+    Two known-linear sessions compared the same way isolate the second cause.
+    Whatever drift they show is scene-to-scene variation alone, because the map
+    between real millimetres and real millimetres is the identity. A preview
+    that drifts no more than that has not been shown to be non-linear - and
+    saying so is more useful than a confident rejection that might be about the
+    weather.
+    """
+    per = {p: mm_a[p] / mm_b[p] for p in mm_a if p in mm_b and mm_b[p]}
+    if not per:
+        return None
+    est = np.array(list(per.values()), float)
+    med = float(np.median(est))
+    return {"per_percentile": {p: round(v, 4) for p, v in per.items()},
+            "relative_spread": round(float((est.max() - est.min()) / med), 4)
+            if med else None}
+
+
+def report(fit, assumed=3000.0, control=None):
     """What the fit means for DEPTH_VIS_MAX_MM."""
     out = []
     if not fit.get("linear"):
+        ctl = (control or {}).get("relative_spread")
+        mine = fit.get("relative_spread")
+        # A rejection is only meaningful if the drift exceeds what two real
+        # sessions already show. 1.3x is a deliberately generous margin: the
+        # cost of a false "non-linear" verdict is abandoning recoverable data,
+        # while the cost of an inconclusive one is running one more check.
+        if ctl is not None and mine is not None and mine <= ctl * 1.3:
+            return [
+                f"INCONCLUSIVE: the preview drifts {mine:.1%}, but two REAL "
+                f"metric sessions from this rig drift {ctl:.1%} when compared "
+                f"the same way.",
+                "",
+                "So the drift is not evidence of a non-linear preview. It is "
+                "what two sessions of the same field look like when they do "
+                "not frame the same geometry - a different day, a different "
+                "patch of row, more or less of the machine in view.",
+                "",
+                "This test cannot settle it. What would: a preview session and "
+                "a metric session recorded back to back, in the same capture "
+                "mode, over the same ground. Short of that, treat the depth as "
+                "unrecovered rather than unrecoverable, and do not enable "
+                "RECOVER_8BIT_DEPTH on a scale this test could not confirm.",
+            ]
         out += [
             "REJECTED: " + fit.get("reason", "not linear"),
+        ]
+        if ctl is not None and mine is not None:
+            out += [f"  the preview drifts {mine:.1%}; two REAL metric "
+                    f"sessions drift only {ctl:.1%}, so this is the preview, "
+                    f"not the scene."]
+        out += [
             "",
             "No single DEPTH_VIS_MAX_MM will recover this depth. The capture "
             "GUI applied something other than a plain linear ramp - a gamma, a "
@@ -239,6 +294,12 @@ def report(fit, assumed=3000.0):
             "",
             "Do not set RECOVER_8BIT_DEPTH on the strength of this.",
         ]
+        if ctl is None:
+            out += ["",
+                    "Run again with --control-video pointing at a SECOND metric "
+                    "session. If two real sessions drift as much as this "
+                    "preview does, the drift is scene difference and this "
+                    "rejection means nothing."]
         return out
 
     v = fit["vis_max_mm"]
@@ -284,6 +345,12 @@ def main(argv=None):
     ref.add_argument("--metric-session",
                      help="an extracted session whose depth_kind is 'metric'")
     p.add_argument("--preview", required=True, help="the 8-bit Depth_video.*")
+    p.add_argument("--control-video",
+                   help="a SECOND metric depth video from the same rig. Two "
+                        "known-linear sessions compared the same way measure "
+                        "how much of any drift is just scene difference - "
+                        "without it a rejection cannot be distinguished from "
+                        "the two sessions not framing the same geometry.")
     p.add_argument("--frames", type=int, default=10)
     p.add_argument("--assumed", type=float, default=3000.0)
     p.add_argument("--ffmpeg", default="ffmpeg")
@@ -316,11 +383,22 @@ def main(argv=None):
         s = fit.get("per_percentile", {}).get(pc)
         print(f"  {pc:>4}  {mm_pct[pc]:>10.0f}  {code_pct[pc]:>6.0f}  "
               f"{(f'{s:.0f}' if s else '-'):>13}")
+    ctl = None
+    if a.control_video:
+        ctl_pct, ctl_n = metric_video_percentiles(a.ffmpeg, a.ffprobe,
+                                                  a.control_video)
+        ctl = control_spread(mm_pct, ctl_pct)
+        print(f"\n  control          : {Path(a.control_video).name} "
+              f"({ctl_n} depth frames) - two REAL metric sessions compared "
+              f"the same way")
+        if ctl:
+            print(f"    their drift: {ctl['relative_spread']:.1%}  "
+                  f"(the preview's: {fit.get('relative_spread', 0):.1%})")
     print()
-    for line in report(fit, a.assumed):
+    for line in report(fit, a.assumed, ctl):
         print(f"  {line}" if line else "")
     print()
-    return fit
+    return {**fit, "control": ctl}
 
 
 if __name__ == "__main__":
