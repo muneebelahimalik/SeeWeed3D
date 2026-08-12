@@ -462,6 +462,62 @@ def restore_all(rows):
     return n
 
 
+#: Keeping less than this fraction of a pool is almost always the threshold
+#: being wrong for the footage rather than the footage being that redundant.
+#: A slowly-driven session genuinely is highly redundant, so this is set low -
+#: it flags "you deleted nearly everything", not "you were slightly generous".
+OVER_CURATION_KEEP_FRAC = 0.15
+
+#: Below this many surviving frames a session has stopped being an annotation
+#: batch whatever the percentage says. Ten frames is not a training set and is
+#: not a test set.
+OVER_CURATION_MIN_FRAMES = 12
+
+
+def over_curation_warning(before, after, cfg, sweep=None):
+    """Warn when curation kept so little that the threshold is likely wrong.
+
+    Curation is the one step here that decides how much data exists downstream,
+    and it reports success either way: '754 -> 30 usable frames' is a normal
+    line, not an error, and the run exits 0. The default MIN_SHIFT_FRAC ships
+    tuned for whatever campaign it was last used on, so a slower drive silently
+    loses 96% of a pool and the number only looks wrong once somebody adds it
+    up across sessions.
+
+    The warning names a looser threshold from the sweep that was already
+    computed, so the fix is a value to type rather than another dry run.
+    """
+    if before <= 0 or not cfg.get("DROP_REDUNDANT", True):
+        return []
+    keep = after / float(before)
+    if keep >= OVER_CURATION_KEEP_FRAC and after >= OVER_CURATION_MIN_FRAMES:
+        return []
+
+    out = [f"        [!] kept only {after} of {before} frames "
+           f"({keep:.0%}) - this is probably the threshold, not the footage."]
+    # The sweep is (value, kept, dropped, overlap-ish) rows already gathered
+    # for the table below; find the loosest value that would keep a usable
+    # batch, so the suggestion is grounded in this session's own numbers.
+    suggestion = None
+    for row in (sweep or []):
+        try:
+            val, kept = float(row["threshold"]), int(row["kept"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if kept >= max(OVER_CURATION_MIN_FRAMES, 0.25 * before):
+            if suggestion is None or val > suggestion[0]:
+                suggestion = (val, kept)
+    if suggestion:
+        out.append(f"            MIN_SHIFT_FRAC {suggestion[0]:g} would keep "
+                   f"{suggestion[1]} - see the sweep below.")
+    else:
+        out.append("            even the loosest value in the sweep keeps "
+                   "little, so this session really is that redundant.")
+    out.append("            RESTORE_ALL = True undoes this; no image was "
+               "touched.")
+    return out
+
+
 def curate_session(sid, session_dir, cfg):
     rows, fields = read_pool(session_dir)
     if rows is None:
@@ -498,6 +554,8 @@ def curate_session(sid, session_dir, cfg):
     print(f"  [{sid}] {before} -> {after} usable frames "
           f"({before - after} dropped, {pct:.0f}%)"
           f" | redundant={n_redundant} (by {signal}) manual={n_manual}")
+    for line in over_curation_warning(before, after, cfg, sweep):
+        print(line)
 
     if cfg["DROP_REDUNDANT"]:
         print(f"        pose: {diagnose_pose(rows, cfg['POSE_OK_STATES'])}")
