@@ -125,6 +125,84 @@ def match_colormap(bgr, names=CANDIDATE_COLORMAPS, sample=160):
     return name, resid, d.argmin(axis=1).astype(np.uint8).reshape(h, w)
 
 
+#: How near the top of the range every frame's maximum must sit. NOT 255,
+#: because lossy encoding shaves the peak - a faithful replay of the capture
+#: code through mpeg4 comes back at 248-250. But close to it, because that is
+#: the whole signal: normalisation FORCES the peak to the top of the range
+#: every frame, while a fixed scale only reaches it when the scene happens to
+#: run past the cut.
+NORMALISED_MAX = 245
+
+#: How much the per-frame maxima may differ from each other. Under per-frame
+#: normalisation they are all the same value by construction; under a fixed
+#: scale they track whatever is actually farthest in each frame.
+NORMALISED_MAX_RANGE = 12
+
+#: Fraction of pixels sitting exactly AT the frame's peak, below which the top
+#: was reached by outliers rather than by a saturated plateau. A clipped fixed
+#: scale pins everything beyond the cut to one value, which is a large uniform
+#: region; a normalised frame's peak is the single farthest pixel and the
+#: values below it decay smoothly away from it.
+NORMALISED_SAT_FRAC = 0.02
+
+
+def per_frame_normalisation(codes):
+    """Was each frame scaled by its OWN maximum?
+
+    This is the one failure a scale cannot fix, so it is worth detecting
+    directly rather than inferring it from a calibration that drifts.
+
+    The v1 capture GUI wrote depth as
+
+        depth_norm = depth / depth.max() * 255
+
+    with `depth.max()` recomputed every frame. The scale is therefore a
+    property of each individual frame - one distant outlier pixel sets it for
+    all the others - and NO constant relates code to millimetres across a
+    session. `depth_vis_max_mm` never entered into it.
+
+    Three things have to hold together, because no one of them is decisive:
+
+      every frame reaches the top of the range     - a fixed scale only does
+                                                     this when it clips
+      the maxima agree with each other             - under a fixed scale they
+                                                     track the farthest thing
+                                                     actually in each frame
+      the peak is an outlier, not a plateau        - a fixed scale that DOES
+                                                     clip pins everything
+                                                     beyond the cut to one
+                                                     value, a large uniform
+                                                     region
+
+    Takes CODES, not pixels: for a colourised preview the code is the colormap
+    index, and testing the painted luma would test the colormap's brightness
+    curve instead.
+
+    Needs several frames - one frame reaching its own maximum says nothing.
+
+    Not infallible. A fixed-scale preview whose scene runs past the cut in a
+    small patch every single frame looks the same from the outside. The
+    definitive check is the capture code that wrote the file; this is the best
+    available answer when that code is not to hand, and it errs toward
+    refusing, because recovering garbage depth costs far more than declining
+    to recover a file that turns out to have been recoverable.
+    """
+    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
+             for f in codes]
+    if len(grays) < 3:
+        return None
+    maxima = [int(g.max()) for g in grays]
+    top = max(maxima)
+    # Measured AT each frame's own peak rather than at 255, so lossy ringing
+    # that shaves a few levels off the top does not read as "never saturates".
+    sat = [float((g >= m).mean()) for g, m in zip(grays, maxima)]
+    return {"frame_maxima": maxima,
+            "max_saturated_frac": round(max(sat), 6),
+            "normalised": bool(min(maxima) >= NORMALISED_MAX
+                               and top - min(maxima) <= NORMALISED_MAX_RANGE
+                               and max(sat) < NORMALISED_SAT_FRAC)}
+
+
 def luma_profile(bgr):
     """What the intensity channel looks like: how much of it is zero, how much
     of the 0..255 range is used, and whether it sits in TV range.
@@ -189,29 +267,56 @@ def classify(info, frames):
 
     chroma = max(chroma_spread(f) for f in frames)
     luma = luma_profile(frames[0])
+
+    # Recover the CODE first - the 0..255 depth index - because every later
+    # question is about the codes, not about the pixels they were painted as.
+    # For a grayscale preview the code is the luma; for a colourised one it is
+    # the colormap index, and testing the luma instead would be testing the
+    # colormap's own brightness curve.
     if chroma <= GRAY_CHROMA_TOL:
+        kind, colormap, resid = "grayscale_8bit", None, None
+        codes = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+    else:
+        colormap, resid, _ = match_colormap(frames[0])
+        if resid > COLORMAP_RESIDUAL_TOL:
+            return {"verdict": "unknown_8bit", "closest_colormap": colormap,
+                    "residual": round(resid, 1),
+                    "chroma_spread": round(chroma, 1), "luma": luma,
+                    "detail": "8-bit COLOUR matching no known depth colormap. "
+                              "This is not a recoverable range image",
+                    "recoverable": False, "exact": False}
+        kind = "colormapped_8bit"
+        codes = [match_colormap(f, names=(colormap,))[2] for f in frames]
+
+    # Per-frame normalisation outranks everything above: a preview scaled by
+    # its own maximum is unrecoverable whether it was written gray or
+    # colourised, because there is no constant to find in either case.
+    norm = per_frame_normalisation(codes)
+    if norm and norm["normalised"]:
+        return {"verdict": "per_frame_normalised_8bit",
+                "written_as": kind, "colormap": colormap,
+                "frame_maxima": norm["frame_maxima"],
+                "max_saturated_frac": norm["max_saturated_frac"],
+                "chroma_spread": round(chroma, 1), "luma": luma,
+                "detail": "8-bit, and each frame was scaled by its OWN maximum "
+                          "(depth / depth.max() * 255). The scale changes every "
+                          "frame, so no constant relates code to millimetres",
+                "recoverable": False, "exact": False}
+
+    if kind == "grayscale_8bit":
         return {"verdict": "grayscale_8bit", "chroma_spread": round(chroma, 1),
                 "luma": luma,
                 "detail": "8-bit GRAYSCALE - a depth preview, not metric depth. "
                           "The geometry is present at 1/256 of whatever range "
                           "it was scaled to, then lossily compressed",
                 "recoverable": True, "exact": False}
-
-    name, resid, _ = match_colormap(frames[0])
-    if resid <= COLORMAP_RESIDUAL_TOL:
-        return {"verdict": "colormapped_8bit", "colormap": name,
-                "residual": round(resid, 1), "chroma_spread": round(chroma, 1),
-                "luma": luma,
-                "detail": f"8-bit COLOURISED with the {name} colormap - a "
-                          f"preview. The index is invertible, so the same "
-                          f"1/256 geometry is present",
-                "recoverable": True, "exact": False}
-    return {"verdict": "unknown_8bit", "closest_colormap": name,
+    return {"verdict": "colormapped_8bit", "colormap": colormap,
             "residual": round(resid, 1), "chroma_spread": round(chroma, 1),
             "luma": luma,
-            "detail": "8-bit COLOUR matching no known depth colormap. This is "
-                      "not a recoverable range image",
-            "recoverable": False, "exact": False}
+            "detail": f"8-bit COLOURISED with the {colormap} colormap - a "
+                      f"preview. The index is invertible, so the same "
+                      f"1/256 geometry is present",
+            "recoverable": True, "exact": False}
 
 
 def advise(v):
@@ -221,6 +326,24 @@ def advise(v):
         return ["Extract normally. Nothing to do."]
     if k == "undecodable":
         return ["The file cannot be read. Check it is not truncated."]
+    if k == "per_frame_normalised_8bit":
+        return [
+            "Nothing to recover, and no calibration will change that.",
+            "",
+            "Each frame was divided by its own maximum before being written, "
+            "so the scale is a property of the individual frame - one distant "
+            "outlier pixel sets it for every other pixel in that frame. Two "
+            "frames of identical geometry get different codes whenever their "
+            "farthest point differs. There is no constant to find.",
+            "",
+            "Treat these sessions as RGB-only. They remain fully usable for "
+            "segmentation; only 3D and LEP need real depth.",
+            "",
+            "For future captures the fix is one line at the capture end: write "
+            "the raw millimetres as 16-bit rather than a normalised 8-bit "
+            "preview. See capture/zed_capture.py, which records depth "
+            "losslessly alongside the SVO archive.",
+        ]
     if k == "unknown_8bit":
         return ["Nothing to recover. Treat these sessions as RGB-only.",
                 "Depth for this visit would have to come from the original "
@@ -284,7 +407,8 @@ def main(argv=None):
 
     print(f"\n  VERDICT: {v['verdict']}")
     print(f"  {v['detail']}.")
-    for key in ("colormap", "closest_colormap", "residual", "chroma_spread"):
+    for key in ("colormap", "closest_colormap", "residual", "chroma_spread",
+                "frame_maxima", "max_saturated_frac"):
         if key in v:
             print(f"    {key}: {v[key]}")
     if "luma" in v:

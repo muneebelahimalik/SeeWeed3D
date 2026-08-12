@@ -165,7 +165,29 @@ python -m seeweed3d.validation.inspect_depth_video `
 | `true_16bit` | metric depth — extract normally |
 | `grayscale_8bit` | a preview. Geometry present at 1/256 of its scale |
 | `colormapped_8bit` | a colourised preview. Same, and the colormap is named |
+| `per_frame_normalised_8bit` | **nothing to recover, ever.** See below |
 | `unknown_8bit` | not a range image. Nothing to recover |
+
+**`per_frame_normalised_8bit` is the one that cannot be fixed by calibration.**
+Some v1 capture builds wrote depth as
+
+```python
+max_val = depth_data.max()                       # recomputed EVERY frame
+depth_norm = (depth_data / max_val * 255).astype(np.uint8)
+```
+
+The scale is a property of the individual frame — one distant outlier pixel
+sets it for every other pixel in that frame — so two frames of identical
+geometry get different codes whenever their farthest point differs. There is no
+constant to find, and `depth_vis_max_mm` never entered into it. The detector
+looks for the signature: every frame pinned at the top of the range, the maxima
+agreeing with each other, and the peak an outlier rather than a saturated
+plateau. It errs toward refusing, because recovering garbage depth costs far
+more than declining a file that turns out to have been recoverable.
+
+The fix is at the capture end, one line: write raw millimetres as 16-bit
+instead of a normalised 8-bit preview — which is what `capture/zed_capture.py`
+already does.
 
 For the two recoverable cases, `RECOVER_8BIT_DEPTH: True` inverts the capture
 GUI's display scaling and writes approximate millimetres:

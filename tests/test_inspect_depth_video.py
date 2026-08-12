@@ -169,3 +169,135 @@ def test_an_unrecoverable_file_says_so_without_hedging():
 def test_sixteen_bit_advice_is_one_line():
     assert iv.advise({"verdict": "true_16bit"}) == ["Extract normally. "
                                                     "Nothing to do."]
+
+
+# --------------------------------------------------------------------------- #
+# Per-frame normalisation: the one failure no scale can fix
+#
+# The v1 capture GUI wrote depth as `depth / depth.max() * 255`, with the max
+# recomputed EVERY frame. The scale is a property of the individual frame - one
+# distant outlier sets it for every other pixel - so no constant relates code to
+# millimetres. depth_vis_max_mm never entered into it.
+# --------------------------------------------------------------------------- #
+def _normalised(mm_frames):
+    """Exactly what the capture code did."""
+    return [_gray_bgr((mm / (mm.max() or 1) * 255).astype(np.uint8))
+            for mm in mm_frames]
+
+
+def _fixed_scale_clipped(mm_frames, vis_max=3000.0):
+    """A fixed scale that happens to clip - reaches 255 too, but saturates a
+    whole region rather than a handful of outliers."""
+    out = []
+    for mm in mm_frames:
+        c = np.clip(mm / vis_max, 0, 1) * 255.0
+        out.append(_gray_bgr(c.astype(np.uint8)))
+    return out
+
+
+def _scenes(n=5, h=90, w=160, far_region=False):
+    rng = np.random.default_rng(0)
+    out = []
+    for k in range(n):
+        mm = np.tile(np.linspace(600, 2400 + k * 300, w), (h, 1))
+        mm = mm + rng.normal(0, 20, mm.shape)
+        if far_region:
+            mm[:, 140:] = 4000.0            # genuinely beyond a 3000 mm cut
+        out.append(np.clip(mm, 0, 1e9))
+    return out
+
+
+def test_per_frame_normalisation_is_detected():
+    v = iv.classify({"codec": "mpeg4", "pix_fmt": "yuv420p"},
+                    _normalised(_scenes()))
+    assert v["verdict"] == "per_frame_normalised_8bit"
+    assert v["recoverable"] is False
+
+
+def test_a_clipped_fixed_scale_is_not_mistaken_for_it():
+    """Both reach 255 in every frame. Only the SIZE of the saturated area
+    separates them - a fixed scale saturates everything beyond the cut."""
+    frames = _fixed_scale_clipped(_scenes(far_region=True))
+    norm = iv.per_frame_normalisation(frames)
+    assert all(m >= 250 for m in norm["frame_maxima"])      # tops out too
+    assert norm["max_saturated_frac"] > iv.NORMALISED_SAT_FRAC
+    assert not norm["normalised"]
+    assert iv.classify({"codec": "mpeg4", "pix_fmt": "yuv420p"},
+                       frames)["verdict"] == "grayscale_8bit"
+
+
+def test_a_fixed_scale_that_never_clips_is_unaffected():
+    frames = _fixed_scale_clipped(_scenes(), vis_max=6000.0)
+    assert not iv.per_frame_normalisation(frames)["normalised"]
+
+
+def test_one_frame_is_not_enough_to_call_it():
+    """A single frame reaching its own maximum says nothing at all."""
+    assert iv.per_frame_normalisation(_normalised(_scenes(n=1))) is None
+    assert iv.per_frame_normalisation(_normalised(_scenes(n=2))) is None
+
+
+def test_it_outranks_the_colormap_question():
+    """A per-frame normalised preview is unrecoverable whether or not somebody
+    then ran a colormap over it, so it is decided first."""
+    import cv2 as _cv2
+    frames = [_cv2.applyColorMap(
+        (mm / mm.max() * 255).astype(np.uint8), _cv2.COLORMAP_JET)
+        for mm in _scenes()]
+    v = iv.classify({"codec": "mpeg4", "pix_fmt": "yuv420p"}, frames)
+    assert v["verdict"] == "per_frame_normalised_8bit"
+    assert v["recoverable"] is False
+
+
+def test_16_bit_is_still_decided_before_anything_else():
+    """A real 16-bit stream is never even decoded, so the normalisation test
+    must not be able to reach it."""
+    v = iv.classify({"codec": "ffv1", "pix_fmt": "gray16le"}, [])
+    assert v["verdict"] == "true_16bit"
+
+
+def test_the_advice_says_no_calibration_will_help():
+    """The expensive mistake here is spending a day calibrating something that
+    has no constant to find."""
+    text = " ".join(iv.advise(iv.classify(
+        {"codec": "mpeg4", "pix_fmt": "yuv420p"}, _normalised(_scenes()))))
+    assert "no calibration will change that" in text
+    assert "own maximum" in text
+    assert "There is no constant to find" in text
+
+
+def test_the_advice_names_the_one_line_fix_for_future_captures():
+    text = " ".join(iv.advise(iv.classify(
+        {"codec": "mpeg4", "pix_fmt": "yuv420p"}, _normalised(_scenes()))))
+    assert "16-bit" in text and "zed_capture.py" in text
+
+
+def test_it_still_says_the_sessions_are_usable():
+    """RGB-only is not a lost session - segmentation never touches depth."""
+    text = " ".join(iv.advise(iv.classify(
+        {"codec": "mpeg4", "pix_fmt": "yuv420p"}, _normalised(_scenes()))))
+    assert "fully usable for segmentation" in text
+
+
+def test_a_fixed_scales_peak_tracks_the_scene_while_normalisation_pins_it():
+    """The property that separates them. Under a fixed scale the peak is
+    wherever the farthest thing in that frame happens to land, so it moves as
+    the scene changes. Normalisation forces it to the top of the range every
+    frame, by construction."""
+    scenes = _scenes()                       # each frame reaches further out
+    fixed = iv.per_frame_normalisation(
+        _fixed_scale_clipped(scenes, vis_max=6000.0))["frame_maxima"]
+    pinned = iv.per_frame_normalisation(_normalised(scenes))["frame_maxima"]
+    assert max(fixed) - min(fixed) > iv.NORMALISED_MAX_RANGE
+    assert max(pinned) - min(pinned) == 0
+
+
+def test_the_ambiguous_case_is_documented_and_errs_toward_refusing():
+    """A fixed-scale preview whose scene runs past the cut in a small patch
+    EVERY frame is indistinguishable from outside. Recovering garbage depth
+    costs far more than declining a file that turns out recoverable, so the
+    tie goes to refusing - and the docstring says so rather than implying the
+    test is infallible."""
+    doc = iv.per_frame_normalisation.__doc__
+    assert "Not infallible" in doc
+    assert "errs toward" in doc and "refusing" in doc
