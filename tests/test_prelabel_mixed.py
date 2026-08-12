@@ -201,6 +201,153 @@ def test_the_afflicted_leaf_now_seeds_one_instance_not_a_scatter():
 
 
 # --------------------------------------------------------------------------- #
+# Pruning must run LAST, or bridging never gets a chance
+#
+# A first version of the bridge called vegetation_mask() with the real size
+# floor already applied, so on a thin, heavily afflicted leaf every individual
+# fragment could be smaller than VEG_MIN_COMPONENT_PX on its own and got
+# deleted before bridging ever saw it. Reported as near-total recall
+# collapse: real sessions came back with empty masks and empty previews on
+# most frames, sparse AND dense alike.
+# --------------------------------------------------------------------------- #
+def _sparse_shoot(h=300, w=500, thickness=3, n_afflict=16, r=5, seed=0):
+    """A thin, heavily afflicted shoot on pale soil - the sparser, harsher
+    scene the collapse was reported on, distinct from _curved_leaf's thicker,
+    denser one."""
+    img = _scene(h, w); img[:] = (140, 150, 160)
+    pts = [[30, 220], [100, 150], [180, 110], [260, 140], [340, 210]]
+    curve = np.zeros((h, w), np.uint8)
+    cv2.polylines(curve, [np.array(pts, np.int32)], False, 1, thickness)
+    leaf = curve.astype(bool)
+    img[leaf] = LEAF
+    ys, xs = np.nonzero(leaf)
+    order = np.argsort(xs)
+    ys, xs = ys[order], xs[order]
+    for j, i in enumerate(np.linspace(0, len(xs) - 1, n_afflict).astype(int)):
+        colour = (235, 235, 235) if j % 2 == 0 else (150, 110, 40)
+        cv2.circle(img, (int(xs[i]), int(ys[i])), r, colour, -1)
+    return img, leaf
+
+
+def test_pruning_before_bridging_would_have_deleted_the_whole_leaf():
+    """Pins the mechanism, not just the symptom: with the floor applied before
+    bridging ever runs, every individual fragment of this leaf is too small to
+    survive on its own."""
+    img, leaf = _sparse_shoot()
+    pruned_first = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                      CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    n, _, stats, _ = cv2.connectedComponentsWithStats(pruned_first.astype(np.uint8), 8)
+    assert n <= 1 or stats[1:, cv2.CC_STAT_AREA].max() < CFG["VEG_MIN_COMPONENT_PX"] * 3
+
+
+def test_plant_pixels_reconnects_the_sparse_shoot_pruning_second():
+    img, leaf = _sparse_shoot()
+    veg = mx.plant_pixels(img, CFG)
+    assert veg.any()
+    assert float((veg & leaf).sum()) / leaf.sum() > 0.7
+
+
+def test_scattered_soil_noise_still_gets_nothing_from_pruning_last():
+    """Deferring the size floor could in principle let sparse noise
+    self-assemble into a survivor. It must not: spaced further apart than the
+    bridge reach, isolated noise stays isolated and still gets pruned."""
+    rng = np.random.default_rng(0)
+    img = _scene(300, 400)
+    for _ in range(40):
+        x, y = int(rng.integers(10, 390)), int(rng.integers(10, 290))
+        colour = (int(rng.integers(30, 90)), int(rng.integers(150, 220)),
+                 int(rng.integers(30, 90)))
+        cv2.circle(img, (x, y), 2, colour, -1)
+    veg = mx.plant_pixels(img, CFG)
+    assert not veg.any()
+
+
+# --------------------------------------------------------------------------- #
+# plant_confidence(): the recall/exemplar gate must not re-reject what
+# bridging just admitted
+#
+# unseeded_components() and the exemplar confidence check both used to read
+# vegetation_score() directly - the exact strict colour rule that fragmented
+# the leaf in the first place. A pixel bridged in for failing THAT rule then
+# scored near zero on it and got rejected all over again by the gate meant to
+# keep noise out, discarding the material the bridge existed to save. This
+# was not a rare edge case: it fired on every frame where bridging did real
+# work, sparse or dense.
+# --------------------------------------------------------------------------- #
+def test_a_bridged_pixel_no_longer_scores_on_its_own_failing_colour():
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    veg = mx.plant_pixels(sick, CFG)
+    old_score = mx.vegetation_score(sick, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                    CFG["VEG_SCORE_SOFTNESS"])
+    fixed_score = mx.plant_confidence(sick, veg, CFG)
+    strict = mx.strict_vegetation(sick, CFG)
+    bridged_only = veg & ~strict
+    assert bridged_only.any()
+    assert float(fixed_score[bridged_only].mean()) > float(old_score[bridged_only].mean())
+
+
+def test_reconnected_components_now_clear_the_recall_gate():
+    """The concrete regression: real, reconnected leaf material - not
+    noise - was scoring 0.6-0.7 against a 0.9 floor and being thrown away."""
+    img, leaf = _sparse_shoot()
+    veg = mx.plant_pixels(img, CFG)
+    score = mx.plant_confidence(img, veg, CFG)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(veg.astype(np.uint8), 8)
+    assert n > 1
+    means = [float(score[lbl == i].mean()) for i in range(1, n)]
+    assert max(means) >= CFG["RECOVER_MIN_VEG_SCORE"]
+
+
+def test_exemplar_generation_now_actually_fires_on_an_afflicted_leaf():
+    """The path PR #74's own tests never exercised: component_boxes() gated by
+    the SAME confidence score prelabel_session actually uses to prompt SAM.
+    Feeding hand-built SAM stubs into analyze_frame, as the earlier tests did,
+    proved the mask logic worked but never proved SAM would ever be asked."""
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    veg_pre = mx.plant_pixels(sick, CFG)
+    score_pre = mx.plant_confidence(sick, veg_pre, CFG)
+    boxes = mx.component_boxes(veg_pre, CFG["EXEMPLAR_MIN_AREA_PX"], CFG["EXEMPLAR_PAD_PX"],
+                               CFG["EXEMPLAR_MAX_BOXES"], confidence=score_pre,
+                               min_confidence=CFG["EXEMPLAR_MIN_VEG_SCORE"])
+    assert len(boxes) >= 1
+
+
+def test_the_old_score_would_have_produced_no_exemplars_at_all():
+    """Regression pin for the mechanism, not just the outcome."""
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    veg_pre = mx.plant_pixels(sick, CFG)
+    old_score = mx.vegetation_score(sick, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                    CFG["VEG_SCORE_SOFTNESS"])
+    old_boxes = mx.component_boxes(veg_pre, CFG["EXEMPLAR_MIN_AREA_PX"], CFG["EXEMPLAR_PAD_PX"],
+                                   CFG["EXEMPLAR_MAX_BOXES"], confidence=old_score,
+                                   min_confidence=CFG["EXEMPLAR_MIN_VEG_SCORE"])
+    assert old_boxes == []
+
+
+def test_plant_confidence_is_identical_to_the_strict_score_when_nothing_bridged():
+    """Must be inert on tissue that never needed bridging - a leaf with no
+    defects gets the same confidence it always did."""
+    img, leaf = _curved_leaf()
+    veg = mx.plant_pixels(img, CFG)
+    fixed_score = mx.plant_confidence(img, veg, CFG)
+    old_score = mx.vegetation_score(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                    CFG["VEG_SCORE_SOFTNESS"])
+    assert np.allclose(fixed_score, old_score)
+
+
+def test_isolated_noise_still_scores_low_with_no_confirmed_neighbour():
+    """A bridged pixel borrows confidence from a nearby STRICT pixel. Noise
+    with nothing strict-passing nearby has nothing to borrow from and must
+    stay low."""
+    img = _scene(200, 200)
+    score = mx.plant_confidence(img, np.zeros((200, 200), bool), CFG)
+    assert float(score.max()) < 0.5
+
+
+# --------------------------------------------------------------------------- #
 # The vegetation prior owns the boundary
 # --------------------------------------------------------------------------- #
 def test_a_proposal_that_bleeds_onto_soil_contributes_no_soil():

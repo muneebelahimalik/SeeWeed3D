@@ -186,6 +186,39 @@ preview afterward, not just a single-leaf one.
 | `VEG_BRIDGE_HIGHLIGHT_SAT` | HSV saturation at or below which a halo pixel is treated as a specular highlight and admitted regardless of hue |
 | `VEG_CLOSE_KERNEL_PX` | Off by default. Pure-shape safety net; smooths plant-to-plant necks as readily as leaf gaps |
 
+### Reconnecting the mask is not enough on its own
+
+Two more places assume a clean, unfragmented prior, and missing either one
+meant real field sessions still came back with **empty masks and empty
+previews on most frames** even after the mask itself was reconnected — sparse
+frames and dense, overlapping ones alike.
+
+**The size floor has to run last.** `vegetation_mask()` deletes any component
+under `VEG_MIN_COMPONENT_PX` before it ever returns — and on a thin, heavily
+afflicted leaf, every *individual* fragment can be smaller than that floor
+even though the leaf as a whole is not. Calling it with the real floor already
+applied prunes every fragment before bridging ever sees them, and dilating an
+already-empty mask stays empty: the whole plant vanishes. `strict_vegetation()`
+now calls it with `min_component_px=0`, so bridging gets every surviving speck
+to reconnect, and the real floor is applied once, at the very end, to the
+**reconnected** result.
+
+**Confidence has to know what was bridged.** The recall backstop and the
+exemplar-confidence gate both score a component with `vegetation_score()` —
+the exact strict colour rule that fragmented the leaf in the first place. A
+bridged highlight or blue-shifted pixel scores near zero on it, so a component
+substantially made of bridged pixels can score well under
+`RECOVER_MIN_VEG_SCORE` (0.90) or `EXEMPLAR_MIN_VEG_SCORE` (0.85) even though
+it is real, reconnected leaf tissue — measured at 0.62–0.71 on a synthetic
+afflicted leaf, comfortably real vegetation, comfortably rejected. That fires
+on **every** frame where bridging did meaningful work, which in practice is
+most onion-containing frames — not a rare edge case. `plant_confidence()`
+scores a bridged pixel by the best `vegetation_score()` found within
+`VEG_BRIDGE_PX` of it among pixels that passed the strict gate directly — the
+same context that already justified admitting the pixel, reused rather than
+re-litigated. `analyze_frame()` and the exemplar-prompting step in
+`prelabel_session()` both use it in place of the raw score now.
+
 ---
 
 ## Recall: unclaimed green becomes an instance

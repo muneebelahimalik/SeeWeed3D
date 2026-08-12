@@ -553,6 +553,39 @@ shape-only operator cannot tell the two apart. The colour-aware bridge has no
 such failure mode — the soil around a genuine neck fails its colour test —
 and was measured sufficient on its own.
 
+**Reconnecting the mask turned out not to be enough on its own.** Real
+sessions still came back with empty masks and empty previews on most frames —
+sparse ones and dense, overlapping ones alike — even with the mask itself
+fixed. Two more places assumed a clean, unfragmented prior.
+
+First, the size floor was running *before* bridging: `vegetation_mask()`
+deletes any component under `VEG_MIN_COMPONENT_PX` before returning, and on a
+thin, heavily afflicted leaf every individual fragment can be smaller than
+that floor even though the leaf as a whole is not. Pruning first deletes every
+fragment before bridging ever sees them — and dilating an already-empty mask
+stays empty, so the whole plant vanished. `strict_vegetation()` now computes
+the strict gate with no size floor at all, bridging reconnects every surviving
+speck, and the real floor is applied once, at the very end, to the
+**reconnected** result.
+
+Second, and the larger effect in practice: the recall backstop and the
+exemplar-confidence gate both scored a component with `vegetation_score()` —
+the exact strict colour rule that fragmented the leaf in the first place. A
+bridged pixel scores near zero on the rule it was bridged *for failing*, so a
+component substantially made of bridged pixels — measured at 0.62–0.71 on a
+synthetic afflicted leaf — scored comfortably under `RECOVER_MIN_VEG_SCORE`
+(0.90) and `EXEMPLAR_MIN_VEG_SCORE` (0.85), rejected by the exact gates meant
+to keep noise out. This fired on **every** frame where bridging did meaningful
+work, not a rare edge case — in practice most onion-containing frames, which
+is why both sparse and dense sessions collapsed to empty output. It was also
+invisible to the tests that shipped with the original fix, because they fed
+hand-built SAM masks directly into `analyze_frame()`, never exercising the
+real `component_boxes(confidence=...)` path `prelabel_session()` actually
+uses to prompt SAM. `plant_confidence()` scores a bridged pixel by the best
+strict-gate score found within `VEG_BRIDGE_PX` of it — the same context that
+already justified admitting the pixel — instead of re-litigating it against
+the rule that failed in the first place.
+
 ---
 
 ## 16. The Feb 2025 visit, and depth that never existed

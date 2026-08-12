@@ -118,6 +118,36 @@ for whatever it still misses - it has no colour context at all, so it smooths
 a plant-to-plant neck exactly as readily as a gap within one leaf; raise it
 only after re-checking a touching-plants preview, not just a single-leaf one.
 
+TWO MORE THINGS THE FRAGMENTATION BREAKS, DOWNSTREAM OF THE MASK ITSELF
+-------------------------------------------------------------------------
+Reconnecting the mask is necessary and not sufficient. Two more places assume
+a clean, unfragmented prior, and a first version of this fix missed both,
+which meant real field sessions still came back with empty masks on most
+frames after the mask itself was already fixed.
+
+  1. THE SIZE FLOOR HAS TO RUN LAST. `vegetation_mask()` deletes any component
+     under `VEG_MIN_COMPONENT_PX` before returning - and on a thin, heavily
+     afflicted leaf, every INDIVIDUAL fragment can be smaller than that floor
+     even though the leaf as a whole is not. Calling `vegetation_mask()` with
+     the real floor already applied prunes every fragment before bridging ever
+     sees them, and dilating an already-empty mask stays empty - the whole
+     plant vanishes. `strict_vegetation()` calls it with `min_component_px=0`
+     instead, so bridging gets every surviving speck to reconnect, and
+     `plant_pixels()` applies the real floor once, at the very end, to the
+     RECONNECTED result.
+  2. CONFIDENCE HAS TO KNOW WHAT WAS BRIDGED. `unseeded_components()` and the
+     exemplar-confidence gate both score a component by `vegetation_score()` -
+     the exact strict colour rule that fragmented the leaf in the first place.
+     A bridged highlight or blue-shifted pixel therefore scores near zero on
+     it, and a component substantially made of bridged pixels can score well
+     under `RECOVER_MIN_VEG_SCORE` (0.90) or `EXEMPLAR_MIN_VEG_SCORE` (0.85)
+     even though it is real, reconnected leaf tissue - rejected by the very
+     gate meant to keep noise out, on every frame where bridging did real
+     work. `plant_confidence()` scores a bridged pixel by the BEST
+     `vegetation_score()` found within `VEG_BRIDGE_PX` of it among pixels that
+     passed the strict gate directly - the same context that justified
+     admitting the pixel in the first place, reused rather than re-litigated.
+
 RECALL: UNCLAIMED GREEN BECOMES AN INSTANCE
 -------------------------------------------
 A vegetation component containing no seed is a plant SAM missed entirely. Those
@@ -150,7 +180,8 @@ from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              prelabel_cvat_labels)
 from common.progress import Progress  # noqa: E402
 from common.vegetation import (component_boxes, excess_green,  # noqa: E402
-                               vegetation_mask, vegetation_score, white_balance)
+                               remove_small, vegetation_mask, vegetation_score,
+                               white_balance)
 from perception.segmenter import drop_fragments  # noqa: E402
 
 # #############################################################################
@@ -400,16 +431,70 @@ def close_thin_gaps(veg, kernel_px):
     return cv2.morphologyEx(veg.astype(np.uint8), cv2.MORPH_CLOSE, ker).astype(bool)
 
 
+def strict_vegetation(bgr, cfg):
+    """Pixels passing the strict colour gate, before ANY size floor.
+
+    This is the trustworthy "confirmed plant" set bridging anchors to, and
+    that plant_confidence() falls back on for pixels bridging added. It is
+    deliberately NOT vegetation_mask()'s own pruned output: on a thin, heavily
+    afflicted leaf every individual fragment can be smaller than
+    VEG_MIN_COMPONENT_PX on its own, and pruning at that stage deletes every
+    one of them before bridging ever gets a chance to reconnect them into
+    something real. min_component_px=0 keeps every surviving speck; the real
+    floor is applied once, at the very end, in plant_pixels()."""
+    return vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                           cfg["VEG_MORPH_KERNEL"], min_component_px=0)
+
+
 def plant_pixels(bgr, cfg):
     """The vegetation prior that will own every boundary in this frame."""
-    veg = vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
-                          cfg["VEG_MORPH_KERNEL"], cfg["VEG_MIN_COMPONENT_PX"])
+    strict = strict_vegetation(bgr, cfg)
     # Colour-aware bridging first, since it adds real evidence rather than
     # merely reshaping what is already there; pure-shape closing follows as a
     # smaller-radius mop-up for anything the colour rules still missed.
-    veg = recover_glaucous_pixels(bgr, veg, cfg)
+    veg = recover_glaucous_pixels(bgr, strict, cfg)
     veg = close_thin_gaps(veg, cfg["VEG_CLOSE_KERNEL_PX"])
-    return fill_holes(veg, cfg["VEG_FILL_HOLES_MAX_PX"])
+    veg = fill_holes(veg, cfg["VEG_FILL_HOLES_MAX_PX"])
+    # THE SIZE FLOOR RUNS LAST, on the fully reconnected mask. Pruning first
+    # - which is what a single vegetation_mask() call would do - deletes the
+    # very fragments bridging exists to heal before it ever sees them; on a
+    # sufficiently thin, sufficiently afflicted leaf that deletes the WHOLE
+    # plant, since dilating an already-empty mask stays empty and there is
+    # nothing left to bridge from.
+    return remove_small(veg, cfg["VEG_MIN_COMPONENT_PX"])
+
+
+def plant_confidence(bgr, veg, cfg):
+    """Continuous plant-likelihood, aware of what bridging already vetted.
+
+    vegetation_score() applies the exact strict colour rule that fragments a
+    glaucous onion leaf in the first place, so a highlight or blue-shifted
+    pixel scores near zero on it - the SAME defect that got the pixel bridged
+    into `veg` also tanks its own confidence score. Used as-is, a component
+    that is genuinely real tissue but was substantially recovered by bridging
+    scores far below RECOVER_MIN_VEG_SCORE or EXEMPLAR_MIN_VEG_SCORE and gets
+    rejected by the very gates meant to keep noise out - discarding exactly
+    the material the bridge exists to save, on every frame where bridging did
+    real work.
+
+    So a bridged pixel is not scored on its own (deliberately failing)
+    colour. It inherits the BEST vegetation_score found within VEG_BRIDGE_PX
+    of it among pixels that passed the strict gate directly - the same
+    context recover_glaucous_pixels already used to decide the pixel was
+    plant in the first place, reused here instead of re-litigated."""
+    score = vegetation_score(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
+                             cfg["VEG_SCORE_SOFTNESS"])
+    strict = strict_vegetation(bgr, cfg)
+    bridged = veg & ~strict
+    if not bridged.any():
+        return score
+    reach = max(1, int(cfg["VEG_BRIDGE_PX"]))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * reach + 1, 2 * reach + 1))
+    seed_score = np.where(strict, score, 0.0).astype(np.float32)
+    spread = cv2.dilate(seed_score, k)          # max strict score within reach
+    out = score.copy()
+    out[bridged] = spread[bridged]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -626,8 +711,7 @@ def analyze_frame(bgr, sam_masks, cfg):
     Returns (instances, veg, qa). Pure CPU; the SAM call happens outside, which
     is what makes every decision in this module testable without a GPU."""
     veg = plant_pixels(bgr, cfg)
-    score = vegetation_score(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
-                             cfg["VEG_SCORE_SOFTNESS"])
+    score = plant_confidence(bgr, veg, cfg)
     seeds = seed_masks(sam_masks, veg, cfg)
     recovered = unseeded_components(veg, seeds, cfg, score)
     sources = ["sam"] * len(seeds) + ["vegetation"] * len(recovered)
@@ -804,9 +888,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             continue
 
         if cfg["SAM_PROMPT_MODE"] == "auto_exemplar":
-            score_pre = vegetation_score(proc, cfg["EXG_THRESHOLD"],
-                                         cfg["VEG_MIN_SATURATION"],
-                                         cfg["VEG_SCORE_SOFTNESS"])
+            score_pre = plant_confidence(proc, veg_pre, cfg)
             exemplars = component_boxes(veg_pre, cfg["EXEMPLAR_MIN_AREA_PX"],
                                         cfg["EXEMPLAR_PAD_PX"],
                                         cfg["EXEMPLAR_MAX_BOXES"],
