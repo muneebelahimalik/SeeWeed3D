@@ -121,6 +121,73 @@ and **no pixel belongs to two instances**.
 
 ---
 
+## Onion's glaucous leaf, and why it fragments the prior
+
+Real field frames add a third problem, on top of the two above: a single
+onion leaf can come out of the vegetation prior broken into a handful of
+disconnected slivers, and every step downstream inherits the damage — SAM's
+exemplar boxes end up one per fragment instead of one per leaf, the watershed
+can only flood within `veg` so it cannot cross the gaps either, and the
+fragment-dropping cleanup throws the smaller slivers away as if they were
+soil-texture speckle, because from its side of the pipeline that is exactly
+what they look like. The result is a scatter of tiny instances instead of one
+clean leaf, and onion massively under-represented relative to the weeds
+around it.
+
+**The cause is onion's leaf surface, not a bug in the watershed.** Onion is a
+glossy, waxy, blue-green tube, and that surface defeats
+`vegetation_mask()`'s colour gates two ways at once:
+
+1. **The wax bloom lifts blue reflectance.** The gate requires green to
+   dominate both red *and* blue at every pixel. A matte broadleaf weed clears
+   that easily; the glaucous coating on onion measurably shifts colour toward
+   blue, so stretches of a real leaf fail `g >= b` outright.
+2. **The glossy curve throws specular highlights.** A round, wet-looking
+   surface catches direct light as a near-white streak. A highlight has no
+   *leaf* colour to detect — it **is** the light source's colour — so it fails
+   ExG, green-dominance and saturation all at once. No threshold admits it,
+   because there is no green signal there to threshold.
+
+Both cut straight across the leaf's *width*, so the gap connects to the
+surrounding soil on both sides. `fill_holes()` cannot help: it only fills gaps
+fully **enclosed** by vegetation, by design, so a genuine gap between two
+adjacent leaves — which is soil, and must stay soil — is never touched. A gap
+that severs a thin leaf is indistinguishable from that case by shape alone.
+
+**`recover_glaucous_pixels()`** fixes it without touching the shared
+`vegetation.py` — the onion and weed prelabelers are tuned against its current
+behaviour, and this project has already reverted one boundary "improvement"
+that looked better on paper and was worse in the field (see the
+`CHANGELOG.md` phase on boundary quality). It relaxes the green-dominance and
+saturation gates, but **only** within a small halo (`VEG_BRIDGE_PX`) around
+pixels the strict gate already accepted. A bare patch of pale soil sitting on
+its own earns nothing from either relaxed rule, however low its saturation —
+only a highlight or blue-shifted stretch sitting *inside* an already-confirmed
+leaf does.
+
+`close_thin_gaps()` is a second, purely geometric closing step for whatever
+the colour-aware pass still misses — and it ships **off by default**
+(`VEG_CLOSE_KERNEL_PX: 0`). Measured against two plants touching at a 4px
+overlap (an existing regression scene in the test suite), even a small closing
+kernel smooths over the concave *neck* between them exactly the way it smooths
+over a gap within one leaf, because a shape-only operator cannot tell the two
+apart. The colour-aware bridge has no such failure mode — the soil around a
+genuine neck fails its colour test — and measured against a synthetic
+afflicted leaf it is sufficient on its own. Only raise `VEG_CLOSE_KERNEL_PX` if
+bridging alone still leaves gaps after `EXG_THRESHOLD` and
+`VEG_BLUE_TOLERANCE` have been tuned, and re-check a **touching-plants**
+preview afterward, not just a single-leaf one.
+
+| Setting | What it does |
+|---|---|
+| `VEG_BRIDGE_PX` | How far past confirmed vegetation the relaxed gate and the highlight rule may look. `0` disables both |
+| `VEG_BRIDGE_EXG_RELAX` | How far below `EXG_THRESHOLD` a bridge-halo pixel may score and still be admitted |
+| `VEG_BLUE_TOLERANCE` | How far blue may exceed green in the bridge halo — the knob that exists specifically for onion's wax bloom |
+| `VEG_BRIDGE_HIGHLIGHT_SAT` | HSV saturation at or below which a halo pixel is treated as a specular highlight and admitted regardless of hue |
+| `VEG_CLOSE_KERNEL_PX` | Off by default. Pure-shape safety net; smooths plant-to-plant necks as readily as leaf gaps |
+
+---
+
 ## Recall: unclaimed green becomes an instance
 
 A vegetation component containing no seed is a plant SAM missed entirely. Those
@@ -236,6 +303,8 @@ In rough order of how much they matter.
 | `EXG_THRESHOLD` | **The first thing to tune.** It decides every boundary. Onion is *bluer* than most broadleaf weeds — if previews show onion blades eroded while weeds look right, this is the cause, not SAM. Lower it to catch pale or shadowed tissue, at the cost of soil speckle |
 | `VEG_MIN_COMPONENT_PX` | 60 here vs 150 in the weed prelabeler. This floor deletes tissue outright and nothing downstream recovers it. Raise it only if lowering `EXG_THRESHOLD` brought in speckle |
 | `VEG_FILL_HOLES_MAX_PX` | Specular highlights read as non-green and punch holes through the prior, which come out as holes in the polygon. Raise if you see them; a genuine gap between leaves is soil and is protected by the area bound |
+| `VEG_BLUE_TOLERANCE` / `VEG_BRIDGE_PX` | **If a whole onion leaf shows up as several small speckle instances instead of one**, this is the cause — see "Onion's glaucous leaf" above. Raise `VEG_BLUE_TOLERANCE` first; raise `VEG_BRIDGE_PX` only if the gaps are wide |
+| `VEG_CLOSE_KERNEL_PX` | Off by default. Last resort if bridging alone still leaves gaps — check a **touching-plants** preview afterward, since this one can smooth over a real neck between two different plants |
 | `SEED_NMS_IOU` | Lower merges more duplicate proposals into one plant; raise keeps more distinct instances. Symptom of too high: one plant with two overlapping outlines |
 | `SEED_ERODE_PX` | Only affects where two instances meet. Raise if the cut between touching plants looks like SAM's boundary rather than the neck |
 | `RECOVER_MIN_VEG_SCORE` | Raise if the backstop is inventing plants on bare ground |
