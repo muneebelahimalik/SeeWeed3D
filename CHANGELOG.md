@@ -521,6 +521,38 @@ the neighbourhood is unambiguous.
 
 Full treatment in [`docs/mixed_prelabeling.md`](docs/mixed_prelabeling.md).
 
+**Then the first real run showed onion coming out as a scatter of tiny
+speckle instances instead of one mask per leaf.** Not a SAM problem — the
+vegetation prior was fragmenting a single onion leaf into a handful of
+disconnected slivers before SAM ever saw it, and everything downstream
+inherited the damage (exemplar boxes per fragment instead of per leaf, the
+watershed unable to flood across the gaps, fragment-dropping treating the
+slivers as soil-texture speckle).
+
+The cause is onion's leaf surface itself: a glossy, waxy, glaucous
+blue-green tube. Its wax bloom lifts blue reflectance past green, failing the
+prior's `g >= b` gate outright over parts of the leaf, and its glossy curve
+throws specular highlights carrying no leaf colour at all — a highlight *is*
+the light source's colour, not the tissue's, so no threshold admits it. Both
+defects cut across the leaf's **width**, so the gap touches soil on both
+sides, and `fill_holes()` — which only fills gaps fully *enclosed* by
+vegetation, by design — cannot reach either one.
+
+`recover_glaucous_pixels()` fixes it without touching the shared
+`vegetation.py`, which the onion and weed prelabelers are tuned against.
+It relaxes the green-dominance and saturation gates, but only within a small
+halo around pixels the strict gate already accepted, so a bare patch of pale
+soil earns nothing while a highlight sitting inside a confirmed leaf does.
+
+A second, purely geometric closing step (`close_thin_gaps`) was tried as a
+belt-and-braces addition and **shipped off by default** after it broke an
+existing regression test: measured against two plants touching at a 4px
+overlap, even a small closing kernel smoothed over the concave neck between
+them exactly the way it smoothed over a gap within one leaf, because a
+shape-only operator cannot tell the two apart. The colour-aware bridge has no
+such failure mode — the soil around a genuine neck fails its colour test —
+and was measured sufficient on its own.
+
 ---
 
 ## 16. The Feb 2025 visit, and depth that never existed

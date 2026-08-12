@@ -376,6 +376,16 @@ Previews are coloured **by instance index**, not by class — every instance has
 the same class here, so a per-class palette would show nothing. Two adjacent
 plants in two different colours is the signal.
 
+**If onion comes out as a scatter of tiny speckle instances instead of one
+clean leaf per plant**, that is onion's glossy, glaucous leaf surface
+fragmenting the vegetation prior, not a SAM problem — its waxy blue-green
+cuticle both lifts blue reflectance past green and throws specular highlights
+that carry no leaf colour at all, and both defects cut straight across a
+leaf's width where the existing pinhole-filling cannot reach them. Tune
+`VEG_BLUE_TOLERANCE` and `VEG_BRIDGE_PX` first; see "Onion's glaucous leaf" in
+`docs/mixed_prelabeling.md` for the full mechanism and why `VEG_CLOSE_KERNEL_PX`
+is the last resort, not the first.
+
 **`docs/mixed_prelabeling.md` is the full guide**: why one homogeneous class is
 correct rather than a shortcut (shape says *blade → grass*, and an onion **is** a
 blade), how the vegetation prior and SAM are combined so each only answers what

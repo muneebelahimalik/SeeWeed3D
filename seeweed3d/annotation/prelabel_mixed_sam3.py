@@ -73,6 +73,51 @@ is not a second SAM detection. The watershed then decides only WHERE the cut
 falls, never WHETHER there is one. The failure mode that closed that door does
 not exist on this path.
 
+ONION'S GLAUCOUS LEAF DEFEATS THE VEGETATION PRIOR, AND HAS TO BE BRIDGED
+--------------------------------------------------------------------------
+Everything above assumes the vegetation prior is a solid, connected footprint
+of each plant. On real mixed-scene frames it often is not, and the failure is
+specific to onion: its leaf is a glossy, glaucous (waxy blue-green) tube, and
+that surface defeats the prior's colour gates in two distinct ways at once.
+
+  1. THE WAX BLOOM SHIFTS COLOUR TOWARD BLUE. `vegetation_mask()` requires
+     green to dominate both red AND blue at every pixel. A matte broadleaf
+     weed clears that easily; onion's glaucous coating measurably lifts blue
+     reflectance, so stretches of a real onion leaf fail g>=b outright.
+  2. THE GLOSSY CURVE THROWS SPECULAR HIGHLIGHTS. A round, wet-looking leaf
+     catches direct light as a near-white streak along its length. A highlight
+     has no leaf colour to detect - it IS the light source's colour - so it
+     fails ExG, green-dominance and saturation simultaneously. No amount of
+     threshold tuning admits it, because there is no green signal there at all.
+
+Both cut STRAIGHT ACROSS a leaf's width, so the resulting gap touches the
+surrounding soil on both sides. `fill_holes()` explicitly does not touch that
+kind of gap - it only fills holes fully ENCLOSED by vegetation, by design, so
+a genuine gap between two adjacent leaves (which is soil, and must stay soil)
+is never filled in. A single onion leaf can come out of `vegetation_mask()`
+broken into a dozen disconnected slivers, and every step after that inherits
+the damage: SAM's exemplar boxes are built one per fragment instead of one per
+leaf, `seed_masks()` intersects a proposal with the fragmented prior and
+shreds it right back, the watershed can only flood within `veg` so it cannot
+cross the gaps either, and `clean_instance()`'s fragment-dropping then throws
+away the smaller slivers as if they were soil-texture speckle - because from
+its side of the pipeline, that is exactly what they look like.
+
+`recover_glaucous_pixels()` fixes this without touching the shared
+`vegetation.py` (the onion and weed prelabelers are tuned against its current
+behaviour, and this project has already reverted one boundary "improvement"
+that looked better on paper and was worse in the field - see
+docs/mixed_prelabeling.md). It relaxes the green-dominance and saturation
+gates, but ONLY within a small halo around pixels the STRICT gate already
+accepted - so a genuinely bare patch of pale soil earns nothing, while a
+highlight or blue-shifted stretch sitting inside an already-confirmed leaf
+does. Measured sufficient on its own on an afflicted synthetic leaf, and safe
+on touching plants because the soil around a genuine gap between two of them
+fails the colour test. `close_thin_gaps()` is an OFF-by-default escape hatch
+for whatever it still misses - it has no colour context at all, so it smooths
+a plant-to-plant neck exactly as readily as a gap within one leaf; raise it
+only after re-checking a touching-plants preview, not just a single-leaf one.
+
 RECALL: UNCLAIMED GREEN BECOMES AN INSTANCE
 -------------------------------------------
 A vegetation component containing no seed is a plant SAM missed entirely. Those
@@ -104,8 +149,8 @@ from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              PRELABEL_CLASS, prelabel_categories,
                              prelabel_cvat_labels)
 from common.progress import Progress  # noqa: E402
-from common.vegetation import (component_boxes, vegetation_mask,  # noqa: E402
-                               vegetation_score, white_balance)
+from common.vegetation import (component_boxes, excess_green,  # noqa: E402
+                               vegetation_mask, vegetation_score, white_balance)
 from perception.segmenter import drop_fragments  # noqa: E402
 
 # #############################################################################
@@ -157,6 +202,48 @@ CONFIG = {
     # Close pinholes inside leaves (specular highlights read as non-green).
     # A hole left in the prior becomes a hole in the exported polygon.
     "VEG_FILL_HOLES_MAX_PX": 400,
+
+    # -- Bridging onion's glaucous, glossy leaf ---------------------------------
+    # See the module docstring section "ONION'S GLAUCOUS LEAF DEFEATS THE
+    # VEGETATION PRIOR". A single onion leaf can come out of vegetation_mask()
+    # broken into many disconnected slivers, because its waxy blue-green
+    # cuticle both lifts blue reflectance past green (failing g>=b outright)
+    # and throws specular highlights that carry no colour signal at all
+    # (failing every gate at once). fill_holes() cannot rescue either case: both
+    # cut across the leaf's width and connect to the surrounding soil, so
+    # neither reads as an ENCLOSED hole.
+    #
+    # These knobs only ever ADD pixels within VEG_BRIDGE_PX of vegetation the
+    # strict gate already accepted - a bare patch of pale soil sitting on its
+    # own earns nothing from either rule, however low its saturation.
+    #
+    # 0 to disable both and fall back to the strict gate alone.
+    "VEG_BRIDGE_PX": 6,
+    # How much lower than EXG_THRESHOLD a bridge-halo pixel may score and still
+    # be admitted - recovers the blue-shifted stretches of a glaucous leaf.
+    "VEG_BRIDGE_EXG_RELAX": 0.02,
+    # How far blue may exceed green in the bridge halo. 0 keeps the strict
+    # g>=b rule; onion's wax bloom is what this exists to tolerate.
+    "VEG_BLUE_TOLERANCE": 15,
+    # HSV saturation at or below which a bridge-halo pixel is treated as a
+    # specular highlight and admitted regardless of hue - a true highlight is
+    # the light source's colour, not the leaf's, so no colour rule can key on
+    # it directly; only "very low saturation, sitting against confirmed
+    # vegetation" identifies one.
+    "VEG_BRIDGE_HIGHLIGHT_SAT": 15,
+    # Final, purely geometric safety net for whatever the colour-aware bridge
+    # still misses: elliptical morphological closing on the resulting mask.
+    # OFF by default - measured against two plants touching at gap=-4px (an
+    # existing, deliberately tight scene elsewhere in this test suite), even a
+    # small closing kernel smooths over the concave NECK between them exactly
+    # the way it smooths over a gap in one leaf, because to a shape-only
+    # operator the two look the same. The colour-aware bridge above has no
+    # such failure mode (it only adds pixels that pass a colour test, and the
+    # soil around a real neck fails it), and measured on an afflicted leaf it
+    # is sufficient on its own. Only raise this if bridging alone still leaves
+    # gaps after EXG_THRESHOLD/VEG_BLUE_TOLERANCE have been tuned, and check a
+    # touching-plants preview afterward, not just a single-leaf one.
+    "VEG_CLOSE_KERNEL_PX": 0,
 
     # -- SAM 3 prompting -------------------------------------------------------
     "SAM_PROMPT_MODE": "auto_exemplar",     # auto_exemplar | text
@@ -260,10 +347,68 @@ def fill_holes(mask, max_px):
     return out
 
 
+def recover_glaucous_pixels(bgr, veg, cfg):
+    """Admit blue-tolerant, low-saturation pixels ONLY inside a halo around
+    already-confirmed vegetation.
+
+    Onion's waxy glaucous cuticle defeats the strict gate two ways at once: it
+    lifts blue reflectance enough to occasionally fail g>=b outright, and its
+    curved, glossy surface throws a specular highlight that desaturates to
+    near-white and fails every colour gate simultaneously - a highlight has no
+    leaf colour to detect, because it IS the light source's colour, not the
+    tissue's. Neither failure can be fixed by relaxing a threshold globally
+    without also inviting in pale, low-saturation soil and gravel.
+
+    So the relaxation only ever applies within VEG_BRIDGE_PX of a pixel the
+    STRICT gate already accepted. A patch of bare soil sitting on its own,
+    however pale, never earns that context; a highlight or blue-shifted stretch
+    running through an already-confirmed leaf does.
+    """
+    if cfg["VEG_BRIDGE_PX"] <= 0 or not veg.any():
+        return veg
+    k = 2 * int(cfg["VEG_BRIDGE_PX"]) + 1
+    halo = cv2.dilate(veg.astype(np.uint8),
+                      cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                      ).astype(bool) & ~veg
+    if not halo.any():
+        return veg
+
+    b, g, r = [bgr[:, :, i].astype(np.float32) for i in range(3)]
+    exg = excess_green(bgr)
+    loose = exg > (cfg["EXG_THRESHOLD"] - cfg["VEG_BRIDGE_EXG_RELAX"])
+    loose &= g >= (b - cfg["VEG_BLUE_TOLERANCE"])
+    loose &= g >= r                     # red is soil, wax bloom is never red
+
+    sat = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 1].astype(np.float32)
+    highlight = sat <= cfg["VEG_BRIDGE_HIGHLIGHT_SAT"]
+
+    return veg | (halo & (loose | highlight))
+
+
+def close_thin_gaps(veg, kernel_px):
+    """Final, purely geometric safety net: bridge whatever the colour-aware
+    pass still missed by morphological closing.
+
+    Has no colour context at all, so unlike recover_glaucous_pixels it CAN
+    bridge two truly separate nearby plants into one blob - identity is SAM's
+    job downstream regardless, so a modest kernel here is a shape safety net,
+    not the primary fix. Keep it small; the primary fix is the function above."""
+    if kernel_px <= 0 or not veg.any():
+        return veg
+    k = 2 * int(kernel_px) + 1
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    return cv2.morphologyEx(veg.astype(np.uint8), cv2.MORPH_CLOSE, ker).astype(bool)
+
+
 def plant_pixels(bgr, cfg):
     """The vegetation prior that will own every boundary in this frame."""
     veg = vegetation_mask(bgr, cfg["EXG_THRESHOLD"], cfg["VEG_MIN_SATURATION"],
                           cfg["VEG_MORPH_KERNEL"], cfg["VEG_MIN_COMPONENT_PX"])
+    # Colour-aware bridging first, since it adds real evidence rather than
+    # merely reshaping what is already there; pure-shape closing follows as a
+    # smaller-radius mop-up for anything the colour rules still missed.
+    veg = recover_glaucous_pixels(bgr, veg, cfg)
+    veg = close_thin_gaps(veg, cfg["VEG_CLOSE_KERNEL_PX"])
     return fill_holes(veg, cfg["VEG_FILL_HOLES_MAX_PX"])
 
 

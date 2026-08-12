@@ -59,6 +59,148 @@ def _two_touching(h=240, w=320, gap=-4):
 
 
 # --------------------------------------------------------------------------- #
+# Bridging onion's glaucous, glossy leaf
+#
+# A real onion leaf is a glossy, waxy blue-green tube. That surface defeats
+# the vegetation prior two ways at once: the wax bloom lifts blue reflectance
+# past green (failing g>=b outright), and the glossy curve throws specular
+# highlights carrying no leaf colour at all (failing every gate at once). Both
+# cut across the leaf's WIDTH, so the gap connects to the surrounding soil and
+# fill_holes() - which only fills gaps fully ENCLOSED by vegetation - cannot
+# touch either one. Left unfixed, a single leaf comes out of vegetation_mask()
+# broken into a handful of disconnected slivers, and every step downstream
+# (SAM's exemplar boxes, seed intersection, the watershed's connectivity,
+# fragment-dropping) inherits the damage and produces a scatter of speckle
+# instances instead of one clean leaf.
+# --------------------------------------------------------------------------- #
+def _curved_leaf(h=200, w=300, thickness=13):
+    """A tubular onion-leaf-like curve: thin, elongated, gently bent - not a
+    disc, because that is the shape the real failure occurs on."""
+    img = _scene(h, w)
+    pts = np.array([[15, 170], [70, 55], [150, 35], [225, 85], [280, 175]],
+                   np.int32)
+    curve = np.zeros((h, w), np.uint8)
+    cv2.polylines(curve, [pts], False, 1, thickness)
+    img[curve.astype(bool)] = LEAF
+    return img, curve.astype(bool)
+
+
+def _afflict(img, leaf, n=14, seed=0):
+    """Cut alternating specular-highlight and blue-shifted (glaucous) patches
+    through the leaf's full width at even intervals along its length - a
+    glossy tubular leaf under directional field lighting, not one stray spot."""
+    out = img.copy()
+    ys, xs = np.nonzero(leaf)
+    order = np.argsort(xs)
+    ys, xs = ys[order], xs[order]
+    for j, i in enumerate(np.linspace(0, len(xs) - 1, n).astype(int)):
+        colour = (235, 235, 235) if j % 2 == 0 else (150, 110, 40)
+        cv2.circle(out, (int(xs[i]), int(ys[i])), 7, colour, -1)
+    return out
+
+
+def test_an_afflicted_leaf_is_fragmented_by_the_strict_gate_alone():
+    """Pins the failure this section exists to fix. Without it, this assertion
+    would be the bug report."""
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    strict = mx.vegetation_mask(sick, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    n, _, _, _ = cv2.connectedComponentsWithStats(strict.astype(np.uint8), 8)
+    assert n - 1 > 1
+
+
+def test_plant_pixels_reconnects_the_afflicted_leaf():
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    fixed = mx.plant_pixels(sick, CFG)
+    n, _, _, _ = cv2.connectedComponentsWithStats(fixed.astype(np.uint8), 8)
+    assert n - 1 == 1
+    assert float((fixed & leaf).sum()) / leaf.sum() > 0.8
+
+
+def test_recovery_only_reaches_within_the_halo_of_confirmed_vegetation():
+    """A bare patch of pale, low-saturation soil sitting on its own must earn
+    nothing from either rule - only context next to already-confirmed
+    vegetation does."""
+    img = _scene()
+    cv2.circle(img, (60, 120), 8, (235, 235, 235), -1)   # isolated highlight-
+    cv2.circle(img, (240, 120), 8, (150, 110, 40), -1)   # -coloured soil, alone
+    veg = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                             CFG["VEG_MORPH_KERNEL"], 0)
+    recovered = mx.recover_glaucous_pixels(img, veg, CFG)
+    assert not recovered[112:128, 52:68].any()
+    assert not recovered[112:128, 232:248].any()
+
+
+def test_the_highlight_rule_needs_low_saturation_not_just_proximity():
+    """Sitting in the halo is necessary but not sufficient - a halo pixel with
+    ordinary saturation and no green must still be rejected."""
+    img, leaf = _curved_leaf()
+    veg = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                             CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    saturated_non_green = img.copy()
+    saturated_non_green[80:84, 140:144] = (30, 30, 220)   # saturated red, in the halo
+    recovered = mx.recover_glaucous_pixels(saturated_non_green, veg, CFG)
+    assert not recovered[80:84, 140:144].all()
+
+
+def test_bridging_is_off_at_zero():
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    veg = mx.vegetation_mask(sick, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                             CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    off = dict(CFG, VEG_BRIDGE_PX=0)
+    assert (mx.recover_glaucous_pixels(sick, veg, off) == veg).all()
+
+
+def test_closing_is_off_at_zero():
+    img, leaf = _curved_leaf()
+    veg = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                             CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    assert (mx.close_thin_gaps(veg, 0) == veg).all()
+
+
+def test_two_genuinely_separate_plants_do_not_merge_at_realistic_spacing():
+    """The bridging exists to reconnect ONE afflicted leaf, not to erase the
+    gap between two different plants. Bounded by construction - VEG_BRIDGE_PX
+    plus VEG_CLOSE_KERNEL_PX - and this pins that the bound holds well below a
+    typical inter-plant gap."""
+    img = _scene(h=160, w=300)
+    r = 30
+    gap = 20
+    cx1, cx2 = 150 - r - gap // 2, 150 + r + gap // 2
+    _blob(img, cx1, 80, r)
+    _blob(img, cx2, 80, r)
+    fixed = mx.plant_pixels(img, CFG)
+    n, _, _, _ = cv2.connectedComponentsWithStats(fixed.astype(np.uint8), 8)
+    assert n - 1 == 2
+
+
+def test_a_leaf_with_no_defects_is_unaffected():
+    """The fix must be inert on tissue that never needed it."""
+    img, leaf = _curved_leaf()
+    plain = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                               CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    fixed = mx.plant_pixels(img, CFG)
+    assert float((fixed ^ plain).sum()) / plain.sum() < 0.05
+
+
+def test_the_afflicted_leaf_now_seeds_one_instance_not_a_scatter():
+    """End to end: the symptom that was actually reported - a real leaf coming
+    out as a scatter of speckle instances rather than one clean mask."""
+    img, leaf = _curved_leaf()
+    sick = _afflict(img, leaf)
+    ys, xs = np.nonzero(leaf)
+    mid = len(ys) // 2
+    cy, cx = int(ys[mid]), int(xs[mid])   # a point ON the curve, not its mean
+    sam = [_disc(leaf.shape, cx, cy, 6)]
+    instances, veg, qa = mx.analyze_frame(sick, sam, CFG)
+    assert qa["instances"] <= 2          # not a dozen slivers
+    assert qa["veg_coverage"] > 0.75
+
+
+# --------------------------------------------------------------------------- #
 # The vegetation prior owns the boundary
 # --------------------------------------------------------------------------- #
 def test_a_proposal_that_bleeds_onto_soil_contributes_no_soil():
