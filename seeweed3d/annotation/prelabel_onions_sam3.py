@@ -520,9 +520,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
 def main(predictor_factory=load_sam3, sam_fn=sam3_masks):
     cfg = CONFIG
     root = Path(cfg["DATASET_ROOT"])
-    sessions_root = root / "sessions"
-    if not sessions_root.exists():
-        sys.exit(f"ERROR: {sessions_root} not found. Run extract_sessions.py first.")
+    from common.dataset_paths import require_sessions_root
+    sessions_root = require_sessions_root(root)
 
     sids = sorted(p.name for p in sessions_root.iterdir() if p.is_dir())
     if cfg["ONLY_SESSIONS"]:
