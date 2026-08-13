@@ -736,3 +736,117 @@ def test_polygon_export_is_single_contour_by_default():
 
     assert len(wd.mask_polygons(m, wd.CONFIG)) == 1
     assert len(wd.mask_polygons(m, dict(wd.CONFIG, POLY_ALL_PARTS=True))) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Preview appearance. Preview-only: nothing here may reach CVAT, which takes its
+# class colours from the label schema and its shapes from instances_default.json.
+# --------------------------------------------------------------------------- #
+def _one_instance(cls="other_weed", source="sam"):
+    m = np.zeros((120, 120), bool)
+    m[40:80, 40:80] = True
+    return [{"mask": m, "cls": cls, "source": source,
+             "features": {"area_px": 1600, "bbox": [40, 40, 40, 40]},
+             "points": {"lep_dt": [60.0, 60.0]}, "peaks": [((60, 60), 20.0)]}]
+
+
+def _drawn_colors(vis):
+    """Distinct non-background colours present in a rendered preview."""
+    return {tuple(int(v) for v in c) for c in vis.reshape(-1, 3)}
+
+
+def test_outlines_are_red_by_default():
+    """The dominant class is DEFAULT_SPECIES_CLASS, whose ontology colour is a
+    mid grey - unreadable against dry soil, which is most of the frame. The
+    boundary is the thing being inspected, so it gets a colour the scene does
+    not contain."""
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    vis = wd.overlay(bgr, _one_instance(), 1.0, wd.CONFIG)
+    assert (0, 0, 255) in _drawn_colors(vis)
+    assert (170, 170, 170) not in _drawn_colors(vis)     # the old grey is gone
+
+
+def test_the_class_palette_can_be_restored():
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    cfg = dict(wd.CONFIG, PREVIEW_OUTLINE_BGR=None)
+    assert (170, 170, 170) in _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
+
+
+def test_the_preview_colour_does_not_touch_the_cvat_label_schema():
+    """The whole point of the override: CVAT's colours come from the ontology,
+    so recolouring a JPG must not recolour an annotation class."""
+    from common.ontology import CLASS_COLORS_BGR
+    assert CLASS_COLORS_BGR["other_weed"] == (170, 170, 170)
+    schema = json.dumps(wd.weed_cvat_labels())
+    assert "#ff0000" not in schema.lower()
+
+
+def test_the_recall_backstop_halo_survives_a_fixed_outline_colour():
+    """White halo = an instance SAM never proposed. It is the one preview signal
+    that is not decoration, so a single outline colour must not swallow it."""
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    vis = wd.overlay(bgr, _one_instance(source="vegetation"), 1.0, wd.CONFIG)
+    cols = _drawn_colors(vis)
+    assert (255, 255, 255) in cols and (0, 0, 255) in cols
+
+
+def test_no_lep_dot_in_the_preview_by_default():
+    """Segmentation-only dataset: the dot sits at the deepest interior point of
+    the mask, which is exactly the region whose boundary is under review."""
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    vis = wd.overlay(bgr, _one_instance(), 1.0, wd.CONFIG)
+    assert (0, 255, 255) not in _drawn_colors(vis)       # the DT-peak dot
+
+
+def test_the_lep_dot_comes_back_when_asked_for():
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    cfg = dict(wd.CONFIG, PREVIEW_SHOW_LEP=True)
+    assert (0, 255, 255) in _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
+
+
+def test_cluster_growth_point_markers_follow_the_same_switch():
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    insts = _one_instance(cls="weed_cluster")
+    assert (200, 60, 200) not in _drawn_colors(
+        wd.overlay(bgr, insts, 1.0, wd.CONFIG))
+    assert (200, 60, 200) in _drawn_colors(
+        wd.overlay(bgr, insts, 1.0, dict(wd.CONFIG, PREVIEW_SHOW_LEP=True)))
+
+
+def test_overlay_still_works_without_an_explicit_config():
+    """Called with three arguments by anything predating the option."""
+    bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
+    assert wd.overlay(bgr, _one_instance(), 1.0).shape == bgr.shape
+
+
+# --------------------------------------------------------------------------- #
+# Work that is computed and then thrown away
+# --------------------------------------------------------------------------- #
+def test_split_seeding_is_skipped_when_splitting_is_off(monkeypatch):
+    """growth_peaks() runs a distance transform over the WHOLE frame. Passed as
+    an argument it was evaluated even though split_touching_instances returns
+    the mask untouched with splitting off - which is the default."""
+    calls = []
+    real = wd.growth_peaks
+    monkeypatch.setattr(wd, "growth_peaks",
+                        lambda m, cfg: (calls.append(1), real(m, cfg))[1])
+
+    bgr = np.full((240, 240, 3), (70, 45, 60), np.uint8)
+    m = _rosette(240, 240, 120, 120, 55)
+    bgr[m] = (35, 110, 40)
+    wd.analyze_frame(bgr, [m], wd.CONFIG)
+    off = len(calls)
+
+    calls.clear()
+    wd.analyze_frame(bgr, [m], dict(wd.CONFIG, SPLIT_TOUCHING_INSTANCES=True))
+    assert off < len(calls)      # the seeding pass is genuinely skipped
+
+
+def test_depth_is_not_read_when_the_fused_estimator_is_off(tmp_path):
+    """Depth feeds the fused LEP's canopy-height channel and nothing else, so
+    with USE_FUSED_LEP off a 16-bit PNG per frame was decoded and discarded."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "seeweed3d" / "annotation" /
+           "prelabel_weeds_sam3.py").read_text(encoding="utf-8")
+    i = src.index('USE_DEPTH_FOR_LEP", True) and')
+    assert "estimator is not None" in src[i:i + 120]

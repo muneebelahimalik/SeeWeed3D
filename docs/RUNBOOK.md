@@ -380,9 +380,17 @@ python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
 **Check `auto_labels_weeds/<session>/preview/` before doing a full run.** Look
-for coloured dots on bare ground — if you see them, the vegetation prior is
+for red outlines on bare ground — if you see them, the vegetation prior is
 false-positiving on your substrate and you should tighten
 `RECOVER_MIN_VEG_SCORE` / leave `RECOVER_MISSED_PLANTS` off.
+
+Weed previews draw every outline **red** with no LEP dot, because the default
+class's ontology colour is a mid grey that disappears against dry soil and the
+dot sits on the part of the mask you most need to see. Neither reaches CVAT —
+class colours there come from the label schema. To judge boundaries rather than
+just detections, set `PREVIEW_SCALE = 1.0`; at `0.5` you are inspecting a mask
+at half the resolution it was drawn. `PREVIEW_OUTLINE_BGR = None` restores the
+per-class palette, `PREVIEW_SHOW_LEP = True` the dots.
 
 **Produces** per session, under `auto_labels_weeds/<session>/`:
 
