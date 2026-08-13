@@ -292,6 +292,26 @@ CONFIG = {
 
     # -- Run control -----------------------------------------------------------
     "LIMIT_PER_SESSION": None,         # start small; set None for the full pool
+
+    # Run over only PART of a session, by video frame index. Empty = all frames.
+    #
+    # A single drive can pass from one crop zone into another - weeds only for
+    # the first stretch, then onions only. That is NOT a mixed scene: it is two
+    # single-class scenes end to end, and the specialised prelabelers give
+    # correct classes for free on each stretch, which the mixed one cannot.
+    # Splitting by index lets each half be prelabelled by the module whose
+    # assumption actually holds there.
+    #
+    # Same token syntax as curate_pool's MANUAL_DROPS - an inclusive index
+    # range, an open-ended one, a bare index, or a frame/preview filename:
+    #   {"vid1_20250221_131902": ["0-1200"]}     up to and including 1200
+    #   {"vid1_20250221_131902": ["1500-"]}      1500 to the end of the session
+    #
+    # LEAVE A GAP AT THE TRANSITION. The frames where one zone becomes the
+    # other are exactly where a single-class assumption is most dangerous, and
+    # calling an onion a weed is the worst error this project can make. Give
+    # the ambiguous stretch to prelabel_mixed_sam3.py, or leave it out.
+    "ONLY_FRAMES": {},
     "SAVE_PREVIEWS": True,
     "PREVIEW_SCALE": 0.5,
 }
@@ -1022,6 +1042,19 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
 
 def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     frames = pool_frames(session_dir)
+    # Frame range BEFORE the limit, so LIMIT_PER_SESSION trials the selected
+    # stretch rather than the first N frames of the whole session - which on
+    # a split-zone drive would be entirely the wrong zone.
+    spec = (cfg.get("ONLY_FRAMES") or {}).get(sid)
+    if spec:
+        from common.frame_spec import select_filenames
+        before = len(frames)
+        frames = select_filenames(frames, spec)
+        print(f"  [{sid}] ONLY_FRAMES kept {len(frames)} of {before} pool frames")
+        if not frames:
+            print(f"  [{sid}] ONLY_FRAMES {spec} matched no pool frame - "
+                  f"check the indices against meta/pool.csv")
+            return None
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
     if not frames:

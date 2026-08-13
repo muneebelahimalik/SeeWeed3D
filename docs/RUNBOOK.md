@@ -20,6 +20,7 @@ on PATH.
 | [3. Prelabel with SAM 3](#3-prelabel-with-sam-3) | auto-annotations to correct | **yes** |
 | [3a. Mixed scenes](#3a-mixed-scenes-onions-and-weeds--prelabel_mixed_sam3py) | precise masks only, classes assigned in CVAT | **yes** |
 | [3b. Mine the pool](#3b-mine-the-pool-for-the-next-batch) | pick the frames worth annotating next | **yes** |
+| [3c. Split-zone drives](#3c-one-drive-that-changes-scene--weeds-first-then-onions) | weeds for a stretch, then onions — one session, two runs | **yes** |
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
 | [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
 | [6. Train Stage A](#6-train-stage-a-segmentation) | crop-vs-weed segmentation | **yes** |
@@ -396,6 +397,10 @@ false-positiving on your substrate and you should tighten
 > `vegetation == weed` holds only in **weed-only** recordings, and
 > `vegetation == onion` only in **onion-only** ones. Never point either of these
 > two at a mixed scene — use §3a.
+>
+> A session that is weed-only for its first stretch and onion-only after it is
+> **not** a mixed scene — it is two single-class scenes end to end, and each
+> half wants its own prelabeler. See §3c.
 
 ---
 
@@ -522,6 +527,78 @@ frame in two CVAT tasks produces two versions of the truth.
 
 The full strategy — active learning, teacher–student, what to target and in what
 order — is in **[growing the dataset](dataset_growth.md)**.
+
+---
+
+## 3c. One drive that *changes* scene — weeds first, then onions
+
+A drive that starts in a weedy stretch and later runs into clean onion rows is
+**not** a mixed scene. A mixed scene is one where both classes are present *in
+the same frame*, and that is the only reason §3a gives up the class proposal.
+Here every frame still has exactly one class in it — the class just changes
+partway through the session.
+
+So do not reach for `prelabel_mixed_sam3.py`. Split the session by frame index
+and run the prelabeler whose assumption actually holds on each stretch:
+each half then comes out of SAM already carrying the **right class**, and the
+CVAT pass is mask correction only — no per-shape reassignment at all.
+
+**1. Find the transition.** The previews are the fastest way; the frame index is
+the number at the end of the filename, and it is the same number in `preview/`,
+`rgb/` and `meta/pool.csv`.
+
+```powershell
+explorer E:\Dataset_Vidalia\sessions\<session>\preview
+```
+
+Note the last clearly-weed frame and the first clearly-onion one.
+
+**2. Run each prelabeler over its own range.** `ONLY_FRAMES` takes the same
+tokens curation's `MANUAL_DROPS` does — a bare index, an inclusive `a-b` range,
+an open-ended `1500-` or `-250`, or a filename pasted straight out of `preview/`
+(`.jpg` is accepted, not just the `.png` source):
+
+```python
+# prelabel_weeds_sam3.py
+CONFIG["ONLY_SESSIONS"] = ["vid3_20260108_103135"]
+CONFIG["ONLY_FRAMES"]   = {"vid3_20260108_103135": ["0-1200"]}
+```
+
+```python
+# prelabel_onions_sam3.py
+CONFIG["ONLY_SESSIONS"] = ["vid3_20260108_103135"]
+CONFIG["ONLY_FRAMES"]   = {"vid3_20260108_103135": ["1500-"]}
+```
+
+```powershell
+python seeweed3d/annotation/prelabel_weeds_sam3.py
+python seeweed3d/annotation/prelabel_onions_sam3.py
+```
+
+The two runs write to `auto_labels_weeds/<session>/` and
+`auto_labels_onion/<session>/` — separate folders, so they are two CVAT tasks
+and neither overwrites the other.
+
+**3. Leave a gap at the transition.** The `1200 → 1500` hole above is
+deliberate. Somewhere in there the two crops overlap, or you cannot tell from a
+preview which you are looking at, and a single-class prelabeler run over that
+stretch will state a class confidently and wrongly. **Calling an onion a weed
+is the worst error this project can make** — it is the one that puts a laser on
+the crop. Give the ambiguous stretch to `prelabel_mixed_sam3.py`, which proposes
+masks without proposing a class, or leave it out of this round entirely:
+
+```python
+# prelabel_mixed_sam3.py — only the uncertain stretch
+CONFIG["ONLY_FRAMES"] = {"vid3_20260108_103135": ["1201-1499"]}
+```
+
+**Do not let two ranges overlap.** A frame prelabelled under both assumptions
+reaches CVAT twice with contradictory classes, and nothing downstream will tell
+you which one you corrected.
+
+`ONLY_FRAMES` is applied **before** `LIMIT_PER_SESSION`, so a
+`LIMIT_PER_SESSION = 20` trial samples the stretch you selected. It is inert
+until you set it — every existing single-zone run behaves exactly as before.
 
 ---
 

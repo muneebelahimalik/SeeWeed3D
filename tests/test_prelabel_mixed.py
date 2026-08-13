@@ -873,3 +873,70 @@ def test_the_preview_colours_by_instance_not_by_class():
     left = vis[instances[0]["mask"]].mean(axis=0)
     right = vis[instances[1]["mask"]].mean(axis=0)
     assert np.abs(left - right).max() > 25
+
+
+# --------------------------------------------------------------------------- #
+# A drive that changes crop zone partway through
+#
+# Weeds only for the first stretch, then onions only. Not a mixed scene - two
+# single-class scenes end to end, where each half wants the prelabeler whose
+# assumption actually holds there.
+# --------------------------------------------------------------------------- #
+def _split_zone_session(tmp_path, n=8):
+    """A session whose pool frames span two zones by frame index."""
+    sess = tmp_path / "sess"
+    (sess / "rgb").mkdir(parents=True)
+    (sess / "meta").mkdir(parents=True)
+    names = []
+    for i in range(n):
+        img, c1, c2, _ = _two_touching()
+        fn = f"sess_{i * 10:06d}.png"
+        cv2.imwrite(str(sess / "rgb" / fn), img)
+        names.append(fn)
+    (sess / "meta" / "pool.csv").write_text(
+        "filename\n" + "\n".join(names) + "\n", encoding="utf-8")
+    return sess, c1, c2
+
+
+def test_only_frames_restricts_a_run_to_one_zone(tmp_path):
+    sess, c1, c2 = _split_zone_session(tmp_path)
+    cfg = dict(CFG, ONLY_FRAMES={"sess": ["0-30"]})   # first 4 frames: 0,10,20,30
+    out = tmp_path / "out"
+    st = mx.prelabel_session("sess", sess, out, cfg, "STUB", _stub([c1, c2]))
+    assert st["frames"] == 4
+    coco = json.loads((out / "sess" / "instances_default.json").read_text())
+    assert {im["file_name"] for im in coco["images"]} == {
+        "sess_000000.png", "sess_000010.png", "sess_000020.png",
+        "sess_000030.png"}
+
+
+def test_the_other_zone_is_a_separate_disjoint_run(tmp_path):
+    """The two halves must not overlap - a frame prelabelled under both
+    assumptions would reach CVAT twice with contradictory classes."""
+    sess, c1, c2 = _split_zone_session(tmp_path)
+    a = mx.prelabel_session("sess", sess, tmp_path / "a",
+                            dict(CFG, ONLY_FRAMES={"sess": ["0-30"]}),
+                            "STUB", _stub([c1, c2]))
+    b = mx.prelabel_session("sess", sess, tmp_path / "b",
+                            dict(CFG, ONLY_FRAMES={"sess": ["40-70"]}),
+                            "STUB", _stub([c1, c2]))
+    assert a["frames"] == 4 and b["frames"] == 4
+    ca = json.loads((tmp_path / "a" / "sess" / "instances_default.json").read_text())
+    cb = json.loads((tmp_path / "b" / "sess" / "instances_default.json").read_text())
+    na = {im["file_name"] for im in ca["images"]}
+    nb = {im["file_name"] for im in cb["images"]}
+    assert not (na & nb)
+
+
+def test_a_gap_can_be_left_at_the_transition(tmp_path):
+    """The frames where one zone becomes the other are where a single-class
+    assumption is most dangerous, so it must be possible to leave them out of
+    BOTH specialised runs."""
+    sess, c1, c2 = _split_zone_session(tmp_path)
+    a = mx.prelabel_session("sess", sess, tmp_path / "a",
+                            dict(CFG, ONLY_FRAMES={"sess": ["0-20"]}),
+                            "STUB", _stub([c1, c2]))
+    b = mx.prelabel_session("sess", sess, tmp_path / "b",
+                            dict(CFG, ONLY_FRAMES={"sess": ["50-70"]}),
+                            "STUB", _stub([c1, c2]))
+    assert a["frames"] == 3 and b["frames"] == 3      # 30 and 40 left out

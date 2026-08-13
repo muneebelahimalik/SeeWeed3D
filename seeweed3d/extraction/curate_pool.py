@@ -406,29 +406,12 @@ def drop_histogram(rows, buckets=10, width=44):
 def parse_drop_tokens(tokens):
     """Drop spec -> (explicit frame indices, [(lo, hi) inclusive ranges]).
 
-    Accepts a bare index, an inclusive 'lo-hi' range, or any filename whose stem
-    ends in the index - so a preview name (.jpg) works as well as the source
-    .png, which matters because previews are what you actually look at when
-    deciding a frame is bad."""
-    indices, ranges = set(), []
-    for tok in tokens:
-        t = str(tok).strip()
-        if not t:
-            continue
-        if t.isdigit():
-            indices.add(int(t))
-            continue
-        lo_hi = t.split("-")
-        if len(lo_hi) == 2 and all(p.strip().isdigit() for p in lo_hi):
-            lo, hi = (int(p) for p in lo_hi)
-            ranges.append((min(lo, hi), max(lo, hi)))
-            continue
-        tail = Path(t).stem.rsplit("_", 1)[-1]
-        if tail.isdigit():
-            indices.add(int(tail))
-        else:
-            print(f"      [WARN] cannot interpret drop token {tok!r} - ignored")
-    return indices, ranges
+    Thin alias for common.frame_spec.parse_frame_tokens, kept so this module
+    reads on its own. The syntax lives there because curation is not the only
+    stage that names frames by index - a prelabeler run over part of a drive
+    uses the same tokens, and two spellings of "0-250" would be one too many."""
+    from common.frame_spec import parse_frame_tokens
+    return parse_frame_tokens(tokens)
 
 
 def apply_manual_drops(rows, tokens, reason):

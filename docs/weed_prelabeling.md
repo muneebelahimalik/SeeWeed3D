@@ -312,6 +312,21 @@ CONFIG["LIMIT_PER_SESSION"] = 20                              # trial first
 python seeweed3d/annotation/prelabel_weeds_sam3.py
 ```
 
+**If a session is weed-only for only part of its length** — the drive passes out
+of the weedy stretch and into clean onion rows — restrict this run to the weed
+half rather than skipping the session or sending it to the mixed prelabeler:
+
+```python
+CONFIG["ONLY_FRAMES"] = {"vid3_20260108_103135": ["0-1200"]}
+```
+
+Tokens are the same ones curation's `MANUAL_DROPS` takes: `1187`, `0-250`,
+open-ended `1500-` or `-250`, or a filename pasted out of `preview/` (`.jpg`
+accepted). It is applied *before* `LIMIT_PER_SESSION`, so a 20-frame trial
+samples the stretch you named. Leave a gap at the transition —
+`vegetation == weed` is exactly the assumption that turns an onion into a target
+there. Full procedure: RUNBOOK §3c.
+
 While running, each session shows a live progress line with rate and ETA:
 
 ```
