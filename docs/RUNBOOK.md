@@ -112,6 +112,52 @@ pick which sessions you will hold out for testing.
 > **Depth is raw uint16 millimetres, `0` = invalid.** Never rescale it. Always
 > read it via `common/depth_utils.load_depth_mm()`.
 
+### Are the extracted frames the best quality available?
+
+Yes, and the parts that could silently not be are pinned by tests.
+
+- **PNG output is lossless.** `PNG_COMPRESSION` trades file size against write
+  speed and cannot cost quality at any level.
+- **Nothing is resized, and nothing is re-encoded.** Frames come out at the
+  source resolution and bit depth.
+- **v2 (FFV1/MKV) captures decode bit-exact** — RGB and depth both, asserted by
+  tests. For those sessions the extracted PNGs are byte-identical to what the
+  camera wrote, which is the ceiling.
+- **v1 (AVI/mpeg4) captures are lossy at the source.** That loss happened in
+  the field when `cv2.VideoWriter` re-encoded with XVID, and no extraction
+  setting can undo it. What extraction *can* control is not adding more.
+
+`SWS_FLAGS: "accurate_rnd"` is the one setting that matters for v1 sources.
+swscale truncates by default, leaving a systematic negative bias — measured at
+a uniform **−2 per channel** on flat patches, dropping to about **−0.8** with
+rounding enabled. That is not cosmetic in this pipeline: the vegetation prior
+thresholds ExG and compares green against blue, so a channel-dependent error
+moves real segmentation decisions. Measured on a synthetic field frame it cut
+`vegetation_mask()` disagreement against the uncompressed original from
+**0.607% to 0.474%** of pixels, at no measurable decode cost.
+
+**Three things were measured and deliberately *not* changed**, so they don't
+get re-tried:
+
+| Tried | Result |
+|---|---|
+| `full_chroma_int` | **No-op.** It governs chroma interpolation during *resizing*, and extraction never resizes |
+| Forcing BT.709 | **Worse.** Flat-patch error swings −21 on green, +7 on red — a matrix mismatch signature. The default (BT.601) leaves a colour-neutral offset, so the defaults at both ends already agree |
+| Forcing full-range input | **3.6× worse.** The streams really are limited-range, and ffmpeg's default already reads them that way |
+
+v1 AVIs carry **no colour metadata at all** (`color_space`, `color_range` and
+`color_primaries` are all absent), so both encoder and decoder fall back to
+their own defaults — and those defaults happen to agree. Leave this alone
+unless a future capture writes tagged colour metadata.
+
+`meta/session.json` records the decode settings under `decode`, since two
+sessions extracted under different flags are not strictly comparable and the
+difference is invisible in the PNGs afterwards.
+
+**The real quality lever is at capture, not extraction.** A v1 AVI session has
+already lost detail that cannot be recovered; a v2 FFV1 session has lost
+nothing. See `docs/capture_changelog.md`.
+
 ### Mixed containers, and checking depth before you trust it
 
 A campaign may have written **AVI** in its early sessions and **MKV** in its

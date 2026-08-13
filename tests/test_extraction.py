@@ -466,3 +466,160 @@ def test_a_depth_approx_folder_is_not_mistaken_for_training_images(tmp_path):
     assert [p.name for p in pi.find_images(str(sess))] == ["f_000001.png"]
     assert all("depth" not in str(p.parent.name)
                for p in pi.find_images(str(sess)))
+
+
+# --------------------------------------------------------------------------- #
+# Decode fidelity
+#
+# PNG output is lossless and nothing is resized, so the only place extraction
+# can lose quality that capture did not already lose is the YUV->RGB
+# conversion on a lossy v1 source. That conversion is not neutral for this
+# project: the vegetation prior thresholds ExG and compares g against b, so a
+# channel-dependent decode error moves real segmentation decisions.
+# --------------------------------------------------------------------------- #
+def test_the_decoder_passes_sws_flags_through():
+    d = ex.RawDecoder.__new__(ex.RawDecoder)
+    # Build the command without spawning ffmpeg, by calling __init__ on a real
+    # file would need one; assert on the constructed argv instead.
+    import numpy as _np
+    import subprocess as _sp
+    real_popen = _sp.Popen
+    captured = {}
+
+    class _FakeProc:
+        stdout = None
+        stderr = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    _sp.Popen = fake_popen
+    try:
+        ex.RawDecoder("ffmpeg", "x.mkv", "bgr24", 4, 4, 3, _np.uint8,
+                      sws_flags="accurate_rnd")
+    finally:
+        _sp.Popen = real_popen
+    assert "-sws_flags" in captured["cmd"]
+    assert "accurate_rnd" in captured["cmd"]
+
+
+def test_no_sws_flags_leaves_the_command_untouched():
+    """None must mean 'exactly the old command', so the flag can be turned off
+    without changing anything else about the invocation."""
+    import numpy as _np
+    import subprocess as _sp
+    real_popen = _sp.Popen
+    captured = {}
+
+    class _FakeProc:
+        stdout = None
+        stderr = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc()
+
+    _sp.Popen = fake_popen
+    try:
+        ex.RawDecoder("ffmpeg", "x.mkv", "bgr24", 4, 4, 3, _np.uint8,
+                      sws_flags=None)
+    finally:
+        _sp.Popen = real_popen
+    assert "-sws_flags" not in captured["cmd"]
+
+
+def test_the_shipped_config_rounds_rather_than_truncates():
+    """swscale truncates by default, which leaves a systematic negative bias -
+    measured at a uniform -2 per channel on flat patches. That is not
+    cosmetic when a colour index decides what is a plant."""
+    assert "accurate_rnd" in (ex.CONFIG["SWS_FLAGS"] or "")
+
+
+def test_the_config_does_not_override_colourspace_or_range():
+    """Both were measured and both were worse: v1 AVIs carry no colour
+    metadata, and the defaults at each end already agree. Forcing BT.709 swung
+    green by -21; forcing full-range input tripled the error."""
+    flags = ex.CONFIG["SWS_FLAGS"] or ""
+    for forbidden in ("in_range", "out_range", "in_color_matrix", "bt709"):
+        assert forbidden not in flags
+
+
+def test_lossless_sources_stay_bit_exact_with_the_flag(tmp_path):
+    """The flag must buy accuracy on lossy sources without disturbing the
+    lossless ones. An FFV1 bgr24 stream needs no colour conversion at all and
+    has to come back byte for byte."""
+    import subprocess
+    h, w = 64, 96
+    rng = np.random.default_rng(0)
+    gt = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+    src = tmp_path / "lossless.mkv"
+    p = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+         "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", "15", "-i", "pipe:0",
+         "-c:v", "ffv1", "-level", "3", "-pix_fmt", "bgr24", str(src)],
+        stdin=subprocess.PIPE)
+    for _ in range(3):
+        p.stdin.write(gt.tobytes())
+    p.stdin.close()
+    p.wait()
+
+    frames = list(ex.RawDecoder("ffmpeg", src, "bgr24", w, h, 3, np.uint8,
+                                sws_flags=ex.CONFIG["SWS_FLAGS"]))
+    assert frames and np.array_equal(frames[0], gt)
+
+
+def test_depth_stays_bit_exact_with_the_flag(tmp_path):
+    """Depth is measurement, not appearance - a single changed count is a
+    changed distance."""
+    import subprocess
+    h, w = 64, 96
+    rng = np.random.default_rng(1)
+    gt = rng.integers(0, 4000, (h, w), dtype=np.uint16)
+    src = tmp_path / "d.mkv"
+    p = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+         "-pix_fmt", "gray16le", "-s", f"{w}x{h}", "-r", "15", "-i", "pipe:0",
+         "-c:v", "ffv1", "-level", "3", "-pix_fmt", "gray16le", str(src)],
+        stdin=subprocess.PIPE)
+    for _ in range(3):
+        p.stdin.write(gt.tobytes())
+    p.stdin.close()
+    p.wait()
+
+    frames = list(ex.RawDecoder("ffmpeg", src, "gray16le", w, h, 1, np.uint16,
+                                sws_flags=ex.CONFIG["SWS_FLAGS"]))
+    assert frames and np.array_equal(frames[0], gt)
+
+
+def test_png_output_is_lossless_at_the_shipped_compression(tmp_path):
+    """PNG_COMPRESSION trades size against speed, never quality. Pinned so
+    nobody 'optimises' it into a lossy format later."""
+    rng = np.random.default_rng(2)
+    img = rng.integers(0, 256, (40, 60, 3), dtype=np.uint8)
+    f = tmp_path / "x.png"
+    cv2.imwrite(str(f), img, [cv2.IMWRITE_PNG_COMPRESSION,
+                              ex.CONFIG["PNG_COMPRESSION"]])
+    assert np.array_equal(cv2.imread(str(f), cv2.IMREAD_UNCHANGED), img)
+
+
+def test_the_session_records_how_it_was_decoded(tmp_path):
+    """Decode settings change pixel values on a lossy source, so two sessions
+    extracted under different flags are not strictly comparable - and the
+    difference is invisible in the PNGs after the fact."""
+    _avi_session(tmp_path)
+    _, rec = _extract(tmp_path)
+    assert rec["decode"]["sws_flags"] == ex.CONFIG["SWS_FLAGS"]
+    assert rec["decode"]["png_compression"] == ex.CONFIG["PNG_COMPRESSION"]

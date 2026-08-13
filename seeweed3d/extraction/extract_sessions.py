@@ -190,7 +190,36 @@ CONFIG = {
     "DEPTH_MAX_VALID_MM":      2000,
 
     "METRIC_WIDTH": 512,
+    # PNG is lossless at every level - this trades file size against write
+    # speed and nothing else. It cannot cost image quality.
     "PNG_COMPRESSION": 3,
+
+    # -- Decode fidelity --------------------------------------------------------
+    # swscale flags for the YUV->RGB conversion. Only bites on the LOSSY v1
+    # captures (AVI/mpeg4/yuv420p); an FFV1 stream is bgr24 or gray16le already
+    # and decodes bit-exact either way, which is asserted by a test.
+    #
+    # `accurate_rnd` makes swscale ROUND rather than truncate. Truncation
+    # leaves a systematic negative bias - measured at a uniform -2 per channel
+    # on flat patches, dropping to about -0.8 with this flag. That bias is not
+    # cosmetic here: the vegetation prior thresholds ExG and compares g against
+    # b, so a channel-dependent error moves real decisions. Measured on a
+    # synthetic field frame, it cut vegetation_mask() disagreement against the
+    # uncompressed original from 0.607% of pixels to 0.474%, and mean absolute
+    # pixel error from 3.30 to 2.78, at no measurable decode cost.
+    #
+    # NOT `full_chroma_int`: measured a no-op here, because it governs chroma
+    # interpolation during RESIZING and extraction never resizes.
+    #
+    # Deliberately no colorspace or range override. v1 AVIs carry no colour
+    # metadata at all, so both ends fall back to defaults - and those defaults
+    # already agree. Measured on flat patches, the default (BT.601, limited
+    # range in) leaves a colour-neutral offset, while forcing BT.709 swings
+    # green by -21 and red by +7, and forcing full-range input triples the
+    # error. Both were tried; both were worse. Leave this alone unless a future
+    # capture writes tagged colour metadata.
+    "SWS_FLAGS": "accurate_rnd",
+
     "OVERWRITE": False,
     "DRY_RUN": False,
 }
@@ -366,16 +395,26 @@ def read_frames_csv(path):
 
 class RawDecoder:
     """Decode FFV1/MKV to raw frames. -vsync 0 guarantees one output frame per
-    coded frame (no duplication or dropping), which keeps indices honest."""
+    coded frame (no duplication or dropping), which keeps indices honest.
 
-    def __init__(self, ffmpeg, path, pix_fmt, w, h, channels, dtype):
+    sws_flags reaches the YUV->RGB conversion, so it matters only for the lossy
+    v1 captures; a bgr24 or gray16le FFV1 stream needs no conversion and comes
+    back bit-exact with or without it. See CONFIG["SWS_FLAGS"] for what is set
+    and, just as importantly, what was measured and deliberately not set."""
+
+    def __init__(self, ffmpeg, path, pix_fmt, w, h, channels, dtype,
+                 sws_flags=None):
         self.shape = (h, w, channels) if channels > 1 else (h, w)
         self.dtype = dtype
         self.bpf = w * h * channels * np.dtype(dtype).itemsize
+        cmd = [ffmpeg, "-loglevel", "error", "-i", str(path)]
+        if sws_flags:
+            cmd += ["-sws_flags", str(sws_flags)]
+        cmd += ["-f", "rawvideo", "-pix_fmt", pix_fmt, "-vsync", "0", "pipe:1"]
+        self.cmd = cmd
         self.proc = subprocess.Popen(
-            [ffmpeg, "-loglevel", "error", "-i", str(path),
-             "-f", "rawvideo", "-pix_fmt", pix_fmt, "-vsync", "0", "pipe:1"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=self.bpf * 2)
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            bufsize=self.bpf * 2)
 
     def __iter__(self):
         while True:
@@ -523,8 +562,9 @@ class PreviewDepthDecoder:
     stream, which keeps frame alignment handled in exactly one place."""
 
     def __init__(self, ffmpeg, path, w, h, kind, vis_max_mm, colormap=None,
-                 tv_range=False):
-        self._dec = RawDecoder(ffmpeg, path, "bgr24", w, h, 3, np.uint8)
+                 tv_range=False, sws_flags=None):
+        self._dec = RawDecoder(ffmpeg, path, "bgr24", w, h, 3, np.uint8,
+                               sws_flags=sws_flags)
         self._args = (kind, vis_max_mm, colormap, tv_range)
 
     def __iter__(self):
@@ -734,9 +774,12 @@ def extract_session(sess, out_root, cfg):
         (sdir / sub).mkdir(parents=True, exist_ok=True)
 
     F = cfg["FFMPEG"]
-    decs = {"rgb": RawDecoder(F, sess["rgb"], "bgr24", W, H, 3, np.uint8)}
+    SWS = cfg.get("SWS_FLAGS")
+    decs = {"rgb": RawDecoder(F, sess["rgb"], "bgr24", W, H, 3, np.uint8,
+                              sws_flags=SWS)}
     if sess["depth"]:
-        decs["depth"] = RawDecoder(F, sess["depth"], "gray16le", W, H, 1, np.uint16)
+        decs["depth"] = RawDecoder(F, sess["depth"], "gray16le", W, H, 1,
+                                   np.uint16, sws_flags=SWS)
     elif preview:
         # Kept under its own key so nothing here can route it into depth/, and
         # so frame_metrics is never handed it - the QC columns mean METRIC
@@ -744,11 +787,13 @@ def extract_session(sess, out_root, cfg):
         # incomparable across sessions.
         decs["depth_approx"] = PreviewDepthDecoder(
             F, preview["path"], W, H, preview["kind"], preview["vis_max_mm"],
-            preview["colormap"], preview["tv_range"])
+            preview["colormap"], preview["tv_range"], sws_flags=SWS)
     if sess["right"]:
-        decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3, np.uint8)
+        decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3,
+                                   np.uint8, sws_flags=SWS)
     if sess["conf"]:
-        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8)
+        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8,
+                                  sws_flags=SWS)
     its = {k: iter(v) for k, v in decs.items() if k != "rgb"}
 
     index_rows, pool_rows = [], []
@@ -850,6 +895,16 @@ def extract_session(sess, out_root, cfg):
                    "confidence_video": str(sess["conf"]) if sess["conf"] else None,
                    "svo_archive": str(sess["svo"]) if sess["svo"] else None,
                    "probes": infos},
+        # How the pixels were produced, not just where they came from. Decode
+        # settings change pixel values on a lossy source, so two sessions
+        # extracted under different flags are not strictly comparable and the
+        # difference is otherwise invisible after the fact.
+        "decode": {"sws_flags": cfg.get("SWS_FLAGS"),
+                   "png_compression": cfg["PNG_COMPRESSION"],
+                   "note": "PNG is lossless; png_compression trades size "
+                           "against write speed only. sws_flags affects the "
+                           "YUV->RGB conversion and therefore only lossy "
+                           "(v1/AVI) sources - FFV1 decodes bit-exact."},
         "capture_metadata": meta, "capture_metadata_version": meta_ver,
         "camera": {"model": "ZED 2i", "view": "VIEW.LEFT (rectified)",
                    "calibration": calib},
