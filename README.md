@@ -117,7 +117,9 @@ step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging
 multiple CVAT tasks, training both stages, evaluation, inference and Jetson
 deployment — with all commands.
 
-Other guides: `docs/dataset_pipeline.md` (extraction and selection),
+Other guides: `docs/extraction_quality.md` (**extraction fidelity — the
+lossless guarantees, what was measured, and what is not claimed**),
+`docs/dataset_pipeline.md` (extraction and selection),
 `docs/onion_prelabeling.md` and `docs/weed_prelabeling.md` (the SAM 3
 workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 `docs/dataset_growth.md` (active learning, and how to grow the dataset well),
