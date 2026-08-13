@@ -30,6 +30,7 @@ on PATH.
 | [10. Deploy](#10-export-and-benchmark-jetson) | ONNX/TensorRT + benchmark | on Jetson |
 
 **Related:** [project history](../CHANGELOG.md) ·
+[extraction fidelity](extraction_quality.md) ·
 [growing the dataset](dataset_growth.md) ·
 [mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
@@ -157,6 +158,11 @@ difference is invisible in the PNGs afterwards.
 **The real quality lever is at capture, not extraction.** A v1 AVI session has
 already lost detail that cannot be recovered; a v2 FFV1 session has lost
 nothing. See `docs/capture_changelog.md`.
+
+**→ [`docs/extraction_quality.md`](extraction_quality.md)** is the full
+reference account of extraction fidelity — what is guaranteed, what was
+measured, and what is explicitly not claimed. Written to be quotable in a
+methods section.
 
 ### Mixed containers, and checking depth before you trust it
 
