@@ -23,6 +23,56 @@ scene breaks:
 Turning that off is not a flag, it is a different pipeline: it removes the class
 proposal entirely and moves all of the effort onto separation and boundaries.
 
+### What "mixed" means here — and what it does not
+
+Mixed means **both classes in the same frame**. That is the only condition that
+makes the class proposal unsafe, and therefore the only condition that justifies
+paying for this module's cost: you give up a free correct class and buy it back
+with one keystroke per shape in CVAT.
+
+A drive that is weed-only for its first stretch and onion-only after it does
+**not** meet that condition. Every one of its frames still contains exactly one
+class — the class just changes partway through the session. Sent through this
+module, such a session would throw away a class label that was available for
+free on both halves, and hand the annotator hundreds of reassignments that the
+data itself already answered.
+
+Split it by frame index instead and run the prelabeler whose assumption holds on
+each stretch. Every prelabeler in the repo takes `CONFIG["ONLY_FRAMES"]`, keyed
+by session id, using the same tokens curation's `MANUAL_DROPS` accepts:
+
+```python
+# prelabel_weeds_sam3.py      # prelabel_onions_sam3.py
+CONFIG["ONLY_FRAMES"] = {     CONFIG["ONLY_FRAMES"] = {
+    "vid3_20260108_103135": ["0-1200"]}   "vid3_20260108_103135": ["1500-"]}
+```
+
+Tokens: a bare index `1187`, an inclusive range `0-250`, an open-ended `1500-`
+or `-250`, or a filename pasted straight out of `preview/` — the `.jpg` preview
+name is accepted, not just the `.png` source. `ONLY_FRAMES` is applied *before*
+`LIMIT_PER_SESSION`, so a 20-frame trial samples the stretch you selected rather
+than the first 20 frames of the whole session, which on a split drive would be
+entirely the wrong zone.
+
+**This module still has a job on such a session: the transition.** Leave a gap
+between the two single-class ranges covering every frame where you cannot tell
+from a preview which crop you are looking at, or where both are genuinely in
+shot, and give that gap to `prelabel_mixed_sam3.py`:
+
+```python
+CONFIG["ONLY_FRAMES"] = {"vid3_20260108_103135": ["1201-1499"]}
+```
+
+A single-class prelabeler run over that stretch states a class confidently and
+wrongly, and **calling an onion a weed is the worst error this project can
+make** — it is the one that ends with a laser on the crop. Excluding the stretch
+from this round is also a legitimate answer; prelabelling it under an assumption
+you know is broken is not.
+
+Never let two ranges overlap. A frame prelabelled under both assumptions reaches
+CVAT twice carrying contradictory classes, and nothing downstream can tell you
+which copy you corrected.
+
 ## Why one homogeneous class is the right answer, not a shortcut
 
 This was your call and it holds up for three independent reasons:
@@ -249,6 +299,8 @@ conda activate dl
 #   DATASET_ROOT  = r"E:\Dataset_Vidalia\Mixed_1"
 #   CONFIG["ONLY_SESSIONS"]     = ["vid1_20260108_101500"]
 #   CONFIG["LIMIT_PER_SESSION"] = 20        # trial first, then None
+#   CONFIG["ONLY_FRAMES"]       = {}        # {} = whole session; see above for
+#                                           # split-zone drives
 
 python seeweed3d/annotation/prelabel_mixed_sam3.py
 ```

@@ -83,6 +83,21 @@ overlays, then set it back to `None` for the full pool:
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
+**If only part of a session is onion-only** — a drive that starts in a weedy
+stretch and runs into clean rows partway through — restrict this run to the
+onion half instead of discarding the session:
+
+```python
+CONFIG["ONLY_FRAMES"] = {"vid3_20260108_103135": ["1500-"]}
+```
+
+Tokens are the same ones curation's `MANUAL_DROPS` takes: `1187`, `0-250`,
+open-ended `1500-` or `-250`, or a filename pasted out of `preview/` (`.jpg`
+accepted). It is applied *before* `LIMIT_PER_SESSION`, so a 20-frame trial
+samples the stretch you named. Run `prelabel_weeds_sam3.py` over the weed half,
+and leave a gap at the transition for `prelabel_mixed_sam3.py` — full procedure
+in RUNBOOK §3c.
+
 Output under `DATASET_ROOT/auto_labels_onion/<session_id>/`:
 
 | Item | Purpose |
