@@ -312,6 +312,45 @@ CONFIG["LIMIT_PER_SESSION"] = 20                              # trial first
 python seeweed3d/annotation/prelabel_weeds_sam3.py
 ```
 
+### Reading the previews
+
+Outlines are drawn **red** for every instance, and the LEP dot is off. Neither
+is a class signal — CVAT takes its colours from the label schema on import, so
+the preview is free to use whatever reads best against soil. The default class
+`other_weed` has a mid-grey ontology colour, which is close to dry soil and
+stubble, so colouring outlines by class hid the boundary you were inspecting.
+
+| Setting | Default | Use |
+|---|---|---|
+| `PREVIEW_OUTLINE_BGR` | `(0, 0, 255)` red | `None` restores per-class colours |
+| `PREVIEW_OUTLINE_PX` | `2` | thicker if you are scanning for detections, not judging edges |
+| `PREVIEW_SHOW_LEP` | `False` | `True` when the LEP is what you are reviewing |
+| `PREVIEW_SCALE` | `0.5` | **`1.0` when the question is boundary precision** — at 0.5 you are judging a mask at half the resolution it was drawn |
+
+A **white halo** around an outline still means the instance came from the recall
+backstop rather than SAM. That one is not decoration — it tells you whether
+`RECOVER_MISSED_PLANTS` is earning its keep — so it survives the fixed colour.
+
+### LEP and a segmentation-only dataset
+
+The fused LEP estimator (`USE_FUSED_LEP`) is already off by default, and **no
+LEP of any kind reaches CVAT** — `instances_default.json` carries polygons and
+boxes only. So while you are building a segmentation dataset there is nothing to
+turn off for correctness; the LEP columns in `instances.csv` are the cheap
+geometric baselines and cost effectively nothing.
+
+Two things that *were* being computed and discarded, now skipped:
+
+- **the depth PNG.** Depth feeds the fused estimator's canopy-height channel and
+  nothing else, so with `USE_FUSED_LEP=False` a 16-bit PNG was decoded per frame
+  for a consumer that never ran.
+- **the split-seeding distance transform.** `growth_peaks()` runs over the whole
+  frame per instance; it was passed as an argument to
+  `split_touching_instances()`, so Python evaluated it even though splitting is
+  off by default and returns the mask untouched.
+
+Neither changes any output.
+
 **If a session is weed-only for only part of its length** — the drive passes out
 of the weedy stretch and into clean onion rows — restrict this run to the weed
 half rather than skipping the session or sending it to the mixed prelabeler:

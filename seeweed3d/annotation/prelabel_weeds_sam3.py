@@ -217,6 +217,10 @@ CONFIG = {
     # leaving it off makes a full pass dramatically faster. Turn it back on
     # when the LEP itself is the object of study.
     "USE_FUSED_LEP": False,
+    # Depth feeds the fused estimator's canopy-height channel and NOTHING else,
+    # so it is read only when that estimator is actually running. With
+    # USE_FUSED_LEP off this used to decode a 16-bit depth PNG per frame and
+    # discard it - pure I/O for a channel nobody consumed.
     "USE_DEPTH_FOR_LEP": True,    # enables the canopy-height channel when depth exists
     "LEP_CROP_PAD_PX": 10,
 
@@ -313,7 +317,30 @@ CONFIG = {
     # the ambiguous stretch to prelabel_mixed_sam3.py, or leave it out.
     "ONLY_FRAMES": {},
     "SAVE_PREVIEWS": True,
+    # 0.5 halves every boundary you are trying to judge. Raise to 1.0 when the
+    # question is mask precision rather than "did anything get detected".
     "PREVIEW_SCALE": 0.5,
+
+    # -- Preview appearance (affects the JPGs ONLY) ----------------------------
+    # Nothing here reaches CVAT. Class colours there come from the label schema
+    # (common/ontology.CLASS_COLORS_BGR) and the shapes from
+    # instances_default.json; neither is touched by anything below.
+    #
+    # One outline colour for every instance. The per-class palette is the wrong
+    # tool for judging a boundary: nearly every instance comes out as
+    # DEFAULT_SPECIES_CLASS, whose ontology colour is a mid grey that vanishes
+    # against dry soil, stubble and shadow - so the thing you are trying to
+    # inspect is the thing you cannot see. Red belongs to neither plant nor
+    # soil anywhere in this imagery. Set None to colour by class again.
+    "PREVIEW_OUTLINE_BGR": (0, 0, 255),
+    "PREVIEW_OUTLINE_PX": 2,
+
+    # LEP dots and cluster growth-point crosses. Off while the dataset being
+    # built is segmentation-only: the dot is drawn at the deepest interior point
+    # of the mask, which is exactly where a rosette's boundary needs looking at,
+    # and it answers a question that is not being asked yet. Turn back on when
+    # the LEP itself is under review.
+    "PREVIEW_SHOW_LEP": False,
 }
 
 # Class names come from common/ontology.py so they cannot drift between stages.
@@ -905,30 +932,39 @@ class WeedCoco:
             "categories": self.categories}, indent=2))
 
 
-def overlay(bgr, instances, scale):
+def overlay(bgr, instances, scale, cfg=None):
     """Preview: instance outline, a small class tag, and the proposed LEP dot.
 
     Text is kept small and only drawn on instances big enough to read, because a
-    dense frame otherwise disappears under overlapping labels."""
+    dense frame otherwise disappears under overlapping labels.
+
+    Drawing choices here are preview-only. The outline colour in particular is
+    NOT the class colour that CVAT will show - that comes from the label schema
+    on import - so a single high-contrast outline costs nothing downstream and
+    buys back the boundary you are trying to look at."""
+    cfg = cfg or CONFIG
     colors = CLASS_COLORS_BGR
+    fixed = cfg.get("PREVIEW_OUTLINE_BGR", None)
+    thick = int(cfg.get("PREVIEW_OUTLINE_PX", 2))
+    show_lep = cfg.get("PREVIEW_SHOW_LEP", True)
     vis = bgr.copy()
     fs = max(0.35, min(0.6, bgr.shape[1] / 3000.0))     # scale text to the frame
     for inst in instances:
-        col = colors.get(inst["cls"], (170, 170, 170))
+        col = tuple(fixed) if fixed else colors.get(inst["cls"], (170, 170, 170))
         cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if inst.get("source") == "vegetation":
             # White halo = recovered by the recall backstop, i.e. a plant SAM
             # did not return. Visible at any instance size, so you can judge
             # from the previews alone whether the backstop is earning its keep.
-            cv2.drawContours(vis, cnts, -1, (255, 255, 255), 4)
-        cv2.drawContours(vis, cnts, -1, col, 2)
-        if inst["cls"] == "weed_cluster":
+            cv2.drawContours(vis, cnts, -1, (255, 255, 255), thick + 2)
+        cv2.drawContours(vis, cnts, -1, col, thick)
+        if show_lep and inst["cls"] == "weed_cluster":
             # No single LEP for a cluster - mark every growth point instead.
             for (px, py), _ in inst.get("peaks", []):
                 cv2.drawMarker(vis, (int(px), int(py)), (200, 60, 200),
                                cv2.MARKER_TILTED_CROSS, 14, 2)
-        else:
+        elif show_lep:
             r = inst.get("lep")
             if r is not None:
                 x, y = [int(round(v)) for v in r.uv]
@@ -1012,7 +1048,14 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
         m = smooth_boundary(m, cfg)
         if m.sum() < cfg["MIN_INSTANCE_AREA_PX"]:
             continue
-        for part in split_touching_instances(m, growth_peaks(m, cfg), cfg):
+        # Peaks are computed here ONLY to seed the split. Python evaluates an
+        # argument before the call, so passing growth_peaks(...) unconditionally
+        # paid a full-frame distance transform per instance even with splitting
+        # off - which is the default. When it is off the split returns [m]
+        # unchanged and the peaks below are recomputed on that same mask anyway.
+        seed_peaks = (growth_peaks(m, cfg)
+                      if cfg.get("SPLIT_TOUCHING_INSTANCES", True) else [])
+        for part in split_touching_instances(m, seed_peaks, cfg):
             refined.append((part, src))
 
     instances = []
@@ -1123,7 +1166,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         # Depth, when the session has it, activates the canopy-height evidence
         # channel: the crown sits above the surrounding soil and leaves.
         depth_mm = None
-        if cfg.get("USE_DEPTH_FOR_LEP", True):
+        if cfg.get("USE_DEPTH_FOR_LEP", True) and estimator is not None:
             dpath = session_dir / "depth" / fn
             if dpath.exists():
                 raw = cv2.imread(str(dpath), cv2.IMREAD_UNCHANGED)
@@ -1174,7 +1217,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         cv2.imwrite(str(out / "masks" / fn), (union.astype(np.uint8) * 255))
         if cfg["SAVE_PREVIEWS"]:
             cv2.imwrite(str(out / "preview" / fn.replace(".png", ".jpg")),
-                        overlay(proc, instances, cfg["PREVIEW_SCALE"]))
+                        overlay(proc, instances, cfg["PREVIEW_SCALE"], cfg))
         stats["frames"] += 1
         stats["instances"] += len(instances)
         stats["empty"] += int(not instances)
