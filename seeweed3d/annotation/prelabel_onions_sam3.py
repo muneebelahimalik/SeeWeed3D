@@ -53,6 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CROP_CLASS  # noqa: E402
+from common.progress import Progress  # noqa: E402
 from common.vegetation import component_boxes, remove_small  # noqa: E402
 from common.vegetation import vegetation_mask as _vegetation_mask  # noqa: E402
 from common.vegetation import white_balance as _white_balance  # noqa: E402
@@ -68,7 +69,7 @@ from common.vegetation import white_balance as _white_balance  # noqa: E402
 DATASET_ROOT   = r"E:\Dataset_Vidalia\onions_20260108_1"
 SAM_VERSION    = "sam3"        # "sam3" | "sam3.1"
 # e.g. r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt". None => auto-download.
-SAM_CHECKPOINT = "E:\Models\sam3.pt"
+SAM_CHECKPOINT = r"E:\Models\sam3.pt"
 
 # =============================================================================
 # CONFIG - advanced tuning below; defaults are sensible for onion-only scenes
@@ -444,11 +445,16 @@ def link_or_copy(src, dst):
 # Driver
 # --------------------------------------------------------------------------- #
 def pool_frames(session_dir):
+    """Pooled frame filenames, minus any curated out by extraction/curate_pool.py.
+
+    A missing `dropped` column means the pool predates curation, which reads as
+    "keep everything" - so an old session still behaves exactly as before."""
     pool_csv = session_dir / "meta" / "pool.csv"
     if not pool_csv.exists():
         return []
     return [r["filename"] for r in csv.DictReader(open(pool_csv, encoding="utf-8"))
-            if r.get("filename")]
+            if r.get("filename")
+            and str(r.get("dropped", "0")).strip() not in ("1", "true", "True")]
 
 
 def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
@@ -484,11 +490,12 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     stats = {"frames": 0, "fallback": 0, "empty": 0, "polys": 0, "flagged": 0}
     flagged = []
 
+    prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
         rgb_path = session_dir / "rgb" / fn
         bgr = cv2.imread(str(rgb_path))
         if bgr is None:
-            print(f"      ! missing {rgb_path}"); continue
+            prog.update(note="missing frame"); continue
         proc = white_balance(bgr, cfg)             # neutralise colour-cast frames
         veg = vegetation_mask(proc, cfg)
 
@@ -528,7 +535,9 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["empty"] += int(not final.any())
         stats["flagged"] += int(is_flagged)
         stats["polys"] += len(polys)
+        prog.update(note=f"{stats['polys']} polygons, {stats['flagged']} flagged")
 
+    prog.close(note=f"{stats['polys']} polygons, {stats['flagged']} flagged")
     coco.dump(out / "instances_default.json")
     if flagged:
         (out / "flagged_for_manual.txt").write_text("\n".join(flagged))
@@ -544,9 +553,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
 def main(predictor_factory=load_sam3, sam_fn=sam3_masks):
     cfg = CONFIG
     root = Path(cfg["DATASET_ROOT"])
-    sessions_root = root / "sessions"
-    if not sessions_root.exists():
-        sys.exit(f"ERROR: {sessions_root} not found. Run extract_sessions.py first.")
+    from common.dataset_paths import require_sessions_root
+    sessions_root = require_sessions_root(root)
 
     sids = sorted(p.name for p in sessions_root.iterdir() if p.is_dir())
     if cfg["ONLY_SESSIONS"]:
