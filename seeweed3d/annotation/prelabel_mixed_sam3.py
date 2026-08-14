@@ -174,7 +174,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from annotation.prelabel_weeds_sam3 import (link_or_copy,  # noqa: E402
                                             load_sam3, mask_iou, mask_polygons,
-                                            pool_frames, sam3_instances)
+                                            pool_frames, print_pool_report,
+                                            sam3_instances)
 from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              PRELABEL_CLASS, prelabel_categories,
                              prelabel_cvat_labels)
@@ -1084,6 +1085,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             return None
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
+    print_pool_report(sid, session_dir, len(frames))
     if not frames:
         print(f"  [{sid}] no pool frames - run extract_sessions.py first")
         return None

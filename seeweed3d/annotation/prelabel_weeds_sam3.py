@@ -1016,6 +1016,58 @@ def pool_frames(session_dir):
             and str(r.get("dropped", "0")).strip() not in ("1", "true", "True")]
 
 
+def pool_report(session_dir):
+    """(kept, total, {reason: n}) for a session's pool.
+
+    WHY THIS IS PRINTED RATHER THAN ASSUMED. A prelabeler reads the CURATED
+    pool - `dropped=1` rows in meta/pool.csv are skipped, which is the whole
+    point of curation - but nothing downstream ever said how much that removed.
+    A session of 754 frames curated down to 15 then prelabels 15 frames and
+    reports success, and the only symptom is a number that looks small if you
+    happen to remember what the session held. That is precisely how a stale
+    MIN_SHIFT_FRAC once cut a pool by 96% unnoticed."""
+    pool_csv = Path(session_dir) / "meta" / "pool.csv"
+    if not pool_csv.exists():
+        return 0, 0, {}
+    kept = total = 0
+    reasons = {}
+    with open(pool_csv, encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            if not r.get("filename"):
+                continue
+            total += 1
+            if str(r.get("dropped", "0")).strip() in ("1", "true", "True"):
+                why = (r.get("drop_reason") or "unspecified").strip()
+                reasons[why] = reasons.get(why, 0) + 1
+            else:
+                kept += 1
+    return kept, total, reasons
+
+
+def print_pool_report(sid, session_dir, kept_now):
+    """Say what the pool held, what curation removed, and what is left.
+
+    kept_now is the count AFTER any ONLY_FRAMES / LIMIT_PER_SESSION narrowing,
+    so the three reasons a frame can be absent are separable at a glance."""
+    kept, total, reasons = pool_report(session_dir)
+    if not total:
+        return
+    dropped = total - kept
+    line = f"  [{sid}] pool: {total} frame(s)"
+    if dropped:
+        top = sorted(reasons.items(), key=lambda kv: -kv[1])[:3]
+        line += (f" | {dropped} dropped by curation ("
+                 + ", ".join(f"{w}={n}" for w, n in top) + ")")
+    if kept_now != kept:
+        line += f" | {kept_now} selected by this run"
+    print(line + f" -> prelabelling {kept_now}")
+    if dropped and kept <= total * 0.25:
+        print(f"  [!] curation removed {dropped / total:.0%} of this session. "
+              f"If that was not deliberate, restore it with "
+              f"extraction/curate_pool.py (RESTORE_ALL = True) and re-curate "
+              f"with a lower MIN_SHIFT_FRAC.")
+
+
 def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
     """Vegetation prior + instance filtering + per-instance analysis.
     Returns (instances, veg_mask). Pure CPU - the SAM call happens outside."""
@@ -1100,6 +1152,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             return None
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
+    print_pool_report(sid, session_dir, len(frames))
     if not frames:
         print(f"  [{sid}] no pool frames - run extract_sessions.py first")
         return None
