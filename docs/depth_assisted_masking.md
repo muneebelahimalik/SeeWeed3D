@@ -165,3 +165,85 @@ missing `calibration.json` cannot silently delete everything.
 `height_mm`, `height_measured_frac` and `area_mm2` are written per instance to
 `instances.csv`, empty where unmeasured — because "0 mm" is a claim that
 something is flat and "we could not tell" is a different statement.
+
+---
+
+## The complement prelabeler
+
+`annotation/prelabel_complement_sam3.py` runs a trained **onion** model over a
+mixed scene and labels the vegetation it did not claim. Onion-only sessions are
+the cheapest thing to annotate — one class, no ambiguity — so a model trained on
+them can be spent on the expensive scenes.
+
+### Why it is a prelabeler and must never be a deployment rule
+
+"Everything that is not onion is a weed" is arithmetic, and the arithmetic is
+right. What is wrong is **the direction the errors point**.
+
+When the onion model misses an onion — occluded, an unusual growth stage, the
+edge of the frame, motion blur — those pixels are vegetation, no onion mask
+covers them, and the complement calls them weed. Deployed, that is a laser
+fired at the crop. It is not an exotic failure either: a missed detection is
+the most common thing a detector does, recall never reaches 1.0, and every
+onion in the residue becomes a target.
+
+A two-class model's failure mode is "unsure", which a confidence threshold can
+act on. The complement has no such handle — uncertainty defaults to weed, and
+weed means fire.
+
+### The third outcome is the whole design
+
+| Region | Label |
+|---|---|
+| vegetation confidently claimed by the model | `onion_plant` |
+| vegetation far from any onion, on confident ground | `other_weed` |
+| everything else — near an onion, small, ambiguous | `ignore_region` |
+
+`ignore_region` is an annotation-only label the dataset builder excludes from
+training, so the complement's most common error costs an annotator one look and
+teaches the model nothing.
+
+**The halo does the real work.** A missed leaf of a *detected* onion is nearly
+always adjacent to the part that was detected, so the onion region is widened
+by `ONION_HALO_MM` before the complement is taken. Everything in that band that
+was not claimed outright becomes `ignore_region`, never weed. With depth and
+calibration the band is a fixed distance **on the ground** rather than in the
+image, so it means the same thing at any boom height.
+
+**Two escalations, both printed:**
+
+- A frame with **no onion detected at all** does not become a frame full of
+  weeds. In a mixed scene that is far more likely a model failure, so every
+  plant in it is written as `ignore_region`.
+- Over 90% of vegetation called weed prints a warning: an onion model failing
+  on a session looks exactly like a session full of weeds.
+
+`ONION_CONF` defaults to **0.15** — deliberately below anything you would
+deploy. A generous onion mask costs one correction; a stingy one puts crop
+tissue on the weed side.
+
+### Running it
+
+```python
+"CHECKPOINT": r"E:\Dataset_Vidalia\training1\rfdetr_v4\best.pt",
+"BACKEND": "rfdetr",
+"DATASET_ROOT": r"E:\Dataset_Vidalia\Mixed_1",
+"ONLY_SESSIONS": ["vid1_20260108_101500"],
+"LIMIT_PER_SESSION": 20,          # trial first
+```
+
+```powershell
+python seeweed3d/annotation/prelabel_complement_sam3.py
+```
+
+```
+  [vid1_20260108_101500] 20 frames | 46 onion, 118 weed, 39 ignore
+      vegetation: 41% onion | 44% weed | 15% uncertain
+```
+
+Correct the `ignore_region` shapes first — they are where the crop/weed
+boundary actually lives, and they are the frames worth mining next.
+
+> **This needs a trained onion model, which does not exist yet.** `rfdetr_v4`
+> has been configured but never run. Until it has, use
+> `prelabel_mixed_sam3.py` for mixed scenes.
