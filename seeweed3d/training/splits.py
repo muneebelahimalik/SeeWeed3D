@@ -246,7 +246,8 @@ MIN_FRAMES_FOR_BLOCKS = 5
 
 
 def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
-                                    test_fraction=0.2, gap_frames=2):
+                                    test_fraction=0.2, gap_frames=2,
+                                    n_blocks=1):
     """Contiguous frame blocks WITHIN each session, merged across sessions.
 
     USE WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE OR HARMFUL. Splitting by whole
@@ -272,7 +273,7 @@ def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
             out["_train_only_sessions"].append(sess)
             continue
         part = assign_frame_blocks(ids, val_fraction, test_fraction,
-                                   gap_frames=gap_frames)
+                                   gap_frames=gap_frames, n_blocks=n_blocks)
         for key in ("train", "val", "test", "_dropped_gap"):
             out[key].extend(part[key])
     return out
@@ -295,11 +296,22 @@ def missing_from_train(split_map, class_counts_by_session):
 
 
 def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
-                        gap_frames=2):
+                        gap_frames=2, n_blocks=1):
     """Split ONE session into contiguous frame blocks, with a discarded buffer.
 
     USE ONLY WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE (a single recording). It
     is strictly weaker than splitting by session and the caller must say so.
+
+    n_blocks cuts the session into that many equal stretches and applies the
+    layout inside EACH of them, so val and test are sampled from several places
+    along the drive instead of only its tail.
+
+    That matters more than it sounds. With one block, test is always the LAST
+    stretch of every recording - which on this data is a systematically
+    different thing: later in the day, further along the bed, and often the
+    headland where the rig turns. A test set made only of drive-ends measures
+    drive-ends. More blocks cost more gap frames (one seam per block boundary),
+    which is the price of a test set that looks like the dataset.
 
     Why blocks and not a random frame split: adjacent video frames are
     near-identical, so a random split puts a frame and its near-duplicate on
@@ -327,6 +339,42 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
             f"anything in each block. Annotate more frames.")
     if val_fraction + test_fraction >= 1.0:
         raise SplitError("val_fraction + test_fraction must be < 1.0")
+
+    # Clamp to what this session can actually support. A stretch shorter than
+    # MIN_FRAMES_FOR_BLOCKS cannot be split at all and goes wholly to train, so
+    # asking for more blocks than a short session has room for would quietly
+    # send EVERY frame to train and leave val empty - training then runs blind,
+    # saves no checkpoint and reports no metric, hours later. The request is a
+    # ceiling, not a demand.
+    k = max(1, min(int(n_blocks), n // MIN_FRAMES_FOR_BLOCKS))
+    if k > 1:
+        # Each stretch is split independently by the single-block layout below,
+        # so every guarantee it makes - contiguity, a gap at every real seam,
+        # nothing shared between splits - holds per stretch and therefore
+        # overall. A stretch too short to split contributes wholly to train
+        # rather than failing the build.
+        out = {"train": [], "val": [], "test": [], "_dropped_gap": []}
+        edges = [round(j * n / k) for j in range(k + 1)]
+        gap = max(0, int(gap_frames))
+        for j, (a, b) in enumerate(zip(edges, edges[1:])):
+            chunk = ids[a:b]
+            # THE SEAM BETWEEN CHUNKS NEEDS A BUFFER TOO. Each chunk ends with
+            # its test block and the next begins with its train block, so
+            # without this they are adjacent frames - and multiplying blocks
+            # would multiply unbuffered seams, making a split that looks more
+            # representative measurably more contaminated. Charged to the later
+            # chunk so the first keeps all of its frames.
+            if j and gap and len(chunk) > gap:
+                out["_dropped_gap"].extend(chunk[:gap])
+                chunk = chunk[gap:]
+            if len(chunk) < MIN_FRAMES_FOR_BLOCKS:
+                out["train"].extend(chunk)
+                continue
+            part = assign_frame_blocks(chunk, val_fraction, test_fraction,
+                                       gap_frames, n_blocks=1)
+            for key in out:
+                out[key].extend(part[key])
+        return out
 
     n_test = int(round(test_fraction * n))
     n_val = int(round(val_fraction * n))
@@ -359,6 +407,69 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
     return {"train": train, "val": val, "test": test,
             "_dropped_gap": [f for f in ids
                              if f not in set(train) | set(val) | set(test)]}
+
+
+#: Below this many VIDEO frames between a test frame and the nearest training
+#: frame, the two are the same ground from centimetres apart and the test set is
+#: measuring memorisation. At ~30 fps and walking pace this is roughly two
+#: seconds of travel - deliberately modest, because it is a floor for "not
+#: literally the same photograph", not a claim of independence.
+MIN_SEAM_SEPARATION = 60
+
+
+def seam_separation(split_frames, frame_index_of=None):
+    """How far apart the splits actually are, in VIDEO frames.
+
+    A gap is expressed in POOL frames, and the pool is usually strided - so
+    `gap_frames=2` can mean 10 video frames or 2, depending on how the pool was
+    curated. That distinction decides whether a within-session split measures
+    anything, and it is invisible in the configuration.
+
+    So this measures the thing itself: for each session, the smallest video-
+    frame distance between a test frame and a training frame, and the same for
+    val. That number is the honest summary of a within-session split. If it is
+    2, the test set is the training set photographed again.
+
+    split_frames: {split: [frame_id]}. frame_index_of maps a frame id to its
+    video frame index; the default reads the trailing number of the id, which
+    is the extractor's own convention.
+
+    Returns {"test": {session: min_distance}, "val": {...}} - sessions with
+    nothing in a split are absent rather than reported as infinitely far."""
+    if frame_index_of is None:
+        from common.frame_spec import index_of as frame_index_of
+
+    def by_session(ids):
+        out = defaultdict(list)
+        for fid in ids or ():
+            idx = frame_index_of(fid)
+            if idx >= 0:
+                # `<camera>_<date>_<time>_<index>` - the session is everything
+                # before the trailing index.
+                out[str(fid).rsplit("_", 1)[0]].append(idx)
+        return out
+
+    train = by_session(split_frames.get("train"))
+    out = {}
+    for split in ("val", "test"):
+        got = {}
+        for sess, idxs in by_session(split_frames.get(split)).items():
+            others = train.get(sess)
+            if not others:
+                continue          # no training frames here: nothing to be near
+            got[sess] = min(abs(a - b) for a in idxs for b in others)
+        out[split] = got
+    return out
+
+
+def seam_separation_problems(report, floor=MIN_SEAM_SEPARATION):
+    """Sessions whose val/test frames sit too close to training frames."""
+    bad = []
+    for split in ("val", "test"):
+        for sess, dist in sorted((report.get(split) or {}).items()):
+            if dist < floor:
+                bad.append((split, sess, dist))
+    return bad
 
 
 def check_no_leakage(split_map, frame_sessions):

@@ -189,9 +189,47 @@ CONFIG = {
     # printed metric would tell you.
     "STRATIFY_BY_SCENE": True,
 
-    # Frames discarded at each real block boundary. They still overlap heavily,
-    # so a buffer is the cheapest way to buy genuine separation.
-    "GAP_FRAMES": 2,
+    # -- How the split is made -------------------------------------------------
+    # "auto"        try whole sessions; fall back to frame blocks when that is
+    #               impossible (one session, or a class living only in a
+    #               held-out one). The default.
+    # "session"     same as auto - kept for symmetry and to say so explicitly.
+    # "frame_block" ALWAYS split within each session, so the test set is drawn
+    #               from every session and every scene.
+    #
+    # CHOOSE frame_block WHEN YOU HAVE NO SESSION TO SPARE, and understand what
+    # you are buying. It gives a test set that is representative of the data you
+    # have: every session, every scene, every lighting condition contributes in
+    # proportion. It cannot tell you the model works on a NEW drive, because
+    # every test frame shares its session's light, soil, growth stage and field
+    # with training frames. The resulting score is an upper bound on field
+    # performance, not an estimate of it.
+    #
+    # A held-out session remains strictly better and nothing here replaces it.
+    # Record one when you can, and rebuild with HOLDOUT_TEST_SESSIONS.
+    "SPLIT_MODE": "auto",
+
+    # Cut each session into this many stretches and split WITHIN each one, so
+    # val and test are sampled from several places along every drive.
+    #
+    # With 1 block, test is always the LAST stretch of every recording - which
+    # on this data is systematically different: later in the day, further along
+    # the bed, often the headland where the rig turns. A test set made only of
+    # drive-ends measures drive-ends. 4 is a reasonable choice; more blocks cost
+    # more gap frames, one seam per boundary.
+    "BLOCKS_PER_SESSION": 4,
+
+    # Frames discarded at each seam. Adjacent pool frames still overlap
+    # heavily, and this buffer is the only thing separating a test frame from
+    # its near-duplicate in training.
+    #
+    # COUNTED IN POOL FRAMES, NOT VIDEO FRAMES. If curation kept every 5th
+    # frame, GAP_FRAMES=2 buys 10 video frames of separation - about a third of
+    # a second at 30 fps, which is nothing. The build MEASURES the real
+    # separation in video frames and warns when it is under 60; raise this
+    # until that warning clears. The cost is a handful of annotated frames,
+    # which is far cheaper than a test score wrong in the optimistic direction.
+    "GAP_FRAMES": 8,
 
     # -- Safety ----------------------------------------------------------------
     # False (default) refuses to write when the annotation contract is violated.
@@ -298,6 +336,8 @@ def main(cfg=None):
         gap_frames=c["GAP_FRAMES"], seed=c["SEED"],
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],
         strict=not c["ALLOW_ERRORS"],
+        split_mode=c.get("SPLIT_MODE", "auto"),
+        blocks_per_session=c.get("BLOCKS_PER_SESSION", 1),
         holdout_test=c.get("HOLDOUT_TEST_SESSIONS") or (),
         holdout_val=c.get("HOLDOUT_VAL_SESSIONS") or (),
         stratify_by_scene=c.get("STRATIFY_BY_SCENE", True),

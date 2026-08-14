@@ -348,7 +348,8 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
           drop_classes=(), keep_empty_frames=False, require_lep="auto",
-          include_frames=None, exclude_frames=None, stratify_by_scene=True):
+          include_frames=None, exclude_frames=None, stratify_by_scene=True,
+          split_mode="auto", blocks_per_session=1):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -410,6 +411,14 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # records where to find one later, so it stays testable without a real
     # dataset on disk. The config-block runners (make_dataset.py) and the CLI
     # check existence up front, with an error naming which root is missing.
+    # Validated first, before any export is parsed: a typo here should cost a
+    # second, not a full load of every annotation file.
+    split_mode_wanted = str(split_mode or "auto").lower()
+    if split_mode_wanted not in ("auto", "session", "frame_block"):
+        raise SystemExit(
+            f"ERROR: split_mode must be 'auto', 'session' or 'frame_block'; "
+            f"got {split_mode!r}")
+
     img_roots = images_root if isinstance(images_root, (list, tuple)) \
         else [images_root]
     img_roots = [Path(r) for r in img_roots]
@@ -590,7 +599,13 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # failure modes are silent unless checked. `reason` stays None while the
     # session split remains usable.
     split_mode, frame_split, split_map, reason = "session", None, None, None
-    if len(infos) < 2:
+    if split_mode_wanted == "frame_block":
+        # Chosen deliberately, not fallen back to. The reason is stated in the
+        # same words the fallback uses, so the output means the same thing
+        # either way and nobody reads a deliberate block split as a session one.
+        reason = ("frame blocks were requested (SPLIT_MODE='frame_block') - "
+                  "every session contributes to every split")
+    elif len(infos) < 2:
         reason = (f"only one session "
                   f"({infos[0].session_id if infos else '?'}) - there is "
                   f"nothing to hold out")
@@ -654,30 +669,60 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         for f in sorted(frames, key=lambda f: f.item_id):
             by_session.setdefault(f.session_id, []).append(f.item_id)
         frame_split = sp.assign_frame_blocks_per_session(
-            by_session, val_fraction, test_fraction, gap_frames=gap_frames)
+            by_session, val_fraction, test_fraction, gap_frames=gap_frames,
+            n_blocks=blocks_per_session)
         split_map = {"train": [i.session_id for i in infos], "val": [],
                      "test": []}
         where = {}
         for split in ("train", "val", "test"):
             for item in frame_split[split]:
                 where[item] = split
-        print(f"\n  [!] SESSION-LEVEL SPLIT NOT USED: {reason}.")
-        print(f"      Falling back to CONTIGUOUS FRAME BLOCKS within each "
-              f"session, with a {gap_frames}-frame gap at each boundary:")
+        chosen = split_mode_wanted == "frame_block"
+        head = ("SPLIT BY CONTIGUOUS FRAME BLOCKS (requested)" if chosen
+                else f"SESSION-LEVEL SPLIT NOT USED: {reason}")
+        print(f"\n  [!] {head}.")
+        print(f"      {blocks_per_session} block(s) per session, "
+              f"{gap_frames}-frame gap at each seam:")
         print(f"        train={len(frame_split['train'])} "
               f"val={len(frame_split['val'])} test={len(frame_split['test'])} "
               f"(dropped as buffer: {len(frame_split['_dropped_gap'])})")
         if frame_split.get("_train_only_sessions"):
             print(f"      Too short to block-split, so wholly in train: "
                   f"{', '.join(frame_split['_train_only_sessions'])}")
-        print(f"      Every session contributes to both splits, so no class is "
-              f"missing from training.")
-        print(f"      But val now shares each session's lighting, soil, growth "
-              f"stage and often its individual plants.")
-        print(f"      Treat the scores as a SANITY CHECK that training works, "
-              f"NOT as evidence of generalisation.")
-        print(f"      A real held-out test needs a session whose CLASSES also "
-              f"appear in the training sessions.\n")
+
+        # The gap is counted in POOL frames, and the pool is usually strided -
+        # so the same number can mean 2 video frames or 50 depending on how
+        # curation ran. That distinction decides whether this split measures
+        # anything, and it is invisible in the configuration. So measure it.
+        by_split = {s: list(frame_split[s]) for s in ("train", "val", "test")}
+        sep = sp.seam_separation(by_split)
+        rows = [(k, s, d) for k in ("val", "test")
+                for s, d in sorted((sep.get(k) or {}).items())]
+        if rows:
+            print(f"      Nearest TRAIN frame, in VIDEO frames:")
+            for split, sess, dist in rows:
+                print(f"        {split:<5} {sess:<28} {dist:>6}")
+        too_close = sp.seam_separation_problems(sep)
+        if too_close:
+            print(f"  [!] {len(too_close)} split/session pair(s) sit closer "
+                  f"than {sp.MIN_SEAM_SEPARATION} video frames to training "
+                  f"data. At walking pace that is the same ground from "
+                  f"centimetres away, so those frames measure memorisation "
+                  f"rather than performance.")
+            print(f"      Raise GAP_FRAMES until this clears - the cost is a "
+                  f"handful of annotated frames, which is far cheaper than a "
+                  f"test score that is wrong in the optimistic direction.")
+
+        print(f"      Every session contributes to every split, so no class is "
+              f"missing from training and the test set is drawn from ALL of "
+              f"your data.")
+        print(f"      What it CANNOT tell you: val and test share each "
+              f"session's lighting, soil, growth stage and field. A model that "
+              f"scores well here has been shown to work on ground it has seen "
+              f"the rest of - not on a new drive.")
+        print(f"      Treat these numbers as an upper bound on field "
+              f"performance, and record a fresh session before quoting them "
+              f"as generalisation.\n")
 
     frames_by_session = {}
     for f in frames:

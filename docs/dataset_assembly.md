@@ -14,6 +14,7 @@ the numbers it produces mean what they appear to mean.
 |---|---|
 | [1. Merging tasks](#1-merging-many-cvat-tasks) | How do several exports become one dataset? |
 | [2. Why not a random split](#2-why-the-split-is-not-random) | Why can't I just shuffle the frames? |
+| [2b. No session to spare](#when-you-have-no-session-to-spare) | How do I get a representative test set from all sessions? |
 | [3. Scene stratification](#3-scene-stratification) | How do onion-only, weed-only and mixed stay represented? |
 | [4. The pinned test set](#4-the-pinned-test-set) | How do I get a number I can compare across rounds? |
 | [5. Reading the output](#5-reading-what-it-prints) | What do I check before training on it? |
@@ -92,6 +93,59 @@ discarded gap at each boundary, and says loudly that it did. Blocks put train
 and val in different parts of the drive, which is far weaker than different
 drives but much better than shuffling. Treat those scores as a sanity check
 that training works, not as evidence of generalisation.
+
+### When you have no session to spare
+
+`SPLIT_MODE = "frame_block"` splits *within* every session instead, so the test
+set is drawn from all of your data — every session, every scene, in proportion.
+
+```python
+"SPLIT_MODE": "frame_block",
+"BLOCKS_PER_SESSION": 4,
+"GAP_FRAMES": 8,
+"VAL_FRACTION":  0.15,
+"TEST_FRACTION": 0.15,
+```
+
+**Be clear about what this buys and what it does not.** It gives you a test set
+that is *representative of the data you have*. It cannot tell you the model
+works on a **new drive**, because every test frame shares its session's light,
+soil, growth stage and field with training frames. Read the resulting score as
+an **upper bound** on field performance, not an estimate of it. A held-out
+session remains strictly better and nothing here replaces it.
+
+Three things make it as honest as it can be:
+
+**Blocks stay contiguous.** Never a random frame split — adjacent frames are
+near-identical, so a shuffle puts a frame and its own near-duplicate on both
+sides of the boundary.
+
+**Several blocks per session.** With one block, test is always the *last*
+stretch of every recording, which on this data is systematically different:
+later in the day, further along the bed, often the headland where the rig
+turns. A test set made only of drive-ends measures drive-ends.
+`BLOCKS_PER_SESSION = 4` samples from four places along each drive. The request
+is a ceiling — a session too short to hold that many blocks gets fewer, rather
+than sending every frame to train and leaving val empty.
+
+**The separation is measured, not assumed.** `GAP_FRAMES` is counted in *pool*
+frames, and the pool is usually strided — so `GAP_FRAMES = 2` after a stride-5
+curation buys 10 video frames, about a third of a second. Whether that is
+separation or self-deception is invisible in the config, so the build measures
+the real distance and prints it:
+
+```
+      Nearest TRAIN frame, in VIDEO frames:
+        val   vid1_20260108_101500              40
+        test  vid1_20260108_101500              80
+        test  vid2_20260108_122731              40
+  [!] 1 split/session pair(s) sit closer than 60 video frames to training data.
+```
+
+Raise `GAP_FRAMES` until that warning clears. The cost is a handful of
+annotated frames — far cheaper than a test score wrong in the optimistic
+direction. A seam exists at every block boundary *and* between one block's test
+tail and the next block's train head; both are buffered.
 
 ### Shuffling
 
@@ -197,6 +251,21 @@ Other things worth checking before you train:
 ---
 
 ## 6. Recipes
+
+**No session to spare — representative test set from everything:**
+
+```python
+"SPLIT_MODE": "frame_block",
+"BLOCKS_PER_SESSION": 4,
+"GAP_FRAMES": 8,              # raise until the separation warning clears
+"VAL_FRACTION":  0.15,
+"TEST_FRACTION": 0.15,
+"HOLDOUT_TEST_SESSIONS": [],  # nothing pinned; every session contributes
+```
+
+Read the score as an upper bound. Record a fresh session when you can and
+rebuild with `HOLDOUT_TEST_SESSIONS` — that is the only configuration that can
+report generalisation.
 
 **First real dataset, three scene types, one pinned test session:**
 
