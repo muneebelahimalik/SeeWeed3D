@@ -99,15 +99,34 @@ def _afflict(img, leaf, n=14, seed=0):
     return out
 
 
-def test_an_afflicted_leaf_is_fragmented_by_the_strict_gate_alone():
+def test_the_strict_gate_loses_a_quarter_of_an_afflicted_leaf():
     """Pins the failure this section exists to fix. Without it, this assertion
-    would be the bug report."""
+    would be the bug report.
+
+    Measured as TISSUE LOST, not as a component count. Whether the survivors
+    also come apart into separate blobs depends on the morphological open in
+    vegetation_mask() and therefore on the OpenCV build: measured across
+    kernels 0/1/3/5 the same afflicted leaf yields 1, 1, 4 and 8 components,
+    while the fraction of leaf retained barely moves (0.737, 0.737, 0.724,
+    0.705). An earlier version of this test asserted `components > 1` and so
+    passed on one machine and failed on another, saying nothing about the code
+    either time.
+
+    Lost tissue is the precondition that actually matters: it is what the
+    bridging recovers, and it is what makes every downstream stage - exemplar
+    boxes, seed intersection, watershed connectivity, fragment dropping - see a
+    leaf that is not there."""
     img, leaf = _curved_leaf()
-    sick = _afflict(img, leaf)
-    strict = mx.vegetation_mask(sick, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
-                                CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
-    n, _, _, _ = cv2.connectedComponentsWithStats(strict.astype(np.uint8), 8)
-    assert n - 1 > 1
+    healthy = mx.vegetation_mask(img, CFG["EXG_THRESHOLD"], CFG["VEG_MIN_SATURATION"],
+                                 CFG["VEG_MORPH_KERNEL"], CFG["VEG_MIN_COMPONENT_PX"])
+    strict = mx.vegetation_mask(_afflict(img, leaf), CFG["EXG_THRESHOLD"],
+                                CFG["VEG_MIN_SATURATION"], CFG["VEG_MORPH_KERNEL"],
+                                CFG["VEG_MIN_COMPONENT_PX"])
+
+    assert float((healthy & leaf).sum()) / leaf.sum() > 0.99, \
+        "the undamaged leaf should pass the strict gate whole"
+    assert float((strict & leaf).sum()) / leaf.sum() < 0.85, \
+        "the affliction is not severe enough for this section to be about it"
 
 
 def test_plant_pixels_reconnects_the_afflicted_leaf():
