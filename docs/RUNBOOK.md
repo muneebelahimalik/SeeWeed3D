@@ -1034,6 +1034,70 @@ It converts `seg_manifest.json` into the Roboflow COCO layout RF-DETR expects
 (`train/`, `valid/`, `test/`, each with `_annotations.coco.json`), hardlinking
 images rather than copying where the filesystem allows, then trains.
 
+### Pre-flight — read this before a long run
+
+Between the COCO export and training, the dataset and your schedule are checked
+for the things that let a run finish, print a plausible metric, and mean
+nothing. The report goes to the console and to `RUN_DIR/preflight.json`.
+
+```
+  class                         train    valid     test
+  --------------------------------------------------------
+  onion_plant                     312       71       64
+  grass_weed                      188       44       39
+  other_weed                     1104      241      210
+  cutleaf_evening_primrose         11        0        4
+  FRAMES                          412       98       86
+
+  [!] 'cutleaf_evening_primrose' has 11 training instance(s) (floor 20). It will
+      report an AP near zero and drag the mean down for a reason unrelated to
+      the model.
+        -> Add "cutleaf_evening_primrose" to DROP_CLASSES in make_dataset.py
+  [!] 'cutleaf_evening_primrose' has 11 training instance(s) but NONE in val, so
+      nothing measures it. Early stopping and best-checkpoint selection are both
+      blind to this class.
+     412 train frames | effective batch 16 | 26 step(s)/epoch | 60 epochs = 1560 steps.
+```
+
+| Finding | Why it matters |
+|---|---|
+| class missing from **train** | *error*. The model can never predict it; downstream that reads as "looked and found nothing" |
+| class missing from **val** | nothing measures it, so early stopping and best-checkpoint selection are blind to it — and if it is the crop, "best" may be the checkpoint that segments onions worst |
+| class under ~20 instances | not learnable; reports AP≈0 and drags the mean for a reason unrelated to the model |
+| val under ~10 frames | epoch-to-epoch noise exceeds the gap between checkpoints, so "best" is largely chance |
+| no test split | every number comes from the set used to pick the checkpoint |
+| patience ≥ epochs | early stopping can never fire, whatever the config says |
+| effective batch ≥ dataset | an epoch is one optimiser step, so warmup/cosine/patience are all counting single steps |
+
+An error-level finding stops the run. `SKIP_PREFLIGHT = True` (or
+`--skip-preflight`) trains anyway — correct for a deliberate smoke test, which
+trips several of these on purpose. The findings are recorded either way.
+
+Standalone, without training:
+
+```powershell
+python -m seeweed3d.training.preflight --coco E:\Dataset_Vidalia\training1\rfdetr_v4\coco `
+    --epochs 60 --batch 2 --grad-accum 8 --patience 25
+```
+
+### As the dataset grows
+
+`EPOCHS` is a count of passes, so the same number means very different amounts
+of work at different dataset sizes — 60 epochs over 60 frames is ~240 optimiser
+steps at effective batch 16, and over 600 frames it is ~2,400. Pre-flight prints
+the step count; use that, not the epoch count, when comparing runs.
+
+| Setting | At ~60 frames | At ~600 frames | Why |
+|---|---|---|---|
+| `EPOCHS` | 60 | 30–40 | steps, not passes, are what the schedule spends; ten times the data does not need ten times the passes |
+| `PATIENCE` | 25 | 8–12 | patience counts epochs, and an epoch is now ten times longer |
+| `WORKERS` | 0 on Windows | 2–4 once a run is known to work | data loading starts to matter once an epoch is more than a handful of steps |
+| `COCO_DIR` | inside `RUN_DIR` | one shared path | the conversion is per-run otherwise, and it copies or links every image |
+| `LR` | 1e-4 | 1e-4 | leave it unless you change the effective batch; if you do, scale roughly linearly with `BATCH × GRAD_ACCUM` |
+
+Keep `SEED` fixed across rounds. Changing it re-draws every split and
+invalidates comparison with every earlier run.
+
 ### ⚠️ RESOLUTION is the setting that decides whether this is an upgrade
 
 RF-DETR-Seg's own default is **432×432**. On a 2208×1242 ZED frame that is a

@@ -125,6 +125,19 @@ CONFIG = {
     # stopped a 60-epoch run at 23 while other_weed was still improving.
     "PATIENCE": 25,
 
+    # -- Pre-flight ------------------------------------------------------------
+    # Before training starts, the dataset and this schedule are checked for the
+    # things that let a run finish, print a plausible metric, and mean nothing:
+    # a class with training instances but none in val (so the "best" checkpoint
+    # was never scored on it), a class with too few instances to learn at all,
+    # a patience longer than the run so early stopping can never fire, a val
+    # split too small for best-checkpoint selection to be better than chance.
+    #
+    # Findings are always written to RUN_DIR/preflight.json. True trains anyway
+    # despite an error-level finding - correct for a deliberate smoke test,
+    # which trips several of these on purpose.
+    "SKIP_PREFLIGHT": False,
+
     # -- Loss weights ----------------------------------------------------------
     # None = the model's defaults (mask_ce 5.0, mask_dice 5.0, cls 1.0).
     #
@@ -204,6 +217,7 @@ def main(cfg=None):
           link=c["LINK_IMAGES"], overwrite=True,
           early_stopping=c["EARLY_STOPPING"], patience=c["PATIENCE"],
           use_ema=c["USE_EMA"], multi_scale=c["MULTI_SCALE"],
+          skip_preflight=c.get("SKIP_PREFLIGHT", False),
           lr_scheduler=c["LR_SCHEDULER"], warmup_epochs=c["WARMUP_EPOCHS"],
           mask_ce_coef=c["MASK_CE_COEF"], mask_dice_coef=c["MASK_DICE_COEF"],
           cls_coef=c["CLS_COEF"], track=c["TRACK"],
