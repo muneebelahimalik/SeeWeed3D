@@ -75,7 +75,7 @@ from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
 # ##   ONLY_SESSIONS  -  MUST list your WEED-ONLY sessions                   ##
 # #############################################################################
 
-DATASET_ROOT   = r"E:\Dataset_Vidalia\Weeds_3_good"
+DATASET_ROOT   = r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_"
 SAM_VERSION    = "sam3"
 SAM_CHECKPOINT = r"E:\Models\sam3.pt"
 
@@ -91,7 +91,7 @@ CONFIG = {
 
     # Weed-only sessions. Empty = every session under sessions/ (only correct if
     # ALL of them are weed-only recordings).
-    "ONLY_SESSIONS": [],
+    "ONLY_SESSIONS": ["Visit2_20260210_164149"],
 
     "CVAT_READY_SUBDIR":  "cvat_ready",
     "FLAGGED_RGB_SUBDIR": "flagged_rgb",
@@ -315,7 +315,7 @@ CONFIG = {
     # other are exactly where a single-class assumption is most dangerous, and
     # calling an onion a weed is the worst error this project can make. Give
     # the ambiguous stretch to prelabel_mixed_sam3.py, or leave it out.
-    "ONLY_FRAMES": {},
+    "ONLY_FRAMES": {"Visit2_20260210_164149": ["170-1200"]},
     "SAVE_PREVIEWS": True,
     # 0.5 halves every boundary you are trying to judge. Raise to 1.0 when the
     # question is mask precision rather than "did anything get detected".

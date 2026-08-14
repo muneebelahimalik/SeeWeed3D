@@ -66,7 +66,7 @@ from common.vegetation import white_balance as _white_balance  # noqa: E402
 # ##                    (needs `huggingface-cli login` for the gated repo).    ##
 # #############################################################################
 
-DATASET_ROOT   = r"E:\Dataset_Vidalia\onions_20260108_1"
+DATASET_ROOT   = r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_"
 SAM_VERSION    = "sam3"        # "sam3" | "sam3.1"
 # e.g. r"C:\Users\mm17889\models\sam3\sam3.1_multiplex.pt". None => auto-download.
 SAM_CHECKPOINT = r"E:\Models\sam3.pt"
@@ -94,7 +94,7 @@ CONFIG = {
 
     # Which sessions to prelabel. Empty = every session found under sessions/.
     # These MUST be onion-only recordings.
-    "ONLY_SESSIONS": [],
+    "ONLY_SESSIONS": ["Visit2_20260210_164149"],
 
     # -- Preprocessing ---------------------------------------------------------
     # Gray-world white balance neutralises a colour-cast before segmentation.
@@ -177,7 +177,7 @@ CONFIG = {
     # other are exactly where a single-class assumption is most dangerous, and
     # calling an onion a weed is the worst error this project can make. Give
     # the ambiguous stretch to prelabel_mixed_sam3.py, or leave it out.
-    "ONLY_FRAMES": {},
+    "ONLY_FRAMES": {"Visit2_20260210_164149": ["1205-1950"]},
     "SAVE_PREVIEWS": True,       # overlay JPGs for fast eyeballing / FiftyOne
     "PREVIEW_SCALE": 0.5,
 }
