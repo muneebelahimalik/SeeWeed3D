@@ -348,7 +348,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
           drop_classes=(), keep_empty_frames=False, require_lep="auto",
-          include_frames=None, exclude_frames=None):
+          include_frames=None, exclude_frames=None, stratify_by_scene=True):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -554,9 +554,36 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
 
     # -- splits -------------------------------------------------------------
     per_session = Counter(f.session_id for f in frames)
+    # Read what each session actually IS from its own meta/session.json, so the
+    # allocator can keep same-morning drives together and give every split its
+    # share of onion-only, weed-only and mixed scenes. Without this the `scene`
+    # and `date` fields are empty and every session looks interchangeable - and
+    # with a handful of sessions it is entirely ordinary for every mixed drive
+    # to land in train, leaving a validation set that never once exercises the
+    # crop-vs-weed decision.
+    from common.session_meta import find_session_meta, unknown_scene_report
+    metas = {s: find_session_meta(img_roots, s)
+             for s in sorted(per_session) if s}
     infos = [sp.SessionInfo(session_id=s, n_frames=n,
-                            class_counts=report.per_session.get(s, {}))
+                            class_counts=report.per_session.get(s, {}),
+                            scene=metas.get(s, {}).get("scene", "unknown"),
+                            date=metas.get(s, {}).get("date", ""),
+                            field_id=metas.get(s, {}).get("field_id", ""),
+                            camera=metas.get(s, {}).get("camera", ""))
              for s, n in sorted(per_session.items()) if s]
+
+    gaps = unknown_scene_report(list(metas.values()))
+    if gaps["no_session_json"]:
+        print(f"\n  [!] no meta/session.json for "
+              f"{', '.join(gaps['no_session_json'])} - these sessions are "
+              f"allocated without scene information.")
+        print(f"      Looked under: "
+              f"{', '.join(r.as_posix() for r in img_roots)}")
+    elif gaps["unknown_scene"]:
+        print(f"\n  [!] scene_hint missing or unrecognised for "
+              f"{', '.join(gaps['unknown_scene'])}. Set it in "
+              f"extract_sessions.py's INPUT_ROOTS (onion_only | weed_only | "
+              f"mixed) so splits can be balanced by scene.")
 
     # A session-level split is the ONLY one that measures generalisation, so it
     # is tried first - but it is not always possible or even safe, and both
@@ -570,7 +597,8 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     else:
         split_map = sp.assign_splits(infos, val_fraction, test_fraction, seed,
                                      holdout_val=holdout_val,
-                                     holdout_test=holdout_test)
+                                     holdout_test=holdout_test,
+                                     stratify_by_scene=stratify_by_scene)
         # Whole sessions are indivisible, so a fraction that rounds below one
         # session yields an EMPTY val: training then runs blind, saves no
         # checkpoint and reports no metric, hours later.
@@ -599,6 +627,25 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                                         if f.session_id})
         session_where = {s: k for k, v in split_map.items() for s in v}
         where = {f.item_id: session_where.get(f.session_id) for f in frames}
+
+        rep = sp.scene_representation(split_map, infos)
+        print("\n  Scene representation (sessions per split):")
+        for split in ("train", "val", "test"):
+            counts = rep["counts"].get(split) or {}
+            body = ", ".join(f"{k}={v}" for k, v in counts.items()) or "-"
+            print(f"      {split:<5} {body}")
+        # A split missing a scene is not an error - with few sessions it can be
+        # unavoidable - but it bounds what its numbers mean, and that bound is
+        # invisible in any metric the training run will print.
+        for split in ("val", "test"):
+            for scene in rep["missing"].get(split) or []:
+                cost = {"mixed": "the crop-vs-weed decision is never exercised "
+                                 "there",
+                        "weed_only": "weed recall is never measured there",
+                        "onion_only": "crop segmentation is never measured "
+                                      "there"}.get(scene, "")
+                print(f"  [!] {split} contains no {scene} session"
+                      f"{' - ' + cost if cost else ''}.")
     else:
         # Blocks WITHIN each session, so every session - and therefore every
         # class - is represented in train and in val.

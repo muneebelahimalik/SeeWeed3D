@@ -84,7 +84,23 @@ CONFIG = {
     # HOLD THESE OUT. A session you intend to use as a test set must never be
     # annotated into training, or the test set stops being one. This is the
     # only place that discipline is enforceable before the annotation happens.
+    #
+    # This matters more here than anywhere else in the project. Mining picks
+    # the frames the model finds HARDEST, and those are precisely the frames it
+    # would benefit most from having seen - so mining a test session does not
+    # merely leak it, it leaks it in the most flattering possible direction.
     "HOLDOUT_SESSIONS": [],
+
+    # -- The round ledger ------------------------------------------------------
+    # Skip frames already exported to a CVAT task nobody has finished. They are
+    # not annotated yet, so nothing in the dataset excludes them, and the model
+    # scores them exactly as it did last round - so without this they are
+    # selected again and the annotator gets a batch they are half way through.
+    # Release a task that will never be finished instead of turning this off:
+    #     python -m seeweed3d.training.al_round abandon --round N --dataset ...
+    "SKIP_FRAMES_IN_FLIGHT": True,
+    # Append this batch to al_rounds.json under DATASET_DIR.
+    "RECORD_ROUND": True,
 
     # Scan every Nth frame. Consecutive ZED frames are near-identical, so a
     # stride of 1 wastes inference on duplicates the diversity pass then throws
@@ -298,17 +314,42 @@ def mine(cfg=None):
         raise SystemExit(f"ERROR: checkpoint not found: {ckpt}\n"
                          f"Train one first: seeweed3d/training/train_model.py")
 
+    from training import al_rounds
+
     done = labelled_item_ids(c["DATASET_DIR"])
+    # Frames already exported to an unfinished CVAT task are NOT annotated yet,
+    # so nothing in the dataset excludes them - and the model scores them
+    # exactly as it did last round, so they are selected again. The annotator
+    # then receives a batch they have half-done and the round buys less than it
+    # should.
+    ledger = al_rounds.load_ledger(c["DATASET_DIR"])
+    in_flight = (al_rounds.frames_in_flight(ledger)
+                 if c.get("SKIP_FRAMES_IN_FLIGHT", True) else set())
     frames = pool_frames(c["SESSIONS_ROOT"], c.get("ONLY_SESSIONS"),
                          c.get("HOLDOUT_SESSIONS"), c.get("STRIDE", 1),
-                         c.get("MAX_SCAN", 0), done)
+                         c.get("MAX_SCAN", 0), done | in_flight)
     if not frames:
         raise SystemExit(
             f"ERROR: no unlabelled frames under {c['SESSIONS_ROOT']}.\n"
-            f"{len(done)} item_ids are already annotated and were skipped; "
-            f"check ONLY_SESSIONS / HOLDOUT_SESSIONS.")
+            f"{len(done)} item_ids are already annotated and {len(in_flight)} "
+            f"are out with an annotator; both were skipped. Check "
+            f"ONLY_SESSIONS / HOLDOUT_SESSIONS, or release a stale round with "
+            f"al_rounds.abandon().")
     print(f"  pool: {len(frames)} frames | {len(done)} already annotated "
           f"and skipped")
+    if in_flight:
+        print(f"        {len(in_flight)} more are out with an annotator from "
+              f"round(s) "
+              f"{', '.join(str(r['round']) for r in ledger['rounds'] if r.get('state') == 'exported')}"
+              f" and were skipped too")
+    if not c.get("HOLDOUT_SESSIONS"):
+        # Not fatal - a project genuinely may not have reserved one yet - but
+        # it is the mistake that cannot be undone after the fact, because the
+        # frames a model finds hardest are exactly the ones it most benefits
+        # from having seen.
+        print("  [!] HOLDOUT_SESSIONS is empty. Nothing is reserved as a test "
+              "set, so any session mined here can end up in training and stop "
+              "being a measurement.")
 
     seg = build_segmenter(c["BACKEND"], str(ckpt), conf=c["CONF"],
                           device=device)
@@ -348,6 +389,22 @@ def mine(cfg=None):
     report["export"] = ex
     report["checkpoint"] = str(ckpt)
     report["conf"] = c["CONF"]
+
+    if c.get("RECORD_ROUND", True):
+        rnd = al_rounds.record_export(
+            c["DATASET_DIR"],
+            item_ids=[s["frame_id"] for s in report["selected"]],
+            checkpoint=str(ckpt), conf=c["CONF"],
+            batch_size=c["BATCH_SIZE"], out_dir=c["OUT_DIR"],
+            sessions_root=c["SESSIONS_ROOT"],
+            holdout_sessions=c.get("HOLDOUT_SESSIONS") or [])
+        report["round"] = rnd["round"]
+        print(f"\n  recorded as active-learning round {rnd['round']} in "
+              f"{al_rounds.ledger_path(c['DATASET_DIR'])}")
+        print(f"  after these come back from CVAT and are merged, run:")
+        print(f"      python -m seeweed3d.training.al_round merge "
+              f"--dataset \"{c['DATASET_DIR']}\"")
+
     Path(c["OUT_DIR"], "batch_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
 

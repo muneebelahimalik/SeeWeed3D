@@ -60,8 +60,74 @@ def _stable_rank(session_id, seed):
     return zlib.crc32(f"{seed}:{session_id}".encode()) / 0xFFFFFFFF
 
 
+def _quota_walk(ordered, val_fraction, test_fraction, out, guarantee_train):
+    """Fill test, then val, then train from an ordered list of groups.
+
+    Groups are indivisible, so the quotas are targets rather than exact counts.
+    `guarantee_train` reserves the last group for training when nothing has
+    reached training yet - used for the dataset as a whole, and NOT per scene
+    stratum, where a single-session stratum going wholly to val is a legitimate
+    outcome that the overall guarantee still backstops."""
+    total = sum(len(m) for _, m in ordered)
+    want_test = int(round(test_fraction * total))
+    want_val = int(round(val_fraction * total))
+    n_test = n_val = 0
+    n_groups = len(ordered)
+    for gi, (_, members) in enumerate(ordered):
+        members = sorted(members)
+        last = (n_groups - gi - 1) == 0
+        if guarantee_train and last and not out["train"]:
+            # A whole group is indivisible, so a few large groups can consume
+            # the val/test quotas and leave training empty. A dataset with no
+            # training data is never the intended outcome of a fraction.
+            out["train"].extend(members)
+        elif n_test < want_test:
+            out["test"].extend(members)
+            n_test += len(members)
+        elif n_val < want_val:
+            out["val"].extend(members)
+            n_val += len(members)
+        else:
+            out["train"].extend(members)
+
+
+def scene_of(members, scene_by_session):
+    """One scene label for a whole group.
+
+    A group is sessions of the same bed on the same morning, so they normally
+    share a scene. When they do not, the group is called `mixed`: the group is
+    indivisible, so whichever split receives it receives every scene in it, and
+    claiming it as onion_only would overstate what the split contains."""
+    seen = {scene_by_session.get(s, "unknown") for s in members}
+    seen.discard("unknown")
+    if not seen:
+        return "unknown"
+    return seen.pop() if len(seen) == 1 else "mixed"
+
+
+def scene_representation(split_map, sessions):
+    """{split: {scene: n_sessions}} plus the scenes missing from each split.
+
+    This is the check the whole stratification exists for: a val set with no
+    mixed scene in it never measures the crop-vs-weed decision, and a test set
+    with no weed_only scene never measures weed recall."""
+    scene_by = {i.session_id: (i.scene or "unknown")
+                for i in sessions if isinstance(i, SessionInfo)}
+    present = {s for s in scene_by.values() if s != "unknown"}
+    counts, missing = {}, {}
+    for split in SPLITS:
+        c = Counter(scene_by.get(s, "unknown") for s in split_map.get(split, []))
+        counts[split] = dict(sorted(c.items()))
+        # Only meaningful for a split that received anything at all: an empty
+        # test set is a separate, louder problem and is reported elsewhere.
+        missing[split] = (sorted(present - set(c)) if split_map.get(split)
+                          else [])
+    return {"counts": counts, "missing": missing}
+
+
 def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
-                  holdout_val=(), holdout_test=(), holdout_train=()):
+                  holdout_val=(), holdout_test=(), holdout_train=(),
+                  stratify_by_scene=True):
     """Assign every session to exactly one split.
 
     sessions: [SessionInfo] or [str]. Returns {split: [session_id]}.
@@ -70,7 +136,19 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
     allocated by a deterministic rank, walking whole METADATA GROUPS (same
     date+field+camera) so two recordings of the same bed on the same morning
     cannot be separated - they are near-duplicates and would leak just as a
-    frame split does."""
+    frame split does.
+
+    stratify_by_scene (default True) runs that allocation SEPARATELY WITHIN
+    each scene - onion_only, weed_only, mixed - so each split gets its share of
+    each. Without it the allocation is blind to what a session contains, and
+    with a handful of sessions it is entirely ordinary for every mixed drive to
+    land in train: the model then looks excellent on a validation set that
+    never exercises the crop-vs-weed decision at all. Sessions whose scene is
+    unknown form their own stratum and are allocated as before.
+
+    Stratification changes only WHICH sessions go where, never the guarantees:
+    holdouts still win, the result is still deterministic for a seed, and
+    training is still never left empty."""
     infos = [SessionInfo(session_id=s) if isinstance(s, str) else s
              for s in sessions]
     if not infos:
@@ -120,31 +198,32 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
     ordered = sorted(groups.items(),
                      key=lambda kv: _stable_rank(sorted(kv[1])[0], seed))
 
-    total_free = len(free)
-    want_test = int(round(test_fraction * total_free))
-    want_val = int(round(val_fraction * total_free))
-    n_test = n_val = 0
-    n_groups = len(ordered)
-
-    for gi, (_, members) in enumerate(ordered):
-        members = sorted(members)
-        remaining_after = n_groups - gi - 1
-        # A whole group is indivisible, so a few large groups can consume the
-        # val/test quotas and leave training empty. Reserve the last group for
-        # training when nothing has reached it yet - a dataset with no training
-        # data is never the intended outcome of a fraction.
-        must_train = (not out["train"]) and remaining_after == 0
-
-        if must_train:
-            out["train"].extend(members)
-        elif n_test < want_test:
-            out["test"].extend(members)
-            n_test += len(members)
-        elif n_val < want_val:
-            out["val"].extend(members)
-            n_val += len(members)
-        else:
-            out["train"].extend(members)
+    if not stratify_by_scene:
+        _quota_walk(ordered, val_fraction, test_fraction, out,
+                    guarantee_train=True)
+    else:
+        scene_by = {i.session_id: (i.scene or "unknown") for i in infos}
+        strata = defaultdict(list)
+        for key, members in ordered:
+            strata[scene_of(members, scene_by)].append((key, members))
+        # Deterministic stratum order, and the LARGEST first. A scene with many
+        # sessions can absorb the rounding losses that a one-session stratum
+        # cannot, and processing it first means the overall train guarantee is
+        # normally satisfied before the thin strata are reached - so a stratum
+        # of one session is free to go to val, which is exactly the
+        # representation this is for.
+        for _, groups_in_scene in sorted(
+                strata.items(),
+                key=lambda kv: (-sum(len(m) for _, m in kv[1]), kv[0])):
+            _quota_walk(groups_in_scene, val_fraction, test_fraction, out,
+                        guarantee_train=False)
+        if not out["train"]:
+            # Every stratum was thin enough to be consumed by val/test. Give
+            # back the largest group rather than shipping an empty training set.
+            biggest = max(ordered, key=lambda kv: (len(kv[1]), sorted(kv[1])[0]))
+            for split in ("val", "test"):
+                out[split] = [s for s in out[split] if s not in biggest[1]]
+            out["train"].extend(sorted(biggest[1]))
 
     for s in SPLITS:
         out[s] = sorted(out[s])

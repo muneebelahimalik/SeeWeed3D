@@ -22,7 +22,7 @@ on PATH.
 | [3b. Mine the pool](#3b-mine-the-pool-for-the-next-batch) | pick the frames worth annotating next | **yes** |
 | [3c. Split-zone drives](#3c-one-drive-that-changes-scene--weeds-first-then-onions) | weeds for a stretch, then onions — one session, two runs | **yes** |
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
-| [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
+| [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset, split by session + scene | no |
 | [6. Train Stage A](#6-train-stage-a-segmentation) | crop-vs-weed segmentation | **yes** |
 | [6b. RF-DETR-Seg](#6b-train-stage-a-on-rf-detr-seg-the-advanced-path) | same, on the real-time transformer backend | **yes** |
 | [7. Train Stage B](#7-train-stage-b-lep) | LEP localization | **yes** |
@@ -33,6 +33,7 @@ on PATH.
 **Related:** [project history](../CHANGELOG.md) ·
 [extraction fidelity](extraction_quality.md) ·
 [growing the dataset](dataset_growth.md) ·
+[dataset assembly + splits](dataset_assembly.md) ·
 [mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
@@ -528,6 +529,36 @@ prelabelers produce, so §4 is unchanged.
 Frames already in `seg_manifest.json` are excluded automatically — the same
 frame in two CVAT tasks produces two versions of the truth.
 
+### The round ledger
+
+Every batch is recorded in `al_rounds.json` under `DATASET_DIR`, which does two
+things a single mining pass cannot.
+
+**Frames still out with an annotator are skipped.** A frame exported into a
+CVAT task nobody has finished is not *annotated* yet, so nothing in the dataset
+excludes it, and the same model scores it exactly as before — so without the
+ledger it is selected again and you get a batch you are half way through.
+
+**A round can be measured.** Active learning claims these frames teach more
+than random ones; the test is the metric before against the metric after, on an
+unchanged test set.
+
+```powershell
+# after the corrected export is merged with make_dataset.py
+python -m seeweed3d.training.al_round merge  --dataset E:\Dataset_Vidalia\training1
+
+# after retraining and evaluating on the SAME test set
+python -m seeweed3d.training.al_round metrics --dataset E:\Dataset_Vidalia\training1 `
+    --round 3 --before ...\run4\eval\metrics.json --after ...\run5\eval\metrics.json
+
+python -m seeweed3d.training.al_round status  --dataset E:\Dataset_Vidalia\training1
+```
+
+A round whose deltas are ~0 is information, not a failure: the bottleneck is
+somewhere frame selection cannot reach, usually a class with too few instances
+to be learnable. Release a task that will never be finished with
+`al_round abandon --round N`, rather than switching `SKIP_FRAMES_IN_FLIGHT` off.
+
 > These are **predictions, not truth**. The model's recall is well under 1.0, so
 > every frame is missing instances — and the ones it missed are worth the most.
 > Open `analysis/report.html` and look at the missed-weed gallery before
@@ -715,6 +746,30 @@ E:\CVAT_exports\
 ## 5. Merge exports and build the training dataset
 
 This is where the separate CVAT tasks become one dataset.
+
+> **`docs/dataset_assembly.md` is the full guide** — how merging resolves
+> labels by name rather than by id, why the split is by session and never by
+> frame, how scene stratification keeps onion-only / weed-only / mixed
+> represented in every split, and how to pin a test session so scores stay
+> comparable across rounds.
+
+Two settings decide whether the numbers this dataset produces mean anything:
+
+```python
+# A FIXED test set. A fraction re-draws it every time the dataset grows, so two
+# rounds' scores are computed on different rulers and no improvement can be
+# attributed to anything.
+"HOLDOUT_TEST_SESSIONS": ["vid3_20260108_110444"],
+
+# Allocate within each scene, so val and test each contain onion-only,
+# weed-only AND mixed. Measured over 40 seeds on a six-session set, the
+# scene-blind allocator gave validation a single scene one time in four.
+"STRATIFY_BY_SCENE": True,
+```
+
+The scene comes from each session's `meta/session.json` (`scene_hint`, set per
+input folder in `extract_sessions.py`). If you never set it, the build says so
+and allocates those sessions without scene information.
 
 ### What `--images-root` / `IMAGES_ROOT` means
 
