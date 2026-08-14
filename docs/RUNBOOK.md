@@ -22,7 +22,7 @@ on PATH.
 | [3b. Mine the pool](#3b-mine-the-pool-for-the-next-batch) | pick the frames worth annotating next | **yes** |
 | [3c. Split-zone drives](#3c-one-drive-that-changes-scene--weeds-first-then-onions) | weeds for a stretch, then onions — one session, two runs | **yes** |
 | [4. CVAT](#4-annotate-and-correct-in-cvat) | human verification | no |
-| [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset | no |
+| [5. Merge + prepare](#5-merge-exports-and-build-the-training-dataset) | many CVAT tasks → one dataset, split by session + scene | no |
 | [6. Train Stage A](#6-train-stage-a-segmentation) | crop-vs-weed segmentation | **yes** |
 | [6b. RF-DETR-Seg](#6b-train-stage-a-on-rf-detr-seg-the-advanced-path) | same, on the real-time transformer backend | **yes** |
 | [7. Train Stage B](#7-train-stage-b-lep) | LEP localization | **yes** |
@@ -33,6 +33,7 @@ on PATH.
 **Related:** [project history](../CHANGELOG.md) ·
 [extraction fidelity](extraction_quality.md) ·
 [growing the dataset](dataset_growth.md) ·
+[dataset assembly + splits](dataset_assembly.md) ·
 [mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
@@ -528,6 +529,36 @@ prelabelers produce, so §4 is unchanged.
 Frames already in `seg_manifest.json` are excluded automatically — the same
 frame in two CVAT tasks produces two versions of the truth.
 
+### The round ledger
+
+Every batch is recorded in `al_rounds.json` under `DATASET_DIR`, which does two
+things a single mining pass cannot.
+
+**Frames still out with an annotator are skipped.** A frame exported into a
+CVAT task nobody has finished is not *annotated* yet, so nothing in the dataset
+excludes it, and the same model scores it exactly as before — so without the
+ledger it is selected again and you get a batch you are half way through.
+
+**A round can be measured.** Active learning claims these frames teach more
+than random ones; the test is the metric before against the metric after, on an
+unchanged test set.
+
+```powershell
+# after the corrected export is merged with make_dataset.py
+python -m seeweed3d.training.al_round merge  --dataset E:\Dataset_Vidalia\training1
+
+# after retraining and evaluating on the SAME test set
+python -m seeweed3d.training.al_round metrics --dataset E:\Dataset_Vidalia\training1 `
+    --round 3 --before ...\run4\eval\metrics.json --after ...\run5\eval\metrics.json
+
+python -m seeweed3d.training.al_round status  --dataset E:\Dataset_Vidalia\training1
+```
+
+A round whose deltas are ~0 is information, not a failure: the bottleneck is
+somewhere frame selection cannot reach, usually a class with too few instances
+to be learnable. Release a task that will never be finished with
+`al_round abandon --round N`, rather than switching `SKIP_FRAMES_IN_FLIGHT` off.
+
 > These are **predictions, not truth**. The model's recall is well under 1.0, so
 > every frame is missing instances — and the ones it missed are worth the most.
 > Open `analysis/report.html` and look at the missed-weed gallery before
@@ -715,6 +746,30 @@ E:\CVAT_exports\
 ## 5. Merge exports and build the training dataset
 
 This is where the separate CVAT tasks become one dataset.
+
+> **`docs/dataset_assembly.md` is the full guide** — how merging resolves
+> labels by name rather than by id, why the split is by session and never by
+> frame, how scene stratification keeps onion-only / weed-only / mixed
+> represented in every split, and how to pin a test session so scores stay
+> comparable across rounds.
+
+Two settings decide whether the numbers this dataset produces mean anything:
+
+```python
+# A FIXED test set. A fraction re-draws it every time the dataset grows, so two
+# rounds' scores are computed on different rulers and no improvement can be
+# attributed to anything.
+"HOLDOUT_TEST_SESSIONS": ["vid3_20260108_110444"],
+
+# Allocate within each scene, so val and test each contain onion-only,
+# weed-only AND mixed. Measured over 40 seeds on a six-session set, the
+# scene-blind allocator gave validation a single scene one time in four.
+"STRATIFY_BY_SCENE": True,
+```
+
+The scene comes from each session's `meta/session.json` (`scene_hint`, set per
+input folder in `extract_sessions.py`). If you never set it, the build says so
+and allocates those sessions without scene information.
 
 ### What `--images-root` / `IMAGES_ROOT` means
 
@@ -978,6 +1033,70 @@ python seeweed3d/training/train_model_rfdetr.py
 It converts `seg_manifest.json` into the Roboflow COCO layout RF-DETR expects
 (`train/`, `valid/`, `test/`, each with `_annotations.coco.json`), hardlinking
 images rather than copying where the filesystem allows, then trains.
+
+### Pre-flight — read this before a long run
+
+Between the COCO export and training, the dataset and your schedule are checked
+for the things that let a run finish, print a plausible metric, and mean
+nothing. The report goes to the console and to `RUN_DIR/preflight.json`.
+
+```
+  class                         train    valid     test
+  --------------------------------------------------------
+  onion_plant                     312       71       64
+  grass_weed                      188       44       39
+  other_weed                     1104      241      210
+  cutleaf_evening_primrose         11        0        4
+  FRAMES                          412       98       86
+
+  [!] 'cutleaf_evening_primrose' has 11 training instance(s) (floor 20). It will
+      report an AP near zero and drag the mean down for a reason unrelated to
+      the model.
+        -> Add "cutleaf_evening_primrose" to DROP_CLASSES in make_dataset.py
+  [!] 'cutleaf_evening_primrose' has 11 training instance(s) but NONE in val, so
+      nothing measures it. Early stopping and best-checkpoint selection are both
+      blind to this class.
+     412 train frames | effective batch 16 | 26 step(s)/epoch | 60 epochs = 1560 steps.
+```
+
+| Finding | Why it matters |
+|---|---|
+| class missing from **train** | *error*. The model can never predict it; downstream that reads as "looked and found nothing" |
+| class missing from **val** | nothing measures it, so early stopping and best-checkpoint selection are blind to it — and if it is the crop, "best" may be the checkpoint that segments onions worst |
+| class under ~20 instances | not learnable; reports AP≈0 and drags the mean for a reason unrelated to the model |
+| val under ~10 frames | epoch-to-epoch noise exceeds the gap between checkpoints, so "best" is largely chance |
+| no test split | every number comes from the set used to pick the checkpoint |
+| patience ≥ epochs | early stopping can never fire, whatever the config says |
+| effective batch ≥ dataset | an epoch is one optimiser step, so warmup/cosine/patience are all counting single steps |
+
+An error-level finding stops the run. `SKIP_PREFLIGHT = True` (or
+`--skip-preflight`) trains anyway — correct for a deliberate smoke test, which
+trips several of these on purpose. The findings are recorded either way.
+
+Standalone, without training:
+
+```powershell
+python -m seeweed3d.training.preflight --coco E:\Dataset_Vidalia\training1\rfdetr_v4\coco `
+    --epochs 60 --batch 2 --grad-accum 8 --patience 25
+```
+
+### As the dataset grows
+
+`EPOCHS` is a count of passes, so the same number means very different amounts
+of work at different dataset sizes — 60 epochs over 60 frames is ~240 optimiser
+steps at effective batch 16, and over 600 frames it is ~2,400. Pre-flight prints
+the step count; use that, not the epoch count, when comparing runs.
+
+| Setting | At ~60 frames | At ~600 frames | Why |
+|---|---|---|---|
+| `EPOCHS` | 60 | 30–40 | steps, not passes, are what the schedule spends; ten times the data does not need ten times the passes |
+| `PATIENCE` | 25 | 8–12 | patience counts epochs, and an epoch is now ten times longer |
+| `WORKERS` | 0 on Windows | 2–4 once a run is known to work | data loading starts to matter once an epoch is more than a handful of steps |
+| `COCO_DIR` | inside `RUN_DIR` | one shared path | the conversion is per-run otherwise, and it copies or links every image |
+| `LR` | 1e-4 | 1e-4 | leave it unless you change the effective batch; if you do, scale roughly linearly with `BATCH × GRAD_ACCUM` |
+
+Keep `SEED` fixed across rounds. Changing it re-draws every split and
+invalidates comparison with every earlier run.
 
 ### ⚠️ RESOLUTION is the setting that decides whether this is an upgrade
 

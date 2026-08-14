@@ -44,14 +44,56 @@ generalises, and until that changes you cannot tell whether new data helped.
 Pick one session you have **not** annotated, from a different drive — ideally a
 different time of day. Annotate ~40 frames of it. Never train on it.
 
+Pin it in **two** places — they enforce different halves of the same rule:
+
 ```python
-# mine_pool.py — so it can never be drawn into an annotation batch
+# mine_pool.py — so active learning can never draw it into an annotation batch
 "HOLDOUT_SESSIONS": ["vid3_20260108_110444"],
+
+# make_dataset.py — so the split allocator puts it in test, every rebuild
+"HOLDOUT_TEST_SESSIONS": ["vid3_20260108_110444"],
 ```
 
-Then `make_dataset.py` puts it in `test`, and `analyze_run.py --split test`
-gives you a number that means something. Everything below is measured against
-it; without it you are tuning against a mirror.
+`analyze_run.py --split test` then gives you a number that means something.
+Everything below is measured against it; without it you are tuning against a
+mirror.
+
+**Why pinning beats `TEST_FRACTION`.** A fraction re-draws the test set every
+time the dataset grows, so round 3's score and round 4's score are computed on
+different rulers and no improvement can be attributed to anything. A pinned
+session is a fixed ruler. `TEST_FRACTION` stays useful only before you have a
+session to spare.
+
+> ### Never mine the test set
+>
+> It is tempting to run inference over the held-out session and annotate the
+> frames the model does worst on — they look like the most informative frames
+> in the project, and they are. That is exactly why it destroys the test set.
+>
+> Active learning selects the frames the model finds *hardest*. Moving those
+> into training does not merely leak the test set, it leaks it in the single
+> most flattering direction available: you remove the model's worst cases from
+> the measurement and add them to its training data. The score jumps, the field
+> performance does not, and nothing in any metric will tell you.
+>
+> Mine the **unlabelled pool**. `HOLDOUT_SESSIONS` in `mine_pool.py` is the
+> enforcement point, and the round ledger records the holdout with every round
+> so a set quietly redefined between rounds shows up in the history.
+
+### Choosing which session
+
+Not the most convenient one. Prefer, in order:
+
+1. **A different day** from every training session — same-day drives share
+   light, soil moisture and growth stage, so a same-day test set measures much
+   less than it appears to.
+2. **A mixed scene** if you have one. Mixed is the only scene where the
+   crop-vs-weed decision is actually exercised; an onion-only test set never
+   measures weed recall, and a weed-only one never measures crop segmentation.
+3. **Classes that also exist in training.** A class living only in the test
+   session is unlearnable and drags the mean down for a reason that has nothing
+   to do with the model. `make_dataset.py` detects this and falls back to frame
+   blocks rather than shipping it silently.
 
 **This is 40 frames that do not improve the model at all**, and it is still the
 highest-value annotation you can do right now, because it is what tells you
@@ -88,8 +130,65 @@ one go: the ranking is only as good as the model doing it, so a mid-course
 model picks better frames than a stale one. Three rounds of 60 beats one round
 of 180.
 
+### The round ledger
+
+`mine_pool.py` records every batch it exports in `al_rounds.json` under your
+`DATASET_DIR`. Two failures appear only once you run the loop repeatedly, and
+neither is visible to a single pass.
+
+**Re-sending frames that are already out.** Mining skips frames that are
+already *annotated*, by reading the built dataset. But a frame exported last
+Tuesday and sitting in a CVAT task nobody has finished is not annotated yet —
+so the same model scores it the same way and sends it again. The annotator gets
+a batch they are half way through. The ledger marks those frames *in flight*
+and the next round excludes them.
+
+**Never finding out whether a round worked.** Active learning is a claim: that
+*these* frames teach more than random ones. The test is the metric before
+against the metric after, on a test set that has not changed. Without recording
+it the loop becomes ritual — annotate 60, retrain, feel progress.
+
 ```powershell
-python seeweed3d/annotation/mine_pool.py     # edit the config block first
+# 1. rank the pool and export a batch; records round N
+python seeweed3d/annotation/mine_pool.py
+
+# 2. correct in CVAT, export Datumaro 1.0, then merge it
+python seeweed3d/training/make_dataset.py
+
+# 3. tell the ledger the frames came back
+python -m seeweed3d.training.al_round merge --dataset E:\Dataset_Vidalia\training1
+
+# 4. retrain, then evaluate on the UNCHANGED test set
+python seeweed3d/training/train_model_rfdetr.py
+python seeweed3d/evaluation/analyze_run.py --run ...\run5 --split test
+
+# 5. attach the measurement to the round
+python -m seeweed3d.training.al_round metrics --dataset E:\Dataset_Vidalia\training1 `
+    --round 3 --before ...\run4\eval\metrics.json --after ...\run5\eval\metrics.json
+
+# any time: what has each round bought?
+python -m seeweed3d.training.al_round status --dataset E:\Dataset_Vidalia\training1
+```
+
+```
+  round  state      frames  metric change
+  -----  ---------  ------  -------------
+      1  merged         60  mAP +0.0620, weed_recall +0.0910
+      2  merged         60  mAP +0.0180, weed_recall +0.0240
+      3  exported       60  -
+```
+
+**A round that moved nothing is information, not a failure.** It means the
+bottleneck is somewhere frame selection cannot reach — most often a class with
+too few instances to be learnable at all, which no amount of additional frames
+of *other* classes will fix. Check `dataset_report.json` for per-class instance
+counts before running the same round again, larger.
+
+If a CVAT task will never be finished, release its frames deliberately rather
+than turning the check off:
+
+```powershell
+python -m seeweed3d.training.al_round abandon --dataset ... --round 2 --reason "task abandoned"
 ```
 
 ---

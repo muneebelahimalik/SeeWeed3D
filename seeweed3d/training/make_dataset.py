@@ -157,6 +157,38 @@ CONFIG = {
     "VAL_FRACTION": 0.2,
     "TEST_FRACTION": 0.0,
 
+    # PIN a session to test or val by name. This is how a real held-out test
+    # set is created, and it is the single most valuable thing you can do for
+    # the credibility of every number this project reports.
+    #
+    # A fraction gives you a test set that changes whenever the dataset grows,
+    # so two rounds' scores are not comparable and no improvement can be
+    # attributed to anything. A pinned session gives you a FIXED ruler.
+    #
+    # Pin it BEFORE you annotate it into training - mine_pool.py's
+    # HOLDOUT_SESSIONS is where that is enforced - and never mine a pinned
+    # session, because active learning selects the frames the model finds
+    # hardest, which are exactly the frames it would most benefit from having
+    # seen.
+    #
+    # Choose one that is representative rather than convenient: a different
+    # day from the training sessions, and ideally a mixed scene, since mixed is
+    # the only scene where the crop-vs-weed decision is actually exercised.
+    "HOLDOUT_TEST_SESSIONS": [],
+    "HOLDOUT_VAL_SESSIONS": [],
+
+    # Allocate the remaining sessions SEPARATELY WITHIN each scene, so
+    # onion_only, weed_only and mixed are each represented in train, val and
+    # test in proportion. The scene comes from each session's own
+    # meta/session.json (`scene_hint`, set in extract_sessions.py).
+    #
+    # Without this the allocator is blind to what a session contains. Measured
+    # on three onion and three mixed sessions across 40 seeds, validation ended
+    # up holding a single scene on 10 of them - a one-in-four chance of a val
+    # set that never exercises the crop-vs-weed decision, and nothing in any
+    # printed metric would tell you.
+    "STRATIFY_BY_SCENE": True,
+
     # Frames discarded at each real block boundary. They still overlap heavily,
     # so a buffer is the cheapest way to buy genuine separation.
     "GAP_FRAMES": 2,
@@ -266,6 +298,9 @@ def main(cfg=None):
         gap_frames=c["GAP_FRAMES"], seed=c["SEED"],
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],
         strict=not c["ALLOW_ERRORS"],
+        holdout_test=c.get("HOLDOUT_TEST_SESSIONS") or (),
+        holdout_val=c.get("HOLDOUT_VAL_SESSIONS") or (),
+        stratify_by_scene=c.get("STRATIFY_BY_SCENE", True),
     )
     print("\nNext: edit seeweed3d/training/train_model.py and run it.\n")
 

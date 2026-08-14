@@ -33,6 +33,7 @@ import argparse
 import json
 import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -163,9 +164,17 @@ def export(dataset_dir, out_dir, images_root=None, link=False, overwrite=False):
         coco = build_coco(frames, classes, names)
         (sdir / "_annotations.coco.json").write_text(
             json.dumps(coco), encoding="utf-8")
+        # Per-class counts, not just the total. A split's instance count says
+        # nothing about whether a class is learnable, and "1200 instances"
+        # made almost entirely of one class is the normal shape of this
+        # dataset - so the total is the number least worth looking at.
+        per_class = Counter()
+        for a in coco["annotations"]:
+            per_class[classes[a["category_id"] - 1]] += 1
         summary["splits"][dirname] = {
             "frames": len(coco["images"]),
             "instances": len(coco["annotations"]),
+            "per_class": {c: per_class.get(c, 0) for c in classes},
         }
 
     if "train" not in summary["splits"]:

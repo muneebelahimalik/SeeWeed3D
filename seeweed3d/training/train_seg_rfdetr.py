@@ -102,7 +102,8 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
           mask_ce_coef=None, mask_dice_coef=None, cls_coef=None,
           multi_scale=True, track="auto", allow_default_resolution=False,
           lr_scheduler="cosine", warmup_epochs=1.0,
-          tversky_alpha=0.5, tversky_beta=0.5, focal_gamma=1.0, extra=None):
+          tversky_alpha=0.5, tversky_beta=0.5, focal_gamma=1.0, extra=None,
+          skip_preflight=False):
     if variant not in VARIANTS:
         raise SystemExit(f"ERROR: --variant must be one of "
                          f"{sorted(VARIANTS)}; got {variant!r}")
@@ -163,6 +164,28 @@ def train(dataset_dir, out_dir, variant="medium", resolution=None, epochs=60,
     print(f"  COCO export -> {coco}")
     for k, v in summary["splits"].items():
         print(f"    {k:<6} {v['frames']:>4} frames  {v['instances']:>5} inst")
+
+    # Every finding here is something that lets a run finish, print a plausible
+    # metric, and mean nothing - a class with no validation instances so the
+    # "best" checkpoint was never scored on it, a patience longer than the run
+    # so early stopping cannot fire. None of them raise during training, which
+    # is exactly why they are checked before it starts rather than after.
+    from training import preflight as pf
+    pf_summary, findings = pf.preflight(
+        coco, epochs=epochs, batch=batch, grad_accum=grad_accum,
+        patience=patience, early_stopping=early_stopping)
+    print(pf.format_report(pf_summary, findings))
+    (out / "preflight.json").write_text(
+        json.dumps({"findings": [f.to_dict() for f in findings],
+                    "splits": pf_summary.get("splits", {})}, indent=2),
+        encoding="utf-8")
+    errors = [f for f in findings if f.level == "error"]
+    if errors and not skip_preflight:
+        raise SystemExit(
+            "\nERROR: pre-flight found "
+            + f"{len(errors)} problem(s) that would make this run's numbers "
+            + "meaningless. Fix them, or pass --skip-preflight to train anyway "
+            + "(the findings are recorded in preflight.json either way).")
 
     # Now that every guard has passed, create the store and confirm lightning
     # will use it. rfdetr's own tensorboard/mlflow flags do the logging -
@@ -406,6 +429,9 @@ def main(argv=None):
                    help="hardlink images instead of copying")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--no-early-stopping", action="store_true")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="train even when pre-flight finds a problem that would "
+                        "make the run's numbers meaningless")
     p.add_argument("--patience", type=int, default=25,
                    help="EVALUATED epochs without improvement before stopping. "
                         "Higher than rfdetr's 10 on purpose: the re-initialised "
@@ -444,7 +470,7 @@ def main(argv=None):
           multi_scale=not a.no_multi_scale, track=a.track,
           lr_scheduler=a.lr_scheduler, warmup_epochs=a.warmup_epochs,
           tversky_alpha=a.tversky_alpha, tversky_beta=a.tversky_beta,
-          focal_gamma=a.focal_gamma,
+          focal_gamma=a.focal_gamma, skip_preflight=a.skip_preflight,
           allow_default_resolution=a.allow_default_resolution)
 
 
