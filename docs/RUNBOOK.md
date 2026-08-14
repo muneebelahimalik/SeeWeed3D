@@ -34,6 +34,7 @@ on PATH.
 [extraction fidelity](extraction_quality.md) ·
 [growing the dataset](dataset_growth.md) ·
 [dataset assembly + splits](dataset_assembly.md) ·
+[depth-assisted masking](depth_assisted_masking.md) ·
 [mixed-scene prelabeling](mixed_prelabeling.md) ·
 [experiment tracking](experiment_tracking.md) ·
 [edge model research](edge_model_research.md) ·
