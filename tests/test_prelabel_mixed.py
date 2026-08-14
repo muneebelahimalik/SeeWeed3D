@@ -940,3 +940,144 @@ def test_a_gap_can_be_left_at_the_transition(tmp_path):
                             dict(CFG, ONLY_FRAMES={"sess": ["50-70"]}),
                             "STUB", _stub([c1, c2]))
     assert a["frames"] == 3 and b["frames"] == 3      # 30 and 40 left out
+
+
+# --------------------------------------------------------------------------- #
+# Merged plants: the watershed was given one marker for a region holding four
+# --------------------------------------------------------------------------- #
+def _rosettes(centres, r=45, size=400, neck=10):
+    """Several compact plants joined into ONE vegetation component."""
+    m = np.zeros((size, size), np.uint8)
+    for cx, cy in centres:
+        cv2.circle(m, (cx, cy), r, 1, -1)
+    for a, b in zip(centres, centres[1:]):
+        cv2.line(m, a, b, 1, neck)
+    return m.astype(bool)
+
+
+def test_a_group_of_merged_plants_is_split_into_one_each():
+    """The reported symptom: `a seed grew 91x`. Four rosettes grown together
+    are one connected component, so a single SAM proposal inherits the lot."""
+    veg = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    seed = _disc(veg.shape, 90, 120, 12)
+    extra = mx.peak_seeds(veg, [seed], CFG)
+    assert len(extra) >= 3, "the other three crowns got no marker"
+
+
+def test_a_component_sam_seeded_properly_is_never_re_seeded():
+    """The guard that stops this fragmenting correct work: only components
+    whose flood would exceed the growth trigger are touched."""
+    veg = _rosettes([(90, 150), (230, 150)])
+    seeds = [_disc(veg.shape, 90, 150, 40), _disc(veg.shape, 230, 150, 40)]
+    assert mx.peak_seeds(veg, seeds, CFG) == []
+
+
+def test_a_long_leaf_is_never_split_however_under_seeded():
+    """A ribbon has a FLAT distance ridge, so every point along it is a local
+    maximum. Without the elongation guard this shattered a synthetic onion leaf
+    into 11 instances - the exact failure that closed this door in the weed
+    prelabeler."""
+    leaf = np.zeros((300, 300), np.uint8)
+    cv2.line(leaf, (30, 150), (270, 150), 1, 24)
+    leaf = leaf.astype(bool)
+    tiny = _disc(leaf.shape, 40, 150, 5)
+    assert mx.peak_seeds(leaf, [tiny], CFG) == []
+
+
+def test_the_elongation_ceiling_is_what_rejects_it():
+    """Stated as a measurement so the threshold can be re-derived rather than
+    trusted: area over the area of the component's own largest inscribed disc."""
+    def spread(m):
+        dt = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 5)
+        return int(m.sum()) / (np.pi * float(dt.max()) ** 2)
+
+    leaf = np.zeros((300, 300), np.uint8)
+    cv2.line(leaf, (30, 150), (270, 150), 1, 24)
+    one = np.zeros((300, 300), np.uint8)
+    cv2.circle(one, (150, 150), 50, 1, -1)
+
+    four = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    # The ceiling has to sit between the largest merge worth splitting and the
+    # most compact ribbon. Measured: 1.0 one rosette, 2.1 two merged, 4.1 four
+    # merged, 12.1 a straight leaf, 27.3 a curved one - so 8 has margin on both
+    # sides rather than being a value that happens to work.
+    assert spread(one.astype(bool)) < 1.5
+    assert spread(_rosettes([(90, 150), (230, 150)])) < 3
+    assert spread(four) < CFG["SPLIT_MAX_SPREAD"]
+    assert spread(leaf.astype(bool)) > CFG["SPLIT_MAX_SPREAD"]
+
+
+def test_splitting_can_be_turned_off():
+    veg = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    seed = _disc(veg.shape, 90, 120, 12)
+    assert mx.peak_seeds(veg, [seed], dict(CFG, SPLIT_UNDERSEEDED=False)) == []
+
+
+def test_the_split_never_creates_a_marker_where_sam_already_has_one():
+    """Two markers inside one plant would cut it in half."""
+    veg = _rosettes([(90, 150), (230, 150)])
+    seed = _disc(veg.shape, 90, 150, 12)
+    for extra in mx.peak_seeds(veg, [seed], CFG):
+        assert not (extra & seed).any()
+
+
+def test_an_unseeded_component_is_left_to_the_recall_backstop():
+    """Creating instances from the vegetation prior alone is what
+    RECOVER_UNSEEDED governs. Doing it here would make that switch a lie."""
+    veg = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    assert mx.peak_seeds(veg, [], CFG) == []
+
+
+def test_a_recovered_blob_of_several_plants_is_still_split():
+    """Same question one step later - and only when the backstop is on."""
+    veg = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    assert len(mx.split_recovered([veg], CFG)) >= 3
+    assert mx.split_recovered([veg], dict(CFG, SPLIT_UNDERSEEDED=False)) == [veg]
+
+
+def test_a_recovered_single_plant_survives_whole():
+    one = np.zeros((300, 300), np.uint8)
+    cv2.circle(one, (150, 150), 50, 1, -1)
+    out = mx.split_recovered([one.astype(bool)], CFG)
+    assert len(out) == 1 and int(out[0].sum()) == int(one.sum())
+
+
+def test_split_instances_are_reported_apart_from_sam_and_recovery():
+    """Three recall paths now; conflating them hides which one is working."""
+    veg = _rosettes([(90, 120), (230, 120), (90, 280), (230, 280)])
+    bgr = np.full(veg.shape + (3,), (70, 45, 60), np.uint8)
+    bgr[veg] = (35, 110, 40)
+    _, _, qa = mx.analyze_frame(bgr, [_disc(veg.shape, 90, 120, 12)], CFG)
+    assert qa["split"] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Speckle on pale, pebbly ground
+# --------------------------------------------------------------------------- #
+def test_the_instance_floor_matches_the_weed_prelabeler():
+    """On the same imagery the weed prelabeler produces no speckle at 250 and
+    this path produced hundreds at 120."""
+    wd = load_script("annotation/prelabel_weeds_sam3.py")
+    assert mx.CONFIG["MIN_INSTANCE_AREA_PX"] >= wd.CONFIG["MIN_INSTANCE_AREA_PX"]
+
+
+def test_the_recall_backstop_floor_is_above_gravel():
+    """A colour index cannot tell green-tinted mineral from a cotyledon, so
+    size is the discriminator that is left."""
+    assert mx.CONFIG["RECOVER_MIN_AREA_PX"] >= 400
+
+
+def test_the_area_histogram_reports_both_populations():
+    areas = [180, 200, 220, 240, 5200, 6100, 7000]
+    line = mx.area_histogram(areas, mx.CONFIG)
+    assert "p50=" in line and "max=7000" in line
+
+
+def test_the_histogram_calls_out_a_speckled_run():
+    speckle = [150] * 90 + [6000] * 10
+    assert "suspect speckle" in mx.area_histogram(speckle, mx.CONFIG)
+
+
+def test_the_histogram_stays_quiet_on_a_clean_run():
+    clean = [4000, 5200, 6100, 7000, 9000]
+    assert "suspect speckle" not in mx.area_histogram(clean, mx.CONFIG)

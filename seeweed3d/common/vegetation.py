@@ -116,3 +116,55 @@ def component_boxes(mask, min_area_px, pad_px=0, max_boxes=None,
     out.sort(key=lambda t: -t[0])
     boxes = [b for _, b in out]
     return boxes[:max_boxes] if max_boxes else boxes
+
+
+def distance_peaks(mask, rel_threshold=0.5, min_separation_px=15, max_peaks=32,
+                   min_saddle_drop=0.0):
+    """Distinct interior maxima of a mask's distance transform.
+
+    For a rosette this lands on the crown; for two rosettes grown into each
+    other it lands on both crowns. That is the signal that one connected blob
+    holds more than one plant, and it is the only geometric evidence available
+    once colour has already merged them.
+
+    Iteratively takes the distance-transform maximum and suppresses a disc
+    around it, so a single plant yields one peak however lobed it is. Returns
+    [((x, y), radius), ...], strongest first.
+
+    rel_threshold keeps a peak only if its inscribed radius is at least this
+    fraction of the largest - a leaf tip is a shallow maximum and must not read
+    as a second plant.
+
+    min_saddle_drop IS THE ONE THAT MATTERS ON REAL TISSUE, and 0 (off) is only
+    correct for callers that already tolerate over-detection. A LONG LEAF HAS A
+    FLAT DISTANCE RIDGE: every point along a ribbon of constant width has the
+    same inscribed radius, so relative height alone accepts a dozen "peaks"
+    strung along one leaf and shatters it. Between two genuine crowns the
+    transform DIPS at the neck where the canopies meet; along one leaf it does
+    not. So a candidate is kept only if it is still separated from every
+    accepted peak at a level `min_saddle_drop` of its own radius - the standard
+    persistence test, and the only thing here that distinguishes "two plants"
+    from "one plant twice as long".
+    """
+    dt = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    gmax = float(dt.max())
+    if gmax <= 0:
+        return []
+    work, peaks = dt.copy(), []
+    while len(peaks) < max_peaks:
+        _, v, _, loc = cv2.minMaxLoc(work)
+        if v <= 0 or v < rel_threshold * gmax:
+            break
+        if peaks and min_saddle_drop > 0:
+            # Cut the transform at a level below this candidate. If an already
+            # accepted peak survives in the SAME piece, the two sit on one
+            # ridge with no neck between them - one plant, not two.
+            _, lab = cv2.connectedComponents(
+                (dt >= min_saddle_drop * v).astype(np.uint8), 8)
+            here = lab[loc[1], loc[0]]
+            if here and any(lab[p[1], p[0]] == here for p, _ in peaks):
+                cv2.circle(work, loc, int(max(min_separation_px, v)), 0, -1)
+                continue
+        peaks.append((loc, float(v)))
+        cv2.circle(work, loc, int(max(min_separation_px, v)), 0, -1)
+    return peaks

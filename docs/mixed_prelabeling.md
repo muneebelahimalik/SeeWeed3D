@@ -379,6 +379,102 @@ rather than silently becoming class 1.
 
 ---
 
+## The two failures on pale, pebbly ground
+
+Both were reported from the same real session, and they have nothing to do with
+each other. The weed-only and onion-only prelabelers were clean on the same
+imagery, which is itself the clue.
+
+### Hundreds of tiny false masks on the gravel
+
+**Cause: this path was far more permissive than the weed prelabeler, on
+substrate where a colour index cannot win.** A pale, pebbly surface has
+brown-olive stones that clear ExG, green-dominance and saturation. The weed
+prelabeler ships its own recall backstop **off** for exactly this reason —
+"a colour-only signal fundamentally cannot always tell green organic matter
+from green-tinted mineral" — while this module runs its backstop on, and ran it
+at a much lower floor:
+
+| | weed prelabeler | mixed (before) | mixed (now) |
+|---|---|---|---|
+| `MIN_INSTANCE_AREA_PX` | 250 | 120 | **250** |
+| recall backstop | off | on at 150 px | on at **600 px** |
+
+`RECOVER_MIN_VEG_SCORE` looks like the defence and is not: `vegetation_score()`
+is a logistic ramp times two gates, so it **saturates at 1.0** for anything
+comfortably past the threshold. An olive pebble and a leaf both score ~1.0, and
+a 0.90 floor rejects neither.
+
+So **size is the discriminator that is left**, and its right value depends on
+your mount height. `LOG_INSTANCE_AREAS` (on by default) prints the distribution
+at the end of a run:
+
+```
+  instance area px: p10=180 p50=214 p90=5900 max=18400 | 74 of 96 (77%) under
+  4x the 250px floor - suspect speckle, raise MIN_INSTANCE_AREA_PX and
+  RECOVER_MIN_AREA_PX
+```
+
+Two populations an order of magnitude apart is what gravel-plus-plants looks
+like. Put the floor in the gap between them rather than inheriting a number
+measured on somebody else's rig.
+
+### Several plants coming out as one instance
+
+**Cause: the watershed was given one marker for a region containing four
+plants.** When canopies grow into each other they are one connected vegetation
+component, so if SAM proposed a mask for only one of them, that single marker
+inherits the whole group. `review_first.txt` reports it exactly:
+
+```
+Visit1_..._000190.png   a seed grew 91x - possible merge
+Visit1_..._000220.png   a seed grew 58x - possible merge; one instance covers 16% of the frame
+```
+
+The watershed is not at fault and needs no change — it was simply under-seeded.
+`peak_seeds()` adds a marker at each distance-transform crown, and only for
+components whose flood would exceed `SPLIT_GROWTH_TRIGGER` (8×, the same ratio
+the review line prints). A component SAM seeded properly is never touched.
+
+> **Why this is safe here when peak-splitting was abandoned in the weed
+> prelabeler.** There, a *finished mask* was cut in half on peak evidence, and a
+> leaf reaching away from the crown severed one plant into two annotations.
+> Here the peaks only add **markers before the flood**, so a doubtful peak
+> produces two markers the watershed may divide almost evenly rather than a
+> guaranteed cut.
+>
+> That alone was not enough. **A long leaf has a flat distance ridge** — every
+> point along a ribbon of constant width has the same inscribed radius — so the
+> first version of this shattered a synthetic onion leaf into **11 instances**.
+> Two guards fix it:
+>
+> - **Elongation ceiling** (`SPLIT_MAX_SPREAD`, default 8). Component area over
+>   the area of its own largest inscribed disc. Measured: one rosette **1.0**,
+>   two merged **2.1**, four merged **4.1**, a straight leaf **12.1**, a curved
+>   one **27.3**. Above the ceiling the component is a ribbon and is left alone.
+> - **Saddle test** (`SPLIT_PEAK_SADDLE_DROP`, default 0.7). A candidate crown
+>   is kept only if it is still separated from every accepted crown at a level
+>   below its own radius — between two real crowns the transform dips at the
+>   neck; along one leaf it does not. Measured on a 240 px ribbon: 10 peaks
+>   without it, **1** with it, while two rosettes joined by a thin neck still
+>   give 2.
+>
+> **The accepted cost: two merged onions are not split either** — two ribbons
+> are still a ribbon. That is the safe direction. A missed split leaves one
+> shape to divide by hand; a false split teaches the model that a fragment of a
+> leaf is a whole plant.
+
+Set `SPLIT_UNDERSEEDED = False` to restore the previous behaviour, where only
+SAM could ever separate two plants. The console now counts the three recall
+paths separately, so you can see which is doing the work:
+
+```
+  coverage: 96.4% of vegetation inside an instance
+  | 88 from SAM + 14 split from a merge + 6 recovered
+```
+
+---
+
 ## Tuning for mask quality
 
 In rough order of how much they matter.
@@ -392,7 +488,10 @@ In rough order of how much they matter.
 | `VEG_CLOSE_KERNEL_PX` | Off by default. Last resort if bridging alone still leaves gaps — check a **touching-plants** preview afterward, since this one can smooth over a real neck between two different plants |
 | `SEED_NMS_IOU` | Lower merges more duplicate proposals into one plant; raise keeps more distinct instances. Symptom of too high: one plant with two overlapping outlines |
 | `SEED_ERODE_PX` | Only affects where two instances meet. Raise if the cut between touching plants looks like SAM's boundary rather than the neck |
-| `RECOVER_MIN_VEG_SCORE` | Raise if the backstop is inventing plants on bare ground |
+| `MIN_INSTANCE_AREA_PX` / `RECOVER_MIN_AREA_PX` | **The speckle controls.** On pebbly ground these are the only thing separating a cotyledon from a stone — `RECOVER_MIN_VEG_SCORE` saturates and cannot. Calibrate from `LOG_INSTANCE_AREAS`, not from a number measured elsewhere |
+| `SPLIT_GROWTH_TRIGGER` | Raise if single plants come apart; lower if merges survive. Denominated in the same ratio `review_first.txt` prints |
+| `SPLIT_MAX_SPREAD` | The elongation ceiling that keeps splitting off leaves. Lower to be more conservative; 0 would disable splitting entirely — use `SPLIT_UNDERSEEDED` for that instead |
+| `RECOVER_MIN_VEG_SCORE` | Weaker than it looks — the score saturates at 1.0 for anything past the threshold, so gravel and leaf both clear 0.90. Use the area floors |
 | `REVIEW_*` | Triage thresholds only — they change which frames get listed, never a mask |
 
 ### `instances.csv` tells you which failure you have

@@ -165,8 +165,8 @@ def test_an_unknown_round_number_is_refused(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_mine_pool_offers_the_in_flight_switch():
     mp = load_script("annotation/mine_pool.py")
-    assert mp.CONFIG["SKIP_FRAMES_IN_FLIGHT"] is True
-    assert mp.CONFIG["RECORD_ROUND"] is True
+    assert isinstance(mp.CONFIG["SKIP_FRAMES_IN_FLIGHT"], bool)
+    assert isinstance(mp.CONFIG["RECORD_ROUND"], bool)
 
 
 def test_mine_pool_excludes_in_flight_frames_from_the_pool(tmp_path):

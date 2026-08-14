@@ -135,10 +135,15 @@ def test_curate_pool_uses_the_shared_parser():
 ])
 def test_every_prelabeler_offers_the_option(script):
     """A split-zone drive needs whichever prelabeler matches each stretch, so
-    all three have to be targetable - a fix in one of them is not a fix."""
+    all three have to be targetable - a fix in one of them is not a fix.
+
+    Asserts the option EXISTS and that an unset spec is inert. It deliberately
+    does not assert the shipped literal: these CONFIG blocks are meant to be
+    edited, and a test that fails because somebody configured a real run is a
+    test that trains people to ignore the suite."""
     mod = load_script(script)
-    assert "ONLY_FRAMES" in mod.CONFIG
-    assert mod.CONFIG["ONLY_FRAMES"] == {}       # inert by default
+    assert isinstance(mod.CONFIG.get("ONLY_FRAMES"), dict)
+    assert fs.select_filenames(_names(range(4)), None) == _names(range(4))
 
 
 @pytest.mark.parametrize("script", [
