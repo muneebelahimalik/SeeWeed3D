@@ -380,6 +380,32 @@ python seeweed3d/annotation/prelabel_weeds_sam3.py
 python seeweed3d/annotation/prelabel_onions_sam3.py
 ```
 
+### "Why did it only prelabel 15 frames?"
+
+Every prelabeler reads the **curated** pool — rows marked `dropped` in
+`meta/pool.csv` are skipped, which is the whole point of §2. Each session now
+says what that cost:
+
+```
+  [Visit1_20250221_142227] pool: 754 frame(s) | 739 dropped by curation
+      (redundant with the previous frame=739) -> prelabelling 15
+  [!] curation removed 98% of this session. If that was not deliberate, restore
+      it with extraction/curate_pool.py (RESTORE_ALL = True) and re-curate with
+      a lower MIN_SHIFT_FRAC.
+```
+
+Three separate things can shrink a run, and the line separates them:
+
+| Cause | Fix |
+|---|---|
+| **curation dropped them** — `MIN_SHIFT_FRAC` too high is the usual reason | `curate_pool.py` with `RESTORE_ALL = True`, then re-curate lower |
+| **`ONLY_FRAMES`** restricted the run to one stretch | clear it, or widen the range |
+| **`LIMIT_PER_SESSION`** capped it for a trial | set it to `None` |
+
+A fourth: only the sessions under `DATASET_ROOT/sessions/` are seen at all, and
+`ONLY_SESSIONS` narrows that further. `dir E:\...\sessions` tells you how many
+exist; the run's first line tells you how many it selected.
+
 **Check `auto_labels_weeds/<session>/preview/` before doing a full run.** Look
 for red outlines on bare ground — if you see them, the vegetation prior is
 false-positiving on your substrate and you should tighten
