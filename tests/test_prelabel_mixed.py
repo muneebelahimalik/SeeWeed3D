@@ -1100,3 +1100,127 @@ def test_the_histogram_calls_out_a_speckled_run():
 def test_the_histogram_stays_quiet_on_a_clean_run():
     clean = [4000, 5200, 6100, 7000, 9000]
     assert "suspect speckle" not in mx.area_histogram(clean, mx.CONFIG)
+
+
+# --------------------------------------------------------------------------- #
+# The height veto. Depth is a VETO and a scale reference, never a boundary
+# source - so the tests are about what it deletes, and about what it refuses to
+# delete because it could not measure it.
+# --------------------------------------------------------------------------- #
+def _depth_scene(h=300, w=400, camera_mm=1200.0):
+    """A frame with a raised plant and a flat, green-tinted stone. Colour sees
+    one class; only height separates them."""
+    bgr = np.full((h, w, 3), SOIL, np.uint8)
+    plant = _disc((h, w), 110, 150, 26)
+    stone = _disc((h, w), 290, 150, 24)
+    bgr[plant] = LEAF
+    bgr[stone] = LEAF                       # indistinguishable to the prior
+    depth = np.full((h, w), camera_mm, np.float32)
+    depth[plant] -= 18.0                    # 18 mm proud of the ground
+    return bgr, depth, plant, stone
+
+
+def test_a_flat_green_stone_is_vetoed_and_the_plant_is_not():
+    bgr, depth, plant, stone = _depth_scene()
+    inst, _, qa = mx.analyze_frame(bgr, [_disc(bgr.shape[:2], 110, 150, 8),
+                                         _disc(bgr.shape[:2], 290, 150, 8)],
+                                   dict(CFG, MIN_INSTANCE_AREA_MM2=None),
+                                   depth_mm=depth)
+    kept = np.zeros(bgr.shape[:2], bool)
+    for i in inst:
+        kept |= i["mask"]
+    assert (kept & plant).sum() > plant.sum() * 0.5
+    assert (kept & stone).sum() < stone.sum() * 0.2
+    assert qa["height_dropped_flat"] >= 1
+
+
+def test_without_depth_nothing_changes():
+    """Every v1 session depends on this: no depth means the previous behaviour
+    exactly, not a degraded version of the new one."""
+    bgr, depth, _, _ = _depth_scene()
+    sam = [_disc(bgr.shape[:2], 110, 150, 8), _disc(bgr.shape[:2], 290, 150, 8)]
+    a, _, qa_a = mx.analyze_frame(bgr, sam, CFG)
+    assert "height_dropped_flat" not in qa_a
+    assert len(a) == 2                       # the stone survives, as before
+
+
+def test_an_instance_whose_height_cannot_be_measured_is_kept():
+    """THE safety property. Stereo drops out on thin tissue - which is exactly
+    the small plants a height gate would otherwise delete - so absence of
+    evidence must never act as evidence of flatness."""
+    bgr, depth, plant, stone = _depth_scene()
+    depth[plant] = np.nan                    # no depth on the plant at all
+    inst, _, qa = mx.analyze_frame(bgr, [_disc(bgr.shape[:2], 110, 150, 8)],
+                                   dict(CFG, MIN_INSTANCE_AREA_MM2=None),
+                                   depth_mm=depth)
+    assert qa["height_abstained"] >= 1
+    kept = np.zeros(bgr.shape[:2], bool)
+    for i in inst:
+        kept |= i["mask"]
+    assert (kept & plant).any(), "a plant with no depth was deleted"
+
+
+def test_the_measured_fraction_gates_the_abstention():
+    bgr, depth, plant, _ = _depth_scene()
+    ys, xs = np.nonzero(plant)
+    depth[plant] = np.nan
+    depth[ys[:15], xs[:15]] = 1182.0         # a sliver of valid depth
+    _, _, qa = mx.analyze_frame(bgr, [_disc(bgr.shape[:2], 110, 150, 8)],
+                                dict(CFG, MIN_INSTANCE_AREA_MM2=None),
+                                depth_mm=depth)
+    assert qa["height_abstained"] >= 1
+
+
+def test_the_threshold_is_what_decides():
+    """Raising it past the plant's real height deletes the plant - which is
+    what makes HEIGHT_MIN_MM the setting to be careful with."""
+    bgr, depth, _, _ = _depth_scene()
+    sam = [_disc(bgr.shape[:2], 110, 150, 8)]
+    low = dict(CFG, HEIGHT_MIN_MM=6.0, MIN_INSTANCE_AREA_MM2=None)
+    high = dict(CFG, HEIGHT_MIN_MM=40.0, MIN_INSTANCE_AREA_MM2=None)
+    assert len(mx.analyze_frame(bgr, sam, low, depth_mm=depth)[0]) == 1
+    assert len(mx.analyze_frame(bgr, sam, high, depth_mm=depth)[0]) == 0
+
+
+def test_the_numbers_behind_a_decision_travel_with_the_instance():
+    """height_mm and area_mm2 reach instances.csv, so a veto is auditable
+    rather than a count in a console line."""
+    bgr, depth, _, _ = _depth_scene()
+    inst, _, _ = mx.analyze_frame(bgr, [_disc(bgr.shape[:2], 110, 150, 8)],
+                                  dict(CFG, MIN_INSTANCE_AREA_MM2=None),
+                                  depth_mm=depth, fx=1000.0, fy=1000.0)
+    assert inst[0]["height_mm"] == pytest.approx(18, abs=4)
+    assert inst[0]["area_mm2"] > 0
+    assert 0 <= inst[0]["height_measured_frac"] <= 1
+
+
+def test_the_metric_floor_replaces_the_pixel_one_where_depth_allows():
+    """A session recorded at a different boom height must not need its own
+    thresholds - that is the whole point of measuring in mm^2."""
+    bgr, depth, _, _ = _depth_scene()
+    sam = [_disc(bgr.shape[:2], 110, 150, 8)]
+    generous = dict(CFG, MIN_INSTANCE_AREA_MM2=1.0)
+    absurd = dict(CFG, MIN_INSTANCE_AREA_MM2=1e6)
+    assert len(mx.analyze_frame(bgr, sam, generous, depth_mm=depth,
+                                fx=1000.0, fy=1000.0)[0]) == 1
+    out, _, qa = mx.analyze_frame(bgr, sam, absurd, depth_mm=depth,
+                                  fx=1000.0, fy=1000.0)
+    assert out == [] and qa["height_dropped_small"] >= 1
+
+
+def test_the_metric_floor_is_inert_without_calibration():
+    """No fx/fy means no mm^2, and a floor that cannot be computed must not
+    silently delete everything."""
+    bgr, depth, _, _ = _depth_scene()
+    out, _, _ = mx.analyze_frame(bgr, [_disc(bgr.shape[:2], 110, 150, 8)],
+                                 dict(CFG, MIN_INSTANCE_AREA_MM2=1e6),
+                                 depth_mm=depth)
+    assert len(out) == 1
+
+
+def test_the_frame_reports_its_ground_relief():
+    """So a bed-and-furrow field is visible as one, rather than the surface
+    estimate quietly doing something unverifiable."""
+    bgr, depth, _, _ = _depth_scene()
+    _, _, qa = mx.analyze_frame(bgr, [], dict(CFG), depth_mm=depth)
+    assert "ground_relief_mm" in qa and "depth_measured_frac" in qa

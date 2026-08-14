@@ -374,6 +374,58 @@ CONFIG = {
     # - a cotyledon must survive it.
     "MIN_INSTANCE_AREA_PX": 250,
 
+    # -- Depth: height above the soil (v2 / metric-depth sessions only) --------
+    # A colour index cannot tell a green-tinted pebble from a cotyledon. Height
+    # can: the pebble is at 0 mm above the ground and the cotyledon is not.
+    # This is a physical discriminator where MIN_INSTANCE_AREA_PX is only a
+    # proxy, so where depth exists it is the better gate.
+    #
+    # "auto"  use it when the session's meta/session.json says depth_kind is
+    #         "metric" AND a depth PNG exists for the frame. Sessions without
+    #         real depth - every v1 AVI capture - behave exactly as before.
+    # False   never use depth.
+    # True    require it, and fail loudly if the session has none, so a run you
+    #         believe is depth-gated cannot quietly not be.
+    "USE_DEPTH_HEIGHT": "auto",
+
+    # An instance whose body sits below this many millimetres above the local
+    # soil surface is not a plant. Set it well under your smallest real
+    # seedling: this DELETES instances, and a cotyledon deleted here never
+    # reaches the annotator to be recovered.
+    "HEIGHT_MIN_MM": 6.0,
+
+    # THE SAFETY PROPERTY: an instance whose height cannot be measured is KEPT.
+    # Stereo drops out on thin tissue and at every depth discontinuity - which
+    # is to say, on exactly the small plants this would otherwise delete - so
+    # the veto only fires when enough of the instance carries real depth to
+    # support the claim. Below this fraction it abstains and the instance
+    # survives on the colour and size gates as before.
+    "HEIGHT_MIN_MEASURED_FRAC": 0.25,
+    # Percentile of the instance's height used as its height. A mask's edge
+    # pixels straddle the plant's own depth discontinuity and read low; the
+    # question is how tall the BODY is.
+    "HEIGHT_PERCENTILE": 75.0,
+
+    # Soil-surface estimation. See perception/ground.py for the measured
+    # trade-off - briefly, small tiles follow beds and furrows, and passing the
+    # vegetation mask (which this always does) removes the reason to want large
+    # ones.
+    "GROUND_TILE_PX": 32,
+    "GROUND_PERCENTILE": 80.0,
+
+    # Confidence gating, when the capture wrote a confidence map AND
+    # session.json records which direction means "good". An unknown polarity
+    # disables gating rather than guessing: guessing backwards keeps precisely
+    # the pixels it was meant to drop.
+    "DEPTH_MIN_CONFIDENCE": 0.30,
+
+    # -- Metric size floor (needs depth AND calibration) -----------------------
+    # The mm^2 counterpart of MIN_INSTANCE_AREA_PX. When depth and fx/fy are
+    # both available this is used INSTEAD, which is what stops every size
+    # threshold in the pipeline depending on how high the boom happens to be.
+    # None = keep using pixels even where depth exists.
+    "MIN_INSTANCE_AREA_MM2": 40.0,
+
     # -- Frame-level safety ----------------------------------------------------
     "MAX_VEG_FRACTION": 0.5,          # more green than this = colour cast/glare
 
@@ -896,11 +948,82 @@ def instance_bbox(mask):
 # --------------------------------------------------------------------------- #
 # One frame
 # --------------------------------------------------------------------------- #
-def analyze_frame(bgr, sam_masks, cfg):
+def height_veto(instances, veg, depth_mm, cfg, conf=None, polarity=None,
+                fx=None, fy=None):
+    """Drop instances that are lying on the ground, and say what was decided.
+
+    THE ASYMMETRY THIS IS BUILT AROUND. Stereo drops out on thin, low-texture
+    tissue and fringes at every depth discontinuity - which is to say, on
+    exactly the small plants a height gate would otherwise delete. So an
+    instance whose height cannot be measured is KEPT. The veto only ever fires
+    on positive evidence that something is flat, never on absence of evidence
+    that it is not.
+
+    Returns (kept, qa). Every instance gains `height_mm` (None when
+    unmeasured), `height_measured_frac` and, where calibration allows it,
+    `area_mm2` - so the numbers behind a decision travel with the instance
+    into instances.csv rather than only into this function."""
+    from perception import ground as gr
+
+    valid = gr.confidence_mask(conf, polarity, cfg["DEPTH_MIN_CONFIDENCE"])
+    height, measured = gr.height_map(
+        depth_mm, veg=veg, valid=valid,
+        tile_px=cfg["GROUND_TILE_PX"], percentile=cfg["GROUND_PERCENTILE"],
+        smooth_tiles=0)
+    surface = gr.surface_report(depth_mm, veg=veg, valid=valid,
+                                tile_px=cfg["GROUND_TILE_PX"],
+                                percentile=cfg["GROUND_PERCENTILE"],
+                                smooth_tiles=0)
+
+    floor_mm2 = cfg.get("MIN_INSTANCE_AREA_MM2")
+    kept, dropped_flat, dropped_small, abstained = [], 0, 0, 0
+    for inst in instances:
+        h, frac = gr.instance_height(
+            inst["mask"], height, measured,
+            min_measured_frac=cfg["HEIGHT_MIN_MEASURED_FRAC"],
+            percentile=cfg["HEIGHT_PERCENTILE"])
+        inst["height_mm"] = None if h is None else round(h, 1)
+        inst["height_measured_frac"] = round(frac, 3)
+        a2 = gr.area_mm2(inst["mask"], depth_mm, fx, fy)
+        inst["area_mm2"] = None if a2 is None else round(a2, 1)
+
+        if h is None:
+            abstained += 1
+            kept.append(inst)
+            continue
+        if h < cfg["HEIGHT_MIN_MM"]:
+            dropped_flat += 1
+            continue
+        # The metric floor REPLACES the pixel one where it can be computed, so
+        # the threshold stops depending on mount height. Where it cannot be
+        # computed the pixel floor has already been applied upstream.
+        if floor_mm2 and a2 is not None and a2 < float(floor_mm2):
+            dropped_small += 1
+            continue
+        kept.append(inst)
+
+    return kept, {
+        "height_dropped_flat": dropped_flat,
+        "height_dropped_small": dropped_small,
+        "height_abstained": abstained,
+        "ground_relief_mm": surface["relief_mm"],
+        "depth_measured_frac": surface["measured_frac"],
+        "median_depth_mm": surface["median_depth_mm"],
+    }
+
+
+def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, conf=None,
+                  polarity=None, fx=None, fy=None):
     """Vegetation prior -> seeds -> watershed -> cleaned instances.
 
     Returns (instances, veg, qa). Pure CPU; the SAM call happens outside, which
-    is what makes every decision in this module testable without a GPU."""
+    is what makes every decision in this module testable without a GPU.
+
+    depth_mm, when given, is metric millimetres with NaN for invalid - see
+    perception/ground.py. It is a VETO and a scale reference only: colour still
+    owns every boundary, because stereo is least reliable exactly at the leaf
+    margins a mask is deciding. Omitting it reproduces the previous behaviour
+    exactly, which is what every v1 session relies on."""
     veg = plant_pixels(bgr, cfg)
     score = plant_confidence(bgr, veg, cfg)
     seeds = seed_masks(sam_masks, veg, cfg)
@@ -933,6 +1056,12 @@ def analyze_frame(bgr, sam_masks, cfg):
             "growth": round(area / max(1, sp), 2),
             "bbox": instance_bbox(m)})
 
+    depth_qa = {}
+    if depth_mm is not None:
+        instances, depth_qa = height_veto(instances, veg, depth_mm, cfg,
+                                          conf=conf, polarity=polarity,
+                                          fx=fx, fy=fy)
+
     union = np.zeros(veg.shape, bool)
     for inst in instances:
         union |= inst["mask"]
@@ -951,6 +1080,7 @@ def analyze_frame(bgr, sam_masks, cfg):
         "max_growth": max((i["growth"] for i in instances), default=0.0),
         "max_instance_frac": round(
             max((i["area_px"] for i in instances), default=0) / frame_px, 4),
+        **depth_qa,
     }
     return instances, veg, qa
 
@@ -1086,6 +1216,38 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
     print_pool_report(sid, session_dir, len(frames))
+
+    # Decided ONCE per session, not per frame: whether depth may be used at
+    # all, and with what calibration and confidence polarity. Deciding it here
+    # means a session that cannot support the veto says so before the GPU
+    # starts rather than silently skipping it 800 times.
+    from perception import ground as gr
+    want = cfg.get("USE_DEPTH_HEIGHT", "auto")
+    depth_kind = gr.session_depth_kind(session_dir)
+    use_depth = bool(want) and gr.has_metric_depth(session_dir)
+    if want is True and not use_depth:
+        sys.exit(
+            f"ERROR: [{sid}] USE_DEPTH_HEIGHT is True but this session's "
+            f"depth_kind is {depth_kind!r}, not 'metric'. Only v2 (MKV/FFV1) "
+            f"captures carry real millimetres; a v1 preview cannot be used as "
+            f"height. Set it to \"auto\" to skip depth on sessions that lack "
+            f"it, or drop this session from ONLY_SESSIONS.")
+    fx = fy = polarity = None
+    if use_depth:
+        fx, fy = gr.calibration(session_dir)
+        polarity = gr.confidence_polarity(session_dir)
+        print(f"  [{sid}] depth: metric | height veto on "
+              f"(>= {cfg['HEIGHT_MIN_MM']:.0f} mm above local soil)")
+        if fx is None:
+            print(f"  [!] no calibration.json - MIN_INSTANCE_AREA_MM2 cannot "
+                  f"be applied, falling back to the pixel floor.")
+        if polarity is None and (session_dir / "conf").is_dir():
+            print(f"  [!] a confidence map exists but session.json does not "
+                  f"record its polarity, so it is NOT used. Gating the wrong "
+                  f"way round keeps exactly the pixels it should drop.")
+    elif want:
+        print(f"  [{sid}] depth: {depth_kind} - height veto off, colour and "
+              f"pixel-size gates only")
     if not frames:
         print(f"  [{sid}] no pool frames - run extract_sessions.py first")
         return None
@@ -1101,7 +1263,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     coco, rows, flagged, review = PrelabelCoco(), [], [], []
     stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0,
              "recovered": 0, "split": 0, "veg_px": 0, "veg_covered_px": 0}
-    areas = []
+    areas, relief, depth_frac = [], [], []
 
     prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
@@ -1134,7 +1296,17 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
             exemplars = None
 
         sam_masks = sam_fn(predictor, proc, cfg, exemplars) if predictor else []
-        instances, veg, qa = analyze_frame(proc, sam_masks, cfg)
+        depth_mm = conf_img = None
+        if use_depth:
+            dpath = session_dir / "depth" / fn
+            if dpath.exists():
+                depth_mm = gr.load_depth_mm(dpath)
+            cpath = session_dir / "conf" / fn
+            if depth_mm is not None and polarity and cpath.exists():
+                conf_img = cv2.imread(str(cpath), cv2.IMREAD_UNCHANGED)
+        instances, veg, qa = analyze_frame(proc, sam_masks, cfg,
+                                           depth_mm=depth_mm, conf=conf_img,
+                                           polarity=polarity, fx=fx, fy=fy)
 
         link_or_copy(rgb_path, cvat_dir / fn)
         img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])
@@ -1149,7 +1321,14 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                          "source": inst["source"], "area_px": inst["area_px"],
                          "seed_px": inst["seed_px"], "growth": inst["growth"],
                          "bbox_x": inst["bbox"][0], "bbox_y": inst["bbox"][1],
-                         "bbox_w": inst["bbox"][2], "bbox_h": inst["bbox"][3]})
+                         "bbox_w": inst["bbox"][2], "bbox_h": inst["bbox"][3],
+                         # Empty rather than 0 when unmeasured: a height of
+                         # zero is a claim that the thing is flat, and "we
+                         # could not tell" is a different statement.
+                         "height_mm": inst.get("height_mm", ""),
+                         "height_measured_frac":
+                             inst.get("height_measured_frac", ""),
+                         "area_mm2": inst.get("area_mm2", "")})
 
         why = review_reasons(qa, cfg)
         if why:
@@ -1164,6 +1343,12 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["empty"] += int(not instances)
         stats["recovered"] += qa["recovered"]
         stats["split"] += qa.get("split", 0)
+        for k2 in ("height_dropped_flat", "height_dropped_small",
+                   "height_abstained"):
+            stats[k2] = stats.get(k2, 0) + qa.get(k2, 0)
+        if "ground_relief_mm" in qa:
+            relief.append(qa["ground_relief_mm"])
+            depth_frac.append(qa["depth_measured_frac"])
         areas.extend(i["area_px"] for i in instances)
         stats["veg_px"] += qa["veg_px"]
         stats["veg_covered_px"] += int((veg & union).sum())
@@ -1198,6 +1383,19 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
               f"+ {stats['recovered']} recovered")
     if cfg.get("LOG_INSTANCE_AREAS", True) and areas:
         print(f"      {area_histogram(areas, cfg)}")
+    if relief:
+        flat = stats.get("height_dropped_flat", 0)
+        small = stats.get("height_dropped_small", 0)
+        abst = stats.get("height_abstained", 0)
+        print(f"      depth: {sum(depth_frac) / len(depth_frac):.0%} of pixels "
+              f"measured | ground relief {sum(relief) / len(relief):.0f} mm "
+              f"| dropped {flat} flat + {small} undersized, abstained on {abst}")
+        if abst > stats["instances"]:
+            print(f"  [!] the height veto abstained on more instances than it "
+                  f"kept. Stereo drops out on thin tissue, so that is expected "
+                  f"on seedlings - but it means the gate is mostly not acting. "
+                  f"Lower HEIGHT_MIN_MEASURED_FRAC only if the previews show "
+                  f"it is missing real ground clutter.")
     if review:
         print(f"      {len(review)} frame(s) to review first -> review_first.txt")
     print(f"      -> {out}")

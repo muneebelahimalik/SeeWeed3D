@@ -1,0 +1,167 @@
+# Depth-assisted masking
+
+Using metric stereo depth to do the one thing a colour index fundamentally
+cannot: tell a green-tinted pebble from a cotyledon.
+
+**Related:** [runbook](RUNBOOK.md) · [mixed-scene prelabeling](mixed_prelabeling.md) ·
+[extraction fidelity](extraction_quality.md)
+
+---
+
+## What depth is good at here, and what it is not
+
+Stereo answers one question well on this imagery: **is this raised above the
+ground?** A pebble sits at 0 mm. A cotyledon sits at 5–20 mm. Colour cannot
+separate those at all — that is why the weed prelabeler ships its recall
+backstop off, and why the mixed one had to fall back on a pixel-area floor.
+
+It is **bad at the question it looks like it should answer**: *where exactly
+does this leaf end?* Block matching fails on thin, low-texture structures and
+fringes at every depth discontinuity, so leaf margins come back holed and
+haloed — at precisely the boundary a mask is deciding.
+
+So depth is used here as a **veto and a scale reference, never a boundary
+source**. Colour keeps every boundary. Depth deletes things lying on the dirt
+and converts pixels to millimetres.
+
+## Which sessions can use it
+
+Only captures with real 16-bit depth. Check per session:
+
+```powershell
+type <sessions>\<sid>\meta\session.json | findstr depth_kind
+```
+
+| `depth_kind` | Meaning |
+|---|---|
+| `metric` | real millimetres — everything here applies |
+| `preview` | an 8-bit preview normalised **per frame** at capture. No constant relates it to millimetres; unrecoverable |
+| `none` | no depth stream |
+
+Your v1 (AVI) captures are `preview` or `none`. Your v2 (MKV/FFV1) captures are
+`metric`. `USE_DEPTH_HEIGHT = "auto"` uses depth where it exists and behaves
+exactly as before where it does not, so a mixed set of sessions needs no
+special handling. Set it to `True` to make a session **without** metric depth a
+hard error, when you intend a run to be depth-gated and want to know if it
+isn't.
+
+---
+
+## Why a local soil surface and not a fitted plane
+
+Vidalia onions grow on **raised beds with furrows**. A single plane through the
+frame reports the furrow floor as below ground and the bed top as plant —
+inventing height where there is none and hiding it where there is.
+
+`soil_surface()` estimates the ground **locally**, as a high percentile of
+depth in a neighbourhood: the camera looks down, so soil is the *farthest*
+surface and anything nearer is standing on it. That follows a furrow, a slope
+and a tilted camera for free, because it never assumes the ground is flat —
+only that it is smooth at the scale of the window.
+
+### `GROUND_TILE_PX`, and why passing vegetation decides it
+
+Two bounds pull opposite ways. The window must be **larger than the biggest
+plant**, or a big plant defines its own soil and measures itself as flat. It
+must be **smaller than the terrain undulation**, or a furrow is averaged into
+the bed beside it.
+
+Passing the vegetation mask dissolves the first bound. Measured on a 140 px
+plant standing 25 mm proud of flat ground:
+
+| `tile_px` | 32 | 48 | 96 | 160 |
+|---|---|---|---|---|
+| **veg given** | 25.0 | 25.0 | 25.0 | 25.0 |
+| veg absent | 12.1 | 17.9 | 17.3 | 25.0 |
+
+The prelabeler always passes it, so small tiles are strictly better — and the
+second bound is the one that bites. Measured on 160 px beds with 60 mm furrows
+under a tilted camera, two 18 mm plants (one on a bed / one in a furrow):
+
+| `tile_px` | 32 | 48 | 64 | 96 |
+|---|---|---|---|---|
+| **smooth 0** | **20.0 / 20.0** | 20.8 / 20.3 | 35.9 / 24.6 | 61.0 / 21.9 |
+| smooth 1 | 19.8 / 19.8 | 38.2 / 20.2 | 47.8 / 15.4 | 60.5 / 14.3 |
+
+A tile straddling a bed and a furrow takes its soil from the **furrow**, so the
+bed plant reads as bed height plus plant height — 61 mm for an 18 mm plant.
+
+> **The error is not symmetric, which is why the defaults are conservative.** A
+> window too large *inflates* plants on high ground and *deflates* plants in
+> the low ground. A height veto deletes short things, so the plants it would
+> silently drop are the ones in the furrows.
+
+---
+
+## The safety property: abstention
+
+**An instance whose height cannot be measured is kept.** Stereo drops out on
+thin, low-texture tissue and at every depth discontinuity — which is to say, on
+exactly the small plants a height gate would otherwise delete. The veto fires
+only on positive evidence that something is flat, never on absence of evidence
+that it is not.
+
+`HEIGHT_MIN_MEASURED_FRAC` (default 0.25) is the threshold. Below it the
+instance survives on the colour and size gates exactly as before, and the run
+counts it as an abstention rather than a decision.
+
+```
+  depth: 61% of pixels measured | ground relief 47 mm
+       | dropped 38 flat + 4 undersized, abstained on 112
+```
+
+Abstaining on more instances than it keeps is **expected on seedlings** and the
+run says so. It means the gate is mostly not acting — not that it is broken.
+
+## Two things that are never guessed
+
+**Invalid depth is not zero depth.** The extractor writes 0 as the invalid
+sentinel. Read naively that is "touching the lens", nearer than everything, and
+would read as the tallest object in the frame. Depth is loaded with `NaN` for
+invalid and every function returns a `measured` mask alongside its answer.
+
+**Confidence polarity.** v2 captures write a confidence map and `session.json`
+records which direction means "good". Guessing that backwards does not degrade
+gracefully — it keeps *precisely* the pixels it should have dropped, and the
+result looks like a cleaner depth map. An unknown polarity therefore disables
+confidence gating entirely, and the run prints that it did.
+
+---
+
+## Metric size floors
+
+With depth and `calibration.json` you know mm per pixel, so
+`MIN_INSTANCE_AREA_MM2` replaces `MIN_INSTANCE_AREA_PX` where it can be
+computed. That removes the whole "calibrate the floor to your mount height"
+problem: a session recorded at a different boom height stops needing its own
+numbers.
+
+Without calibration the metric floor is inert and the pixel floor applies, so a
+missing `calibration.json` cannot silently delete everything.
+
+---
+
+## Settings
+
+```python
+"USE_DEPTH_HEIGHT": "auto",      # "auto" | True | False
+"HEIGHT_MIN_MM": 6.0,            # below this above local soil = not a plant
+"HEIGHT_MIN_MEASURED_FRAC": 0.25,
+"HEIGHT_PERCENTILE": 75.0,       # of the instance body, not its edge
+"GROUND_TILE_PX": 32,
+"GROUND_PERCENTILE": 80.0,
+"DEPTH_MIN_CONFIDENCE": 0.30,
+"MIN_INSTANCE_AREA_MM2": 40.0,   # None = keep using pixels
+```
+
+| Symptom | Setting |
+|---|---|
+| real seedlings disappearing | **lower `HEIGHT_MIN_MM`** first — it deletes, and a deleted cotyledon never reaches the annotator |
+| ground clutter surviving | raise `HEIGHT_MIN_MM`, then check `ground_relief_mm` is plausible for your field |
+| almost everything abstains | expected on small plants; lower `HEIGHT_MIN_MEASURED_FRAC` only if previews show clutter getting through |
+| plants in furrows disappearing | `GROUND_TILE_PX` is too large for your bed spacing — halve it |
+| heights implausible everywhere | check `median_depth_mm` against your real boom height before touching anything else |
+
+`height_mm`, `height_measured_frac` and `area_mm2` are written per instance to
+`instances.csv`, empty where unmeasured — because "0 mm" is a claim that
+something is flat and "we could not tell" is a different statement.
