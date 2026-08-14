@@ -750,6 +750,13 @@ def _one_instance(cls="other_weed", source="sam"):
              "points": {"lep_dt": [60.0, 60.0]}, "peaks": [((60, 60), 20.0)]}]
 
 
+#: The shipped preview defaults, pinned here rather than read from the live
+#: CONFIG - that block is edited to configure real runs, and a suite that fails
+#: because somebody changed a preview colour for an afternoon is noise.
+_PREVIEW_CFG = dict(wd.CONFIG, PREVIEW_OUTLINE_BGR=(0, 0, 255),
+                    PREVIEW_OUTLINE_PX=2, PREVIEW_SHOW_LEP=False)
+
+
 def _drawn_colors(vis):
     """Distinct non-background colours present in a rendered preview."""
     return {tuple(int(v) for v in c) for c in vis.reshape(-1, 3)}
@@ -761,14 +768,14 @@ def test_outlines_are_red_by_default():
     boundary is the thing being inspected, so it gets a colour the scene does
     not contain."""
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
-    vis = wd.overlay(bgr, _one_instance(), 1.0, wd.CONFIG)
+    vis = wd.overlay(bgr, _one_instance(), 1.0, _PREVIEW_CFG)
     assert (0, 0, 255) in _drawn_colors(vis)
     assert (170, 170, 170) not in _drawn_colors(vis)     # the old grey is gone
 
 
 def test_the_class_palette_can_be_restored():
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
-    cfg = dict(wd.CONFIG, PREVIEW_OUTLINE_BGR=None)
+    cfg = dict(_PREVIEW_CFG, PREVIEW_OUTLINE_BGR=None)
     assert (170, 170, 170) in _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
 
 
@@ -785,7 +792,8 @@ def test_the_recall_backstop_halo_survives_a_fixed_outline_colour():
     """White halo = an instance SAM never proposed. It is the one preview signal
     that is not decoration, so a single outline colour must not swallow it."""
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
-    vis = wd.overlay(bgr, _one_instance(source="vegetation"), 1.0, wd.CONFIG)
+    vis = wd.overlay(bgr, _one_instance(source="vegetation"), 1.0,
+                     _PREVIEW_CFG)
     cols = _drawn_colors(vis)
     assert (255, 255, 255) in cols and (0, 0, 255) in cols
 
@@ -794,13 +802,13 @@ def test_no_lep_dot_in_the_preview_by_default():
     """Segmentation-only dataset: the dot sits at the deepest interior point of
     the mask, which is exactly the region whose boundary is under review."""
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
-    vis = wd.overlay(bgr, _one_instance(), 1.0, wd.CONFIG)
+    vis = wd.overlay(bgr, _one_instance(), 1.0, _PREVIEW_CFG)
     assert (0, 255, 255) not in _drawn_colors(vis)       # the DT-peak dot
 
 
 def test_the_lep_dot_comes_back_when_asked_for():
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
-    cfg = dict(wd.CONFIG, PREVIEW_SHOW_LEP=True)
+    cfg = dict(_PREVIEW_CFG, PREVIEW_SHOW_LEP=True)
     assert (0, 255, 255) in _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
 
 
@@ -808,9 +816,9 @@ def test_cluster_growth_point_markers_follow_the_same_switch():
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
     insts = _one_instance(cls="weed_cluster")
     assert (200, 60, 200) not in _drawn_colors(
-        wd.overlay(bgr, insts, 1.0, wd.CONFIG))
+        wd.overlay(bgr, insts, 1.0, _PREVIEW_CFG))
     assert (200, 60, 200) in _drawn_colors(
-        wd.overlay(bgr, insts, 1.0, dict(wd.CONFIG, PREVIEW_SHOW_LEP=True)))
+        wd.overlay(bgr, insts, 1.0, dict(_PREVIEW_CFG, PREVIEW_SHOW_LEP=True)))
 
 
 def test_overlay_still_works_without_an_explicit_config():

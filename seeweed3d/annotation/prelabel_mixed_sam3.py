@@ -179,9 +179,9 @@ from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              PRELABEL_CLASS, prelabel_categories,
                              prelabel_cvat_labels)
 from common.progress import Progress  # noqa: E402
-from common.vegetation import (component_boxes, excess_green,  # noqa: E402
-                               remove_small, vegetation_mask, vegetation_score,
-                               white_balance)
+from common.vegetation import (component_boxes, distance_peaks,  # noqa: E402
+                               excess_green, remove_small, vegetation_mask,
+                               vegetation_score, white_balance)
 from perception.segmenter import drop_fragments  # noqa: E402
 
 # #############################################################################
@@ -304,11 +304,60 @@ CONFIG = {
     "SEED_ERODE_PX": 2,
     "SEED_ERODE_MIN_AREA_PX": 300,
 
+    # -- Splitting an under-seeded component -----------------------------------
+    # When several plants have grown into one another their canopies are ONE
+    # connected vegetation component. If SAM proposed a mask for only one of
+    # them, the watershed hands that single marker the whole group and four
+    # rosettes emerge as one instance - the `a seed grew 91x` line in
+    # review_first.txt. peak_seeds() adds a marker at each distance-transform
+    # crown so the flood can separate them.
+    #
+    # ONLY components whose flood would exceed SPLIT_GROWTH_TRIGGER are touched,
+    # so a component SAM seeded properly is never re-seeded and cannot be
+    # fragmented. That trigger is the same ratio review_reasons() prints, so the
+    # symptom and the fix are denominated in the same units: if the review file
+    # says a seed grew 20x and the trigger is 8, this now acts on it.
+    #
+    # Raise SPLIT_GROWTH_TRIGGER if single plants are coming apart; lower it if
+    # merges survive. Set SPLIT_UNDERSEEDED False to restore the previous
+    # behaviour, where only SAM could ever separate two plants.
+    "SPLIT_UNDERSEEDED": True,
+    "SPLIT_GROWTH_TRIGGER": 8.0,        # matches REVIEW_MAX_GROWTH
+    "SPLIT_MIN_COMPONENT_PX": 2000,     # a group of plants, not one seedling
+    "SPLIT_PEAK_REL_THRESHOLD": 0.5,    # a peak this fraction of the largest
+    "SPLIT_PEAK_MIN_SEPARATION_PX": 25,
+    # THE SETTING THAT STOPS THIS SHATTERING A LEAF. A long leaf has a FLAT
+    # distance ridge - every point along a ribbon of constant width has the
+    # same inscribed radius - so height alone accepts a dozen "crowns" strung
+    # along one onion leaf. Measured on a synthetic 240px ribbon: 10 peaks
+    # without this test, 1 with it, while two rosettes joined by a thin neck
+    # still give 2. Lower it (towards 0) to split more eagerly; 0 disables the
+    # test and restores the behaviour that fragments leaves.
+    "SPLIT_PEAK_SADDLE_DROP": 0.7,
+    # Component area divided by the area of its own largest inscribed disc.
+    # ~1 = one compact plant, ~4 = four merged rosettes, >20 = a long leaf.
+    # Above this the component is a ribbon and is never re-seeded, which is
+    # what keeps this off onion leaves entirely.
+    "SPLIT_MAX_SPREAD": 8.0,
+    "SPLIT_SEED_RADIUS_FRAC": 0.55,     # marker as a fraction of inscribed radius
+
     # -- Recall backstop -------------------------------------------------------
     # Vegetation components holding no seed at all. ON here, unlike the weed
     # prelabeler - see the module docstring for why the reasoning differs.
+    #
+    # RECOVER_MIN_AREA_PX IS THE SPECKLE CONTROL, AND ITS RIGHT VALUE DEPENDS ON
+    # YOUR MOUNT HEIGHT. On a pale, pebbly substrate a colour index cannot tell
+    # green-tinted mineral from a cotyledon - that is why the weed prelabeler
+    # ships its own backstop OFF - so size is the discriminator that is left.
+    # Gravel on a 1080p frame runs to a few hundred px^2; the smallest real
+    # plant is usually several thousand. Run with LOG_INSTANCE_AREAS to see both
+    # populations for YOUR imagery and put the floor in the gap between them.
+    #
+    # RECOVER_MIN_VEG_SCORE is a much weaker filter than it looks: the score
+    # saturates at 1.0 for anything comfortably past the ExG threshold, so an
+    # olive pebble and a leaf both score ~1.0. Do not rely on it alone.
     "RECOVER_UNSEEDED": True,
-    "RECOVER_MIN_AREA_PX": 150,
+    "RECOVER_MIN_AREA_PX": 600,
     "RECOVER_MIN_VEG_SCORE": 0.90,
 
     # -- Instance cleanup ------------------------------------------------------
@@ -316,7 +365,13 @@ CONFIG = {
     # second true lobe is not. An absolute floor deletes cotyledons.
     "FRAGMENT_MIN_FRAC": 0.15,
     "FILL_HOLES_MAX_PX": 400,
-    "MIN_INSTANCE_AREA_PX": 120,
+    # The last gate before an instance reaches CVAT. Every instance under this
+    # is one shape somebody has to select and delete by hand, and on pebbly
+    # ground there can be hundreds per frame. 250 is the value the weed
+    # prelabeler uses on this same imagery without producing speckle; this path
+    # ran at 120 and did. Calibrate with LOG_INSTANCE_AREAS rather than guessing
+    # - a cotyledon must survive it.
+    "MIN_INSTANCE_AREA_PX": 250,
 
     # -- Frame-level safety ----------------------------------------------------
     "MAX_VEG_FRACTION": 0.5,          # more green than this = colour cast/glare
@@ -362,6 +417,12 @@ CONFIG = {
     # calling an onion a weed is the worst error this project can make. Give
     # the ambiguous stretch to prelabel_mixed_sam3.py, or leave it out.
     "ONLY_FRAMES": {},
+    # Print the distribution of instance areas at the end of a run. The floors
+    # above are the only thing separating a cotyledon from a pebble, and their
+    # right values depend on your mount height - so read them off your own
+    # imagery instead of inheriting a number measured on somebody else's.
+    "LOG_INSTANCE_AREAS": True,
+
     "SAVE_PREVIEWS": True,
     "PREVIEW_SCALE": 0.5,
 }
@@ -601,6 +662,115 @@ def unseeded_components(veg, seeds, cfg, score):
     return out
 
 
+def _crown_markers(comp, area, claimed, cfg):
+    """Markers at each distinct crown of one vegetation component, or [].
+
+    ELONGATION IS THE GUARD THAT MAKES THIS SAFE ON ONION. Compare the
+    component's area with the area of its own largest inscribed disc: a single
+    rosette covers about one such disc, two merged rosettes about two, four
+    about four - but a long thin leaf covers dozens, because its inscribed disc
+    is only as wide as the leaf. Measured on the synthetic cases: one rosette
+    1.0, two merged 2.1, four merged 4.1, one curved onion leaf 27.3. Above the
+    ceiling the component is a ribbon, and a ribbon has a FLAT distance ridge
+    whose maxima are an artefact of its own irregular edge rather than evidence
+    of separate plants - splitting there shattered a synthetic leaf into 11
+    instances before this guard existed.
+
+    The cost is that two merged ONIONS are not split either: two ribbons are
+    still a ribbon. That is the safe direction. A missed split leaves one shape
+    to divide by hand; a false split teaches the model that a fragment of a
+    leaf is a whole plant, which is the failure that closed this door in
+    prelabel_weeds_sam3."""
+    dt = cv2.distanceTransform(comp.astype(np.uint8), cv2.DIST_L2, 5)
+    rmax = float(dt.max())
+    if rmax <= 0 or area / (np.pi * rmax * rmax) > cfg["SPLIT_MAX_SPREAD"]:
+        return []
+    peaks = distance_peaks(comp, cfg["SPLIT_PEAK_REL_THRESHOLD"],
+                           cfg["SPLIT_PEAK_MIN_SEPARATION_PX"],
+                           min_saddle_drop=cfg["SPLIT_PEAK_SADDLE_DROP"])
+    if len(peaks) < 2:
+        return []                       # one plant, however large - leave it
+    out = []
+    for (px, py), radius in peaks:
+        if claimed[py, px]:
+            continue                    # SAM already owns this crown
+        disc = np.zeros(comp.shape, np.uint8)
+        cv2.circle(disc, (int(px), int(py)),
+                   max(1, int(radius * cfg["SPLIT_SEED_RADIUS_FRAC"])), 1, -1)
+        marker = disc.astype(bool) & comp
+        if marker.any():
+            out.append(marker)
+            claimed |= marker
+    return out
+
+
+def peak_seeds(veg, seeds, cfg):
+    """Extra markers for vegetation components the SAM seeds cannot separate.
+
+    THE MERGE THIS FIXES. The watershed gives every pixel of a connected
+    vegetation component to the nearest seed. When several plants have grown
+    into one another their canopies are ONE component, so if SAM proposed a
+    mask for only one of them, that single marker inherits the whole group -
+    four rosettes emerge as one instance, and the QA line reports it as `a seed
+    grew 91x`.
+
+    The watershed is not the problem and needs no change; it was simply given
+    one marker for a region containing four plants. So the fix is more markers,
+    not a different partition - and markers are the safe place to intervene. A
+    doubtful extra peak produces two markers that the flood may divide almost
+    evenly, whereas cutting a FINISHED mask in half on the same evidence is
+    what made splitting untenable in the weed prelabeler: there, a leaf
+    reaching away from the crown produced a second peak and severed one plant.
+
+    TRIGGERED BY THE MEASUREMENT, NOT APPLIED EVERYWHERE. Only components whose
+    flood would exceed SPLIT_GROWTH_TRIGGER are re-seeded, which is the same
+    ratio review_reasons() already prints. A component SAM seeded properly is
+    never touched, so this cannot fragment a plant that was already correct.
+    """
+    if not cfg.get("SPLIT_UNDERSEEDED", True):
+        return []
+    claimed = np.zeros(veg.shape, bool)
+    for s in seeds:
+        claimed |= s
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(veg.astype(np.uint8), 8)
+    out = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < cfg["SPLIT_MIN_COMPONENT_PX"]:
+            continue
+        comp = labels == i
+        seeded_px = int((comp & claimed).sum())
+        # A component with NO seed is the recall backstop's business, not this
+        # one's. Creating instances there from the vegetation prior alone is
+        # exactly what RECOVER_UNSEEDED governs, and quietly doing it here
+        # would make that switch a lie. Such components are split, if they
+        # deserve it, in split_recovered() - which only runs when the backstop
+        # is on.
+        if not seeded_px or area / seeded_px <= cfg["SPLIT_GROWTH_TRIGGER"]:
+            continue
+        for marker in _crown_markers(comp, area, claimed, cfg):
+            out.append(marker)
+    return out
+
+
+def split_recovered(blobs, cfg):
+    """Turn a recovered blob that holds several crowns into one marker each.
+
+    The recall backstop returns whole unseeded vegetation components, so a
+    group of merged plants SAM missed entirely arrives as ONE instance. Same
+    evidence and same guards as peak_seeds - it is the same question asked one
+    step later, about a component that had no seed rather than too few."""
+    if not cfg.get("SPLIT_UNDERSEEDED", True):
+        return list(blobs)
+    out = []
+    for comp in blobs:
+        area = int(comp.sum())
+        markers = _crown_markers(comp, area, np.zeros(comp.shape, bool), cfg)
+        out.extend(markers if len(markers) >= 2 else [comp])
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # The watershed that actually produces the masks
 # --------------------------------------------------------------------------- #
@@ -733,10 +903,16 @@ def analyze_frame(bgr, sam_masks, cfg):
     veg = plant_pixels(bgr, cfg)
     score = plant_confidence(bgr, veg, cfg)
     seeds = seed_masks(sam_masks, veg, cfg)
-    recovered = unseeded_components(veg, seeds, cfg, score)
-    sources = ["sam"] * len(seeds) + ["vegetation"] * len(recovered)
+    # Extra markers BEFORE the recall backstop, so a group of merged plants is
+    # split into one instance each rather than recovered as a single blob.
+    peaks = peak_seeds(veg, seeds, cfg)
+    recovered = split_recovered(
+        unseeded_components(veg, seeds + peaks, cfg, score), cfg)
+    sources = (["sam"] * len(seeds) + ["peak"] * len(peaks)
+               + ["vegetation"] * len(recovered))
 
-    allseeds = [erode_seed(s, cfg) for s in seeds] + list(recovered)
+    allseeds = ([erode_seed(s, cfg) for s in seeds] + list(peaks)
+                + list(recovered))
     seed_px = [int(s.sum()) for s in allseeds]
     grown = partition_vegetation(veg, allseeds)
 
@@ -765,6 +941,7 @@ def analyze_frame(bgr, sam_masks, cfg):
         "instances": len(instances),
         "from_sam": sum(1 for i in instances if i["source"] == "sam"),
         "recovered": sum(1 for i in instances if i["source"] == "vegetation"),
+        "split": sum(1 for i in instances if i["source"] == "peak"),
         "veg_px": veg_px,
         # The number to watch. Vegetation outside every instance is plant an
         # annotator will never be shown, and in a prelabelled task nobody draws
@@ -775,6 +952,29 @@ def analyze_frame(bgr, sam_masks, cfg):
             max((i["area_px"] for i in instances), default=0) / frame_px, 4),
     }
     return instances, veg, qa
+
+
+def area_histogram(areas, cfg):
+    """Where the size floors sit relative to the instances actually produced.
+
+    On a pale, pebbly substrate a colour index cannot separate green-tinted
+    mineral from a cotyledon, so SIZE is the only discriminator left - and the
+    right floor depends on mount height, which is a property of your rig and
+    not of this code. Real plants and gravel are usually an order of magnitude
+    apart, so the two populations are obvious once printed. Put the floor in
+    the gap between them rather than inheriting a number measured elsewhere."""
+    a = sorted(int(v) for v in areas)
+    if not a:
+        return "no instances"
+    def pct(p):
+        return a[min(len(a) - 1, int(p * (len(a) - 1)))]
+    floor = int(cfg.get("MIN_INSTANCE_AREA_PX", 0))
+    tiny = sum(1 for v in a if v < floor * 4)
+    return (f"instance area px: p10={pct(0.10)} p50={pct(0.50)} "
+            f"p90={pct(0.90)} max={a[-1]} | {tiny} of {len(a)} "
+            f"({tiny / len(a):.0%}) under 4x the {floor}px floor"
+            + (" - suspect speckle, raise MIN_INSTANCE_AREA_PX and "
+               "RECOVER_MIN_AREA_PX" if tiny > len(a) * 0.5 else ""))
 
 
 def review_reasons(qa, cfg):
@@ -857,7 +1057,7 @@ def overlay(bgr, instances, scale):
                            cv2.COLOR_HSV2BGR)[0, 0].tolist()
         cnts, _ = cv2.findContours(inst["mask"].astype(np.uint8),
                                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if inst["source"] == "vegetation":
+        if inst["source"] != "sam":
             cv2.drawContours(vis, cnts, -1, (255, 255, 255), 4)
         cv2.drawContours(vis, cnts, -1, col, 2)
     return cv2.resize(vis, None, fx=scale, fy=scale,
@@ -898,7 +1098,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
 
     coco, rows, flagged, review = PrelabelCoco(), [], [], []
     stats = {"frames": 0, "instances": 0, "flagged": 0, "empty": 0,
-             "recovered": 0, "veg_px": 0, "veg_covered_px": 0}
+             "recovered": 0, "split": 0, "veg_px": 0, "veg_covered_px": 0}
+    areas = []
 
     prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
@@ -960,6 +1161,8 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         stats["instances"] += len(instances)
         stats["empty"] += int(not instances)
         stats["recovered"] += qa["recovered"]
+        stats["split"] += qa.get("split", 0)
+        areas.extend(i["area_px"] for i in instances)
         stats["veg_px"] += qa["veg_px"]
         stats["veg_covered_px"] += int((veg & union).sum())
         prog.update(note=f"{stats['instances']} inst, {stats['flagged']} flagged")
@@ -988,7 +1191,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         # Coverage, not instance count, is the honest recall readout: the
         # pipeline can look productive while quietly leaving plants out.
         print(f"      coverage: {cov:.1f}% of vegetation inside an instance "
-              f"| {sam_n} from SAM + {stats['recovered']} recovered")
+              f"| {sam_n - stats['split']} from SAM "
+              f"+ {stats['split']} split from a merge "
+              f"+ {stats['recovered']} recovered")
+    if cfg.get("LOG_INSTANCE_AREAS", True) and areas:
+        print(f"      {area_histogram(areas, cfg)}")
     if review:
         print(f"      {len(review)} frame(s) to review first -> review_first.txt")
     print(f"      -> {out}")

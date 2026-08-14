@@ -168,8 +168,11 @@ def test_a_real_block_split_measures_its_own_separation():
 # Choosing it deliberately
 # --------------------------------------------------------------------------- #
 def test_make_dataset_exposes_the_mode():
+    """The knobs exist and hold usable values. Not the shipped literals - this
+    CONFIG block is meant to be edited, and choosing "frame_block" for a real
+    build must not fail the suite."""
     md = load_script("training/make_dataset.py")
-    assert md.CONFIG["SPLIT_MODE"] == "auto"
+    assert md.CONFIG["SPLIT_MODE"] in ("auto", "session", "frame_block")
     assert md.CONFIG["BLOCKS_PER_SESSION"] >= 1
 
 
@@ -177,7 +180,9 @@ def test_the_gap_default_is_not_two_pool_frames():
     """Two pool frames is a third of a second at 30 fps and a stride of 5 -
     the same photograph."""
     md = load_script("training/make_dataset.py")
-    assert md.CONFIG["GAP_FRAMES"] >= 8
+    assert md.CONFIG["GAP_FRAMES"] >= 8, (
+        "raising the gap is expected; lowering it below the shipped default "
+        "silently reintroduces near-duplicate frames across the split")
 
 
 def test_an_unknown_mode_is_refused(tmp_path):

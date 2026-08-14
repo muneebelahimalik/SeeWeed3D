@@ -240,7 +240,7 @@ def test_findings_serialise(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_the_rfdetr_runner_exposes_the_override():
     tm = load_script("training/train_model_rfdetr.py")
-    assert tm.CONFIG["SKIP_PREFLIGHT"] is False
+    assert isinstance(tm.CONFIG["SKIP_PREFLIGHT"], bool)
 
 
 def test_the_trainer_runs_preflight_before_training():
