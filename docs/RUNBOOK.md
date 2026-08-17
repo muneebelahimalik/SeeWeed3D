@@ -87,6 +87,25 @@ AGPL-3.0. See [§6](#6-train-stage-a-segmentation).
 
 ---
 
+### Run the tests in BOTH environments
+
+Neither one covers the whole suite, and the shortfall is silent — a module
+whose backend is missing skips at import and reports as **one** skipped entry,
+not as the dozens of tests inside it.
+
+```powershell
+conda activate dl        ; python -m pytest tests/ -q    # ~954 collected
+conda activate sw-train  ; python -m pytest tests/ -q    # ~1028 collected
+```
+
+`dl` has no `rfdetr` (deliberately — it would drag training deps across the
+`numpy<2` pin SAM 3 needs), so `test_mask_losses.py` and
+`test_rfdetr_backend.py` — **76 tests** — do not run there. They are precisely
+the code stage 6b depends on, so run the suite in `sw-train` before trusting a
+training change.
+
+---
+
 ## 1. Extract recordings
 
 Turns raw ZED recordings into an indexed, QC'd frame pool.
