@@ -42,7 +42,14 @@ class Progress:
         self.file_interval = file_interval
         self.n = 0
         self.t0 = time.monotonic()
-        self._last = 0.0
+        # Throttling is measured from CONSTRUCTION, not from zero. time.monotonic()
+        # counts from an arbitrary origin - system boot on both Linux and
+        # Windows - so `now - 0.0` is really "how long has this machine been
+        # up", and comparing that against min_interval made the first update
+        # render on a machine that had been up an hour and stay silent on one
+        # freshly booted. Same code, same config, different output, and nothing
+        # on screen to say which you were getting.
+        self._last = self.t0
         self._len = 0
         self._rendered_n = None
         # A self-updating line only makes sense on a terminal; when redirected,

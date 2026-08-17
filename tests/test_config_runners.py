@@ -141,8 +141,12 @@ def test_two_sources_under_different_parents_both_resolve(tmp_path):
     ], INCLUDE_FRAMES="", VAL_FRACTION=0.2, TEST_FRACTION=0.0))
 
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    # POSIX separators, deliberately: the manifest records them that way so a
+    # dataset built on Windows is readable on Linux and back. Comparing against
+    # str(Path) instead made this test pass on one OS and fail on the other
+    # while the code was right on both.
     assert sorted(man["images_root"]) == sorted(
-        [str(weed_imgs), str(onion_imgs)])
+        [weed_imgs.as_posix(), onion_imgs.as_posix()])
     # Both sources' frames resolved and reached the manifest. Not an exact
     # count: a per-session block split legitimately discards gap-buffer frames
     # at each boundary, so asserting 10 would be asserting the absence of a
@@ -164,7 +168,7 @@ def test_two_sources_sharing_one_images_root_are_not_duplicated(tmp_path):
         {"DATUMARO_ROOT": str(exp2), "IMAGES_ROOT": str(shared)},
     ], INCLUDE_FRAMES=""))
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
-    assert man["images_root"] == [str(shared)], "one root, not repeated"
+    assert man["images_root"] == [shared.as_posix()], "one root, not repeated"
     assert len(man["frames"]) == 6
 
 
@@ -291,3 +295,17 @@ def test_images_root_as_a_list_is_validated_per_entry(tmp_path):
         tm._resolve_images_root(
             {"IMAGES_ROOT": [str(ok), str(tmp_path / "missing")]},
             tmp_path / "unused.json")
+
+
+def test_the_manifest_records_posix_paths_on_every_platform(tmp_path):
+    """A dataset built on Windows must be readable on Linux and back, so
+    seg_manifest.json stores separators one way. Pinned because the tests that
+    caught this compared against str(Path) and so passed on one OS while
+    failing on the other, with the code right on both."""
+    exp, imgs = _export(tmp_path, name="s", session="sess_1", n=3)
+    md.main(_cfg(tmp_path, sources=[{"DATUMARO_ROOT": str(exp),
+                                     "IMAGES_ROOT": str(imgs)}],
+                 INCLUDE_FRAMES=""))
+    man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+    assert all("\\" not in r for r in man["images_root"])
+    assert all("\\" not in f["image_path"] for f in man["frames"])
