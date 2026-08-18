@@ -184,7 +184,7 @@ CONFIG = {
     "MERGE_INTO_ONE_MASK": False,  # False = one polygon per leaf clump (editable)
 
     # -- Run control -----------------------------------------------------------
-    "LIMIT_PER_SESSION": 20,     # e.g. 20 for a quick quality trial, then None
+    "LIMIT_PER_SESSION": None,     # e.g. 20 for a quick quality trial, then None
 
     # Run over only PART of a session, by video frame index. Empty = all frames.
     #
