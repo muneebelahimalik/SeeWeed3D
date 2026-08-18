@@ -105,7 +105,7 @@ def sample_depth_frames(session_dir, limit=SAMPLE_FRAMES):
     return out
 
 
-def classify_depth(frames):
+def classify_depth(frames, plausible_mm=PLAUSIBLE_MM):
     """What these extracted depth frames are. Never guesses.
 
     Returns a dict with `kind` in {metric, preview, not_16bit, missing,
@@ -141,7 +141,7 @@ def classify_depth(frames):
                   and (top - low) <= NORMALISED_MAX_SPREAD * full
                   and max(sat) < NORMALISED_SAT_FRAC)
     median_mm = float(np.median(medians))
-    plausible = PLAUSIBLE_MM[0] <= median_mm <= PLAUSIBLE_MM[1]
+    plausible = plausible_mm[0] <= median_mm <= plausible_mm[1]
 
     ev = {"frames_sampled": len(maxima),
           "median_value": round(median_mm, 1),
@@ -163,8 +163,12 @@ def classify_depth(frames):
     return {"kind": "uncertain", **ev,
             "reason": f"median value {median_mm:.0f} is not a plausible "
                       f"distance in millimetres for this rig "
-                      f"({PLAUSIBLE_MM[0]:.0f}-{PLAUSIBLE_MM[1]:.0f}), but the "
-                      f"per-frame-normalisation signature does not fit either"}
+                      f"({plausible_mm[0]:.0f}-{plausible_mm[1]:.0f}), but the "
+                      f"per-frame-normalisation signature does not fit either. "
+                      f"If {median_mm:.0f} mm IS your real mount height "
+                      f"(a close-mounted rig can be under 250 mm), rerun with "
+                      f"--min-mm / --max-mm to say so - the default range is a "
+                      f"guess about a typical boom, not a physical law."}
 
 
 def write_depth_kind(session_dir, kind):
@@ -195,7 +199,19 @@ def main(argv=None):
     p.add_argument("--write", action="store_true",
                    help="record depth_kind in each session.json. Refuses to "
                         "write an uncertain classification.")
+    p.add_argument("--min-mm", type=float, default=PLAUSIBLE_MM[0],
+                   help=f"lower bound of a plausible distance for YOUR rig "
+                        f"(default {PLAUSIBLE_MM[0]:.0f}). Widen this only "
+                        f"because you know the mount height, not to make an "
+                        f"'uncertain' verdict go away.")
+    p.add_argument("--max-mm", type=float, default=PLAUSIBLE_MM[1],
+                   help=f"upper bound (default {PLAUSIBLE_MM[1]:.0f})")
     a = p.parse_args(argv)
+    plausible_mm = (a.min_mm, a.max_mm)
+    if plausible_mm != PLAUSIBLE_MM:
+        print(f"  Using a custom plausible range: {plausible_mm[0]:.0f}-"
+              f"{plausible_mm[1]:.0f} mm (default is {PLAUSIBLE_MM[0]:.0f}-"
+              f"{PLAUSIBLE_MM[1]:.0f}).\n")
 
     root = Path(a.sessions)
     if not root.is_dir():
@@ -208,7 +224,7 @@ def main(argv=None):
 
     wrote = uncertain = 0
     for sid in sids:
-        res = classify_depth(sample_depth_frames(root / sid))
+        res = classify_depth(sample_depth_frames(root / sid), plausible_mm)
         kind = res["kind"]
         print(f"\n  {sid}")
         print(f"    depth_kind : {kind}")

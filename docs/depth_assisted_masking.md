@@ -77,6 +77,20 @@ python -m seeweed3d.validation.check_extracted_depth --sessions E:\...\sessions
     median 1187.0 | max 2410.0 | max spread 380.0 | peak saturated 0.0001
 ```
 
+**If it reports `uncertain`**, read the printed median before assuming
+anything is wrong. `PLAUSIBLE_MM` defaults to 250-6000 mm, which is a guess
+about a typical boom — a delta-robot rig mounted close to the canopy can
+legitimately sit under that. If the median is your real mount height, say so:
+
+```powershell
+python -m seeweed3d.validation.check_extracted_depth --sessions ... --min-mm 100 --max-mm 400 --write
+```
+
+Only widen it because you know the number — not to make the warning go away.
+A median in the tens of thousands, or near zero, is not a mount-height
+question; that is real evidence something in the capture or decode is wrong,
+and re-extracting is the next step, not a wider range.
+
 Add `--write` to record it in each `meta/session.json`. It **refuses to write
 an uncertain classification** — a 16-bit PNG is not by itself evidence that the
 numbers are millimetres, since ffmpeg produces `gray16le` from any source by
