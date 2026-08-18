@@ -21,3 +21,8 @@ models/
 .DS_Store
 .idea/
 .vscode/
+
+# Shell mishaps: a mistyped redirect creates a file named after the flags
+# ("tatus --short" from `git s > tatus --short`). One reached a commit.
+tatus*
+status*
