@@ -722,3 +722,41 @@ def test_an_unknown_provenance_is_refused(tmp_path):
         prep.build(root, tmp_path / "images", tmp_path / "out",
                    label_provenance="sam3", strict=False)
     assert "label_provenance" in str(e.value)
+
+
+# --------------------------------------------------------------------------- #
+# An export can outlive the frames it describes
+# --------------------------------------------------------------------------- #
+def test_frames_whose_image_is_gone_are_excluded_and_counted(tmp_path, capsys):
+    """Pool frames deleted after extraction leave annotations pointing at
+    nothing. Without this the mismatch surfaces one frame at a time from COCO
+    export, which cannot say whether one frame is missing or nine hundred."""
+    import cv2
+    import numpy as np
+    root = _crop_and_weeds_export(tmp_path, frames_per=6)
+    rgb = root / "rgb"
+    rgb.mkdir(parents=True)
+    for i in range(4):                      # only 4 of the 6 survive
+        cv2.imwrite(str(rgb / f"sessC_{i:06d}.png"),
+                    np.zeros((16, 16, 3), np.uint8))
+
+    out = tmp_path / "out"
+    prep.build(root, root, out, val_fraction=0.0, test_fraction=0.0, seed=1,
+               strict=False, verify_images=True, gap_frames=0)
+    printed = capsys.readouterr().out
+    assert "EXCLUDED 2 frame(s) whose image is not on disk" in printed
+    assert "sessC" in printed
+
+    kept = {f["item_id"] for f in
+            json.loads((out / "seg_manifest.json").read_text())["frames"]}
+    assert all(int(i.rsplit("_", 1)[1]) < 4 for i in kept)
+
+
+def test_verify_images_is_off_by_default_so_build_needs_no_images(tmp_path):
+    """build() records where to find an image rather than reading one, which
+    is what lets it be tested without a dataset on disk."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "no_images_here", out, val_fraction=0.0,
+               test_fraction=0.0, seed=1, strict=False)
+    assert json.loads((out / "seg_manifest.json").read_text())["n_frames"] > 0

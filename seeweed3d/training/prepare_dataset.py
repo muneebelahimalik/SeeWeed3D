@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES  # noqa: E402
 from training import datumaro_multitask as dmm  # noqa: E402
+from training import seg_dataset as sd  # noqa: E402
 from training import splits as sp  # noqa: E402
 from training.config import AnnotationContract  # noqa: E402
 
@@ -348,6 +349,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
           drop_classes=(), keep_classes=None, label_provenance="hand_corrected",
+          verify_images=False,
           keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
           split_mode="auto", blocks_per_session=1):
@@ -624,6 +626,56 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     elif empty:
         print(f"  [!] KEEPING {len(empty)} frame(s) with no annotations as "
               f"negative examples, because --keep-empty-frames was given.")
+
+    # -- exclude frames whose IMAGE is not on disk ---------------------------
+    # An export can outlive the frames it describes: pool frames deleted after
+    # extraction, a session pruned, an rgb/ folder half-copied. The manifest
+    # records where to find an image rather than reading it, so without this
+    # the mismatch surfaces later, one frame at a time, as a FileNotFoundError
+    # from COCO export - which names a single file and tells you nothing about
+    # whether one frame is missing or nine hundred.
+    #
+    # Off by default so build() stays runnable with no images on disk, which is
+    # what keeps it testable; the config runners turn it on.
+    if verify_images:
+        home = {}
+        for f in frames:
+            for src in origin.get(f.item_id, []):
+                cand = Path(src).parent.parent
+                if (cand / "rgb").is_dir():
+                    home[f.item_id] = cand
+                    break
+        missing, kept = [], []
+        for f in frames:
+            try:
+                sd.resolve_image(f.image_path, img_roots, f.session_id,
+                                 home.get(f.item_id))
+                kept.append(f)
+            except FileNotFoundError:
+                missing.append(f)
+        if missing:
+            by_session = Counter(f.session_id for f in missing)
+            print(f"  EXCLUDED {len(missing)} frame(s) whose image is not on "
+                  f"disk:")
+            for s, n in sorted(by_session.items()):
+                print(f"      {s}: {n} frame(s)")
+            print(f"      e.g. {', '.join(Path(f.image_path).name for f in missing[:5])}"
+                  f"{' ...' if len(missing) > 5 else ''}")
+            print(f"      The annotations outlived the images - frames deleted "
+                  f"after extraction, or an rgb/ folder that did not finish "
+                  f"copying. The build continues WITHOUT them, so the dataset "
+                  f"describes what actually exists.")
+            frames = kept
+            # Recount: the report must describe the dataset that was built.
+            per_class, per_session = Counter(), {}
+            for f in frames:
+                for i in f.instances:
+                    per_class[i.class_name] += 1
+                    per_session.setdefault(f.session_id,
+                                           Counter())[i.class_name] += 1
+            report.per_class = dict(per_class)
+            report.per_session = {k: dict(v) for k, v in per_session.items()}
+            report.n_instances = int(sum(per_class.values()))
 
     if not frames:
         raise SystemExit(
@@ -1012,6 +1064,11 @@ def main(argv=None):
                         "and every metric measures agreement with IT, not with "
                         "reality. Recorded in the manifest and restated by "
                         "preflight at train time.")
+    p.add_argument("--verify-images", action="store_true",
+                   help="check every frame's image is on disk and exclude the "
+                        "ones that are not, reporting the count per session. "
+                        "Without it a missing image surfaces later as a "
+                        "one-file error from COCO export.")
     p.add_argument("--keep-empty-frames", action="store_true",
                    help="keep frames with no annotations as negative examples. "
                         "Off by default: an empty frame is usually one you did "
@@ -1050,6 +1107,7 @@ def main(argv=None):
           drop_classes=a.drop_classes,
           keep_classes=a.keep_classes,
           label_provenance=a.label_provenance,
+          verify_images=a.verify_images,
           keep_empty_frames=a.keep_empty_frames,
           require_lep=False if a.no_require_lep else "auto",
           include_frames=a.include_frames, exclude_frames=a.exclude_frames)
