@@ -362,3 +362,17 @@ def test_lep_manifest_references_images_without_copying(tmp_path):
     assert "/" in r["image_path"] or r["image_path"].endswith(".png")
     assert r["growth_stage"] == "2-leaf"
     assert r["polygons"]                         # geometry travels in the manifest
+
+
+def test_the_filename_is_found_when_size_and_path_are_in_different_blobs(tmp_path):
+    """An export carrying BOTH `image` and `media` may split the fields between
+    them. Taking the first key that exists and stopping loses the filename, and
+    the fallback - the item id - has no extension, so the frame resolves to
+    nothing and the loss is silent until something opens it."""
+    item = {"id": "sess_a_000001",
+            "image": {"size": [480, 640]},
+            "media": {"path": "sess_a_000001.png"},
+            "annotations": [_poly("grass_weed", _square(1, 1, 9), ann_id=1)]}
+    frames, _ = dm.load_datumaro(_write(tmp_path, _doc([item])))
+    assert frames[0].image_path == "sess_a_000001.png"
+    assert (frames[0].width, frames[0].height) == (640, 480)

@@ -246,9 +246,18 @@ def _canonical_label(name):
 def _item_image(item, path):
     """(image_path, width, height). Datumaro has used both `image` and `media`;
     both are accepted so an export from either CVAT generation works."""
-    blob = item.get("image") or item.get("media") or {}
-    img_path = str(blob.get("path") or blob.get("filename") or item.get("id", ""))
-    size = blob.get("size")
+    # Datumaro has used both `image` and `media`, and an export may carry BOTH
+    # with the fields split between them - the size under one and the path under
+    # the other. Preferring whichever key exists and stopping there loses the
+    # filename, and the fallback is the item id, which has no extension: the
+    # frame then resolves to nothing and the loss is silent until something
+    # tries to open it.
+    img_blob = item.get("image") or {}
+    med_blob = item.get("media") or {}
+    img_path = str(img_blob.get("path") or img_blob.get("filename")
+                   or med_blob.get("path") or med_blob.get("filename")
+                   or item.get("id", ""))
+    size = img_blob.get("size") or med_blob.get("size")
     h = w = 0
     if isinstance(size, (list, tuple)) and len(size) == 2:
         h, w = int(size[0]), int(size[1])       # Datumaro stores [height, width]

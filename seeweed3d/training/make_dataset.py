@@ -204,6 +204,12 @@ CONFIG = {
     # and the only place the distinction can live.
     "LABEL_PROVENANCE": "prelabel_unreviewed",
 
+    # Check every frame's image is on disk, and exclude + report the ones that
+    # are not. An export outlives the frames it describes whenever pool frames
+    # were deleted after extraction. False skips the check, which is only
+    # useful when the images are on a drive that is not mounted right now.
+    "VERIFY_IMAGES": True,
+
     # -- Splits ----------------------------------------------------------------
     # With ONE session these become contiguous FRAME BLOCKS separated by a
     # discarded gap, not random frames - adjacent video frames are near
@@ -393,6 +399,10 @@ def main(cfg=None):
         drop_classes=c["DROP_CLASSES"],
         keep_classes=c.get("KEEP_CLASSES"),
         label_provenance=c.get("LABEL_PROVENANCE", "hand_corrected"),
+        # The runner has real paths, so it checks the images are actually there
+        # and says how many are not - rather than letting COCO export die on
+        # the first one, hours later, naming a single file.
+        verify_images=c.get("VERIFY_IMAGES", True),
         val_fraction=c["VAL_FRACTION"], test_fraction=c["TEST_FRACTION"],
         gap_frames=c["GAP_FRAMES"], seed=c["SEED"],
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],
