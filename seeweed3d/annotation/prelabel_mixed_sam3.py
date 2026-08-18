@@ -194,7 +194,6 @@ from perception.segmenter import drop_fragments  # noqa: E402
 DATASET_ROOT   = r"E:\Dataset_Vidalia\Vidalia_visit_1_2025_all_sessions"
 SAM_VERSION    = "sam3"
 SAM_CHECKPOINT = r"E:\Models\sam3.pt"
-
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -206,7 +205,7 @@ CONFIG = {
     "OUTPUT_SUBDIR":  "auto_labels_mixed",
 
     # Mixed sessions. Empty = every session under sessions/.
-    "ONLY_SESSIONS": [],
+    "ONLY_SESSIONS": ["Visit1_20250221_142227","Visit1_20250221_142905","Visit1_20250221_143322"],
 
     "CVAT_READY_SUBDIR":  "cvat_ready",
     "FLAGGED_RGB_SUBDIR": "flagged_rgb",
