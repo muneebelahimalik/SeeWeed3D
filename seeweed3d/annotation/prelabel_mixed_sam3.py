@@ -386,7 +386,25 @@ CONFIG = {
     # False   never use depth.
     # True    require it, and fail loudly if the session has none, so a run you
     #         believe is depth-gated cannot quietly not be.
-    "USE_DEPTH_HEIGHT": "auto",
+    # OFF BY DEFAULT - FIELD-TESTED AND REVERTED. A trial on a real metric-depth
+    # onion session (dense transplanted seedlings, ~885mm boom height) showed
+    # the veto removing genuine onion tissue: a thin leaf next to a taller one
+    # in the same cluster lost its mask entirely. The likely mechanism is the
+    # local soil-surface estimate - dense clusters leave few bare-soil pixels
+    # per GROUND_TILE_PX tile, so a nearby tile's estimate (pulled toward a
+    # TALLER neighbour) gets borrowed by nearest-neighbour fill and makes the
+    # shorter, thinner leaf read as below that borrowed ground level.
+    #
+    # A missed onion is a worse failure than a phantom speckle survives here:
+    # this project already reverted RECOVER_MISSED_PLANTS and the weed
+    # boundary-refinement block on exactly this trade-off, and the same
+    # judgment applies. The infrastructure (perception/ground.py) is unchanged
+    # and worth revisiting for a use that does not delete on this evidence -
+    # e.g. restricting the veto to backstop-only "recovered" instances that
+    # have no other corroboration, or making it advisory (route to
+    # review_first.txt) rather than a silent drop. See
+    # docs/depth_assisted_masking.md.
+    "USE_DEPTH_HEIGHT": False,
 
     # An instance whose body sits below this many millimetres above the local
     # soil surface is not a plant. Set it well under your smallest real
@@ -1158,7 +1176,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     # means a session that cannot support the veto says so before the GPU
     # starts rather than silently skipping it 800 times.
     from perception import ground as gr
-    want = cfg.get("USE_DEPTH_HEIGHT", "auto")
+    want = cfg.get("USE_DEPTH_HEIGHT", False)
     depth_kind = gr.session_depth_kind(session_dir)
     use_depth = bool(want) and gr.has_metric_depth(session_dir)
     if want is True and not use_depth:

@@ -8,6 +8,33 @@ cannot: tell a green-tinted pebble from a cotyledon.
 
 ---
 
+## Status: the height veto is OFF by default
+
+`USE_DEPTH_HEIGHT` ships `False` in all four prelabelers. A field trial on a
+real metric-depth onion session (dense transplanted seedlings, ~885mm boom
+height) showed it removing genuine onion tissue — a thin leaf next to a
+taller one in the same cluster lost its mask entirely, not just gravel or
+soil speckle as intended.
+
+The likely mechanism: dense clusters leave few bare-soil pixels per
+`GROUND_TILE_PX` tile, so a neighbouring tile's estimate — pulled toward a
+**taller** nearby plant — gets borrowed by nearest-neighbour fill, and the
+shorter, thinner leaf reads as below that borrowed ground level. This is
+offered as the likely explanation, not a confirmed one.
+
+A missed onion is a worse failure than a phantom speckle surviving — this
+project already reverted `RECOVER_MISSED_PLANTS` and the weed
+boundary-refinement block on exactly this trade-off, and the same judgment
+applies here. The infrastructure below (`perception/ground.py`) is unchanged
+and worth revisiting for a use that does not delete on this evidence alone —
+e.g. restricting the veto to backstop-only "recovered" instances that have no
+other corroboration, or making it advisory (route to `review_first.txt` for
+human review) rather than a silent drop. You can still opt back in per run via
+`"USE_DEPTH_HEIGHT": True` or `"auto"` with this caveat in mind — the rest of
+this document describes how it works when enabled.
+
+---
+
 ## What depth is good at here, and what it is not
 
 Stereo answers one question well on this imagery: **is this raised above the
@@ -38,9 +65,10 @@ All four, since a single-class scene has the same pebbly ground as a mixed one.
 > **Weeds are not the same problem.** Some broadleaf weeds grow **prostrate**,
 > pressed flat against the soil — real targets that genuinely have almost no
 > height, and a height gate is exactly the wrong instrument for them. Onions
-> stand up. The weed default is lower for that reason; trial it on 20 frames
-> and look for rosettes disappearing before trusting it, and set
-> `USE_DEPTH_HEIGHT = False` there if they do.
+> stand up. The weed's `HEIGHT_MIN_MM` is lower for that reason, should you
+> re-enable the veto (see [Status](#status-the-height-veto-is-off-by-default)
+> above — it is off by default in all four prelabelers now); trial it on 20
+> frames and look for rosettes disappearing before trusting it.
 
 ## Which sessions can use it
 
@@ -98,11 +126,12 @@ scaling values it invented, and guessing here would recreate by hand exactly
 the fiction `REQUIRE_16BIT_DEPTH` exists to prevent.
 
 Your v1 (AVI) captures are `preview` or `none`. Your v2 (MKV/FFV1) captures are
-`metric`. `USE_DEPTH_HEIGHT = "auto"` uses depth where it exists and behaves
-exactly as before where it does not, so a mixed set of sessions needs no
-special handling. Set it to `True` to make a session **without** metric depth a
-hard error, when you intend a run to be depth-gated and want to know if it
-isn't.
+`metric`. `USE_DEPTH_HEIGHT` ships `False` (see
+[Status](#status-the-height-veto-is-off-by-default) above). Set it to `"auto"`
+to opt back in and use depth where it exists, behaving exactly as `False`
+where it does not, so a mixed set of sessions needs no special handling. Set
+it to `True` to make a session **without** metric depth a hard error, when you
+intend a run to be depth-gated and want to know if it isn't.
 
 ---
 
@@ -203,7 +232,7 @@ missing `calibration.json` cannot silently delete everything.
 ## Settings
 
 ```python
-"USE_DEPTH_HEIGHT": "auto",      # "auto" | True | False
+"USE_DEPTH_HEIGHT": False,       # "auto" | True | False - ships False, see Status above
 "HEIGHT_MIN_MM": 6.0,            # below this above local soil = not a plant
 "HEIGHT_MIN_MEASURED_FRAC": 0.25,
 "HEIGHT_PERCENTILE": 75.0,       # of the instance body, not its edge
