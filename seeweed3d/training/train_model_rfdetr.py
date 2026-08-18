@@ -52,13 +52,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 CONFIG = {
     # -- Where things are ------------------------------------------------------
     # OUT_DIR from make_dataset.py (the folder holding seg_manifest.json).
-    "DATASET_DIR": r"E:\Dataset_Vidalia\training_onion",
+    "DATASET_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
 
     # Sessions root(s). "" reuses whatever make_dataset.py recorded.
     "IMAGES_ROOT": "",
 
     # One folder per run - do not reuse, or you lose the comparison.
-    "RUN_DIR": r"E:\Dataset_Vidalia\training_onion\rfdetr_onion_v1",
+    "RUN_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset\rfdetr_onion_v1",
 
     # RF-DETR trains from a Roboflow-style COCO tree, which this builds from
     # seg_manifest.json. "" puts it inside RUN_DIR. Point several runs at ONE
