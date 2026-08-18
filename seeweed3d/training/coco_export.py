@@ -133,7 +133,11 @@ def export(dataset_dir, out_dir, images_root=None, link=False, overwrite=False):
     # at predict time, so a model trained on ids 1..N predicts 1..N - not
     # 0..N-1. Guessing an offset there mislabels plants, and mislabelling the
     # crop is a laser pointed at an onion.
+    # label_provenance is carried through from the manifest so preflight can
+    # restate it at train time. It decides what the run's metrics MEAN, and the
+    # COCO tree is what the trainer actually sees.
     summary = {"classes": classes, "splits": {}, "out_dir": str(out),
+               "label_provenance": doc.get("label_provenance"),
                "category_ids": {str(i + 1): c for i, c in enumerate(classes)}}
     for split, dirname in SPLIT_DIRS.items():
         frames = [f for f in doc["frames"] if f.get("split") == split]

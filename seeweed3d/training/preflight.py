@@ -235,11 +235,42 @@ def check_schedule(summary, epochs, batch, grad_accum, patience,
     return out
 
 
+def check_provenance(summary):
+    """What the labels ARE decides what every metric below MEANS.
+
+    Restated here, at train time, because the build that recorded it may have
+    been months and several rounds ago - and this is the finding that changes
+    how the resulting number should be read, not whether the run will finish."""
+    prov = summary.get("label_provenance")
+    if prov in (None, "hand_corrected"):
+        return []
+    if prov == "prelabel_unreviewed":
+        return [Finding(
+            "warn", "labels_unreviewed",
+            "these labels are UNREVIEWED prelabels, so this run is "
+            "DISTILLATION: the model learns the prelabeler's misses as if they "
+            "were correct and cannot exceed it. Every AP below measures "
+            "agreement WITH THE PRELABELER, not with reality - a high score "
+            "says 'faithfully reproduces the teacher', which is not the same "
+            "as 'finds the crop'.",
+            "Hand-correct a small held-out test split (20-30 frames is "
+            "enough) and read the score from that alone. Without one, a good "
+            "run and a bad run are indistinguishable.")]
+    return [Finding(
+        "warn", "labels_partly_unreviewed",
+        "labels are a MIX of hand-corrected and unreviewed prelabels. Any "
+        "split containing unreviewed frames scores agreement with the "
+        "prelabeler on those frames.",
+        "Confirm the test split is hand-corrected throughout, and read the "
+        "score from it alone.")]
+
+
 def preflight(coco_dir, *, epochs=60, batch=2, grad_accum=8, patience=25,
               early_stopping=True):
     """Every finding for this dataset and this schedule."""
     summary = load_export_summary(coco_dir)
     findings = (check_splits(summary) + check_classes(summary)
+                + check_provenance(summary)
                 + check_schedule(summary, epochs, batch, grad_accum, patience,
                                  early_stopping))
     return summary, findings

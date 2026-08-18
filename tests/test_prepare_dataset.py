@@ -688,3 +688,37 @@ def test_no_keep_list_keeps_every_class(tmp_path):
     mapping = json.loads((out / "class_mapping.json").read_text())
     assert mapping["dropped"] == []
     assert mapping["selection_mode"] == "drop"
+
+
+# --------------------------------------------------------------------------- #
+# What the labels ARE decides what the metrics MEAN
+# --------------------------------------------------------------------------- #
+def test_label_provenance_travels_with_the_manifest(tmp_path):
+    """A build months later is read by someone who was not in the conversation
+    where 'these are just SAM outputs' was said out loud."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               label_provenance="prelabel_unreviewed")
+    for name in ("seg_manifest.json", "lep_manifest.json"):
+        doc = json.loads((out / name).read_text())
+        assert doc["label_provenance"] == "prelabel_unreviewed", name
+
+
+def test_provenance_defaults_to_hand_corrected(tmp_path):
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False)
+    doc = json.loads((out / "seg_manifest.json").read_text())
+    assert doc["label_provenance"] == "hand_corrected"
+
+
+def test_an_unknown_provenance_is_refused(tmp_path):
+    """A typo must not silently record 'these were reviewed'."""
+    root = _crop_and_weeds_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        prep.build(root, tmp_path / "images", tmp_path / "out",
+                   label_provenance="sam3", strict=False)
+    assert "label_provenance" in str(e.value)

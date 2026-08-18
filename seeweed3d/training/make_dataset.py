@@ -88,13 +88,18 @@ CONFIG = {
     #   different folders (an onion set recorded separately from the weed
     #   sessions). Images are never copied; manifests point at these files.
     "SOURCES": [
+        # ONION CAMPAIGNS ONLY. Your annotations live inside each session
+        # folder next to rgb/, so ONE path serves as both: as DATUMARO_ROOT it
+        # recurses and finds every session's annotations/default.json, and as
+        # IMAGES_ROOT its children are already the session-id folders.
+        # Add one block per onion campaign folder; same path in both fields.
+        #
+        # Mixed campaigns are deliberately NOT here. Their prelabels were the
+        # weak ones (false masks, tiny spurious instances), and distilling from
+        # a weak teacher bakes those artifacts into the student.
         {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\auto_labels_onion_5_final\vid3_20260108_132749",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\sessions",
-        },
-        {
-             "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\auto_labels_weeds\vid2_20260108_122731",
-             "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
         },
     ],
     # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
@@ -110,7 +115,7 @@ CONFIG = {
     #"IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
-    "OUT_DIR": r"E:\Dataset_Vidalia\training1",
+    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
@@ -132,8 +137,7 @@ CONFIG = {
     #    vid2_20260108_122731:51-60,onion1_20260115_090000:*"
     # `<session>:*` keeps all of that session. With exactly one session across
     # every source, a bare "1-27,29-36,51-60" is still fine.
-    "INCLUDE_FRAMES": "vid2_20260108_122731:1-27,vid2_20260108_122731:29-37,"
-                  "vid2_20260108_122731:51-60,vid3_20260108_132749:1-36",
+    "INCLUDE_FRAMES": "",
 
     # Applied after INCLUDE_FRAMES. Same syntax. Usually left empty.
     "EXCLUDE_FRAMES": "",
@@ -143,7 +147,7 @@ CONFIG = {
     # class returns automatically once you have real examples of it. A class
     # with 0-2 instances across the whole set is not learnable and only
     # pollutes the metrics.
-    "DROP_CLASSES": ["wild_radish", "weed_cluster"],
+    "DROP_CLASSES": [],
 
     # The inverse, and the better spelling when the build is defined by what it
     # IS rather than by what it lacks. None = no allow-list (use DROP_CLASSES).
@@ -156,7 +160,31 @@ CONFIG = {
     # silently admit that new class into an onion-only dataset; the allow-list
     # keeps meaning what it said. DROP_CLASSES still applies on top, so you can
     # narrow an allow-list without rewriting it.
-    "KEEP_CLASSES": None,
+    "KEEP_CLASSES": ["onion_plant"],
+
+    # -- What these labels ARE -------------------------------------------------
+    # Decides what every metric this dataset ever produces MEANS. Recorded in
+    # the manifest and restated by preflight at train time, because the build
+    # that set it may be months and several rounds behind the run reading it.
+    #
+    #   "hand_corrected"      a person reviewed and fixed them. The only value
+    #                         under which val/test AP estimates real
+    #                         performance.
+    #   "prelabel_unreviewed" SAM 3 output round-tripped through CVAT without
+    #                         correction. Training on it is DISTILLATION - the
+    #                         model learns the prelabeler's misses as if they
+    #                         were correct, cannot exceed it, and every AP
+    #                         measures agreement WITH THE PRELABELER rather
+    #                         than with reality. A high score there says
+    #                         "faithfully reproduces the teacher", which on a
+    #                         crop-safety system is exactly the number not to
+    #                         mistake for "finds the crop".
+    #   "mixed"               some of each.
+    #
+    # Nothing in an export can tell these apart - a polygon a person fixed and
+    # one they only looked at are identical on disk - so this is a declaration,
+    # and the only place the distinction can live.
+    "LABEL_PROVENANCE": "prelabel_unreviewed",
 
     # -- Splits ----------------------------------------------------------------
     # With ONE session these become contiguous FRAME BLOCKS separated by a
@@ -220,7 +248,7 @@ CONFIG = {
     #
     # A held-out session remains strictly better and nothing here replaces it.
     # Record one when you can, and rebuild with HOLDOUT_TEST_SESSIONS.
-    "SPLIT_MODE": "auto",
+    "SPLIT_MODE": "frame_block",
 
     # Cut each session into this many stretches and split WITHIN each one, so
     # val and test are sampled from several places along every drive.
@@ -346,6 +374,7 @@ def main(cfg=None):
         exclude_frames=c["EXCLUDE_FRAMES"] or None,
         drop_classes=c["DROP_CLASSES"],
         keep_classes=c.get("KEEP_CLASSES"),
+        label_provenance=c.get("LABEL_PROVENANCE", "hand_corrected"),
         val_fraction=c["VAL_FRACTION"], test_fraction=c["TEST_FRACTION"],
         gap_frames=c["GAP_FRAMES"], seed=c["SEED"],
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],

@@ -347,7 +347,7 @@ def list_frames(datumaro_root, contract=None):
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
-          drop_classes=(), keep_classes=None,
+          drop_classes=(), keep_classes=None, label_provenance="hand_corrected",
           keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
           split_mode="auto", blocks_per_session=1):
@@ -368,6 +368,31 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         A `class_mapping.json` records ontology name -> training index, so a
         model trained on the reduced set can still be interpreted against the
         full ontology.
+
+    label_provenance: where these labels came from. Travels with the manifest,
+        because it decides what every metric downstream MEANS.
+
+        "hand_corrected"      a person reviewed and fixed them. The default,
+                              and the only value under which val/test AP
+                              estimates real performance.
+        "prelabel_unreviewed" model output that made a round trip through CVAT
+                              without correction. Training on this is
+                              DISTILLATION: the student learns the teacher's
+                              misses as if they were correct and cannot exceed
+                              it, and - the part that is easy to miss - the
+                              metrics measure AGREEMENT WITH THE TEACHER, not
+                              with reality. A high AP here says "faithfully
+                              reproduces the prelabeler", which on a
+                              crop-safety system is exactly the number not to
+                              mistake for "finds the crop".
+        "mixed"               some of each; treat as unreviewed until the split
+                              is known.
+
+        Recorded rather than inferred: nothing in an export distinguishes a
+        polygon a person fixed from one they only looked at, so this is the
+        annotator's declaration and the only place the distinction can live.
+        preflight raises it as a finding so it is restated at train time, when
+        it matters, instead of only here.
 
     keep_classes: the inverse - name what this build IS, and everything else in
         the ontology is dropped. None (default) means "no allow-list", which is
@@ -432,6 +457,12 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # check existence up front, with an error naming which root is missing.
     # Validated first, before any export is parsed: a typo here should cost a
     # second, not a full load of every annotation file.
+    PROVENANCE = ("hand_corrected", "prelabel_unreviewed", "mixed")
+    if label_provenance not in PROVENANCE:
+        raise SystemExit(
+            f"ERROR: label_provenance must be one of {list(PROVENANCE)}; got "
+            f"{label_provenance!r}")
+
     split_mode_wanted = str(split_mode or "auto").lower()
     if split_mode_wanted not in ("auto", "session", "frame_block"):
         raise SystemExit(
@@ -838,6 +869,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                     "dataset_kind": ("segmentation_only" if seg_only
                                      else "multitask"),
                     "split_strategy": split_mode,
+                    "label_provenance": label_provenance,
                     "sessions": sorted({f.session_id for f in frames}),
                     "n_frames": len(seg_frames), "frames": seg_frames}, indent=2),
         encoding="utf-8")
@@ -851,6 +883,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                     "dataset_kind": ("segmentation_only" if seg_only
                                      else "multitask"),
                     "split_strategy": split_mode,
+                    "label_provenance": label_provenance,
                     "n_rows": len(rows), "rows": rows}, indent=2),
         encoding="utf-8")
 
@@ -879,6 +912,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     rep["n_yolo_label_files"] = n_labels
     rep["n_lep_rows"] = len(rows)
     rep["dataset_kind"] = "segmentation_only" if seg_only else "multitask"
+    rep["label_provenance"] = label_provenance
     rep["lep_rows_per_split"] = dict(Counter(r["split"] for r in rows))
     (out / "dataset_report.json").write_text(json.dumps(rep, indent=2),
                                              encoding="utf-8")
@@ -952,6 +986,13 @@ def main(argv=None):
                         "when the build is defined by what it contains - a "
                         "deny-list silently admits any class appended to the "
                         "ontology later, an allow-list does not.")
+    p.add_argument("--label-provenance", default="hand_corrected",
+                   choices=["hand_corrected", "prelabel_unreviewed", "mixed"],
+                   help="where these labels came from. 'prelabel_unreviewed' "
+                        "means training is DISTILLATION from the prelabeler "
+                        "and every metric measures agreement with IT, not with "
+                        "reality. Recorded in the manifest and restated by "
+                        "preflight at train time.")
     p.add_argument("--keep-empty-frames", action="store_true",
                    help="keep frames with no annotations as negative examples. "
                         "Off by default: an empty frame is usually one you did "
@@ -989,6 +1030,7 @@ def main(argv=None):
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
           keep_classes=a.keep_classes,
+          label_provenance=a.label_provenance,
           keep_empty_frames=a.keep_empty_frames,
           require_lep=False if a.no_require_lep else "auto",
           include_frames=a.include_frames, exclude_frames=a.exclude_frames)
