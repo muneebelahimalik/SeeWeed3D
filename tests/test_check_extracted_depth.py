@@ -163,3 +163,38 @@ def test_frames_are_sampled_across_the_session(tmp_path):
     sess = _write(tmp_path / "sessions" / "s1", _metric(n=100))
     got = cd.sample_depth_frames(sess, limit=6)
     assert 0 < len(got) <= 6
+
+
+# --------------------------------------------------------------------------- #
+# Only the rig's owner knows its real mount height
+# --------------------------------------------------------------------------- #
+def test_a_close_mounted_rig_is_uncertain_at_the_default_range():
+    """250 mm is a guess about a typical boom, not a physical law. A
+    delta-robot camera genuinely mounted at 150 mm must not be silently
+    accepted OR silently rejected - it has to be told apart explicitly."""
+    frames = _metric(camera_mm=150.0)
+    res = cd.classify_depth(frames)
+    assert res["kind"] == "uncertain"
+    assert "--min-mm" in res["reason"]
+
+
+def test_the_same_data_is_metric_once_the_true_range_is_given():
+    frames = _metric(camera_mm=150.0)
+    res = cd.classify_depth(frames, plausible_mm=(100.0, 400.0))
+    assert res["kind"] == "metric"
+
+
+def test_the_cli_accepts_a_custom_range(tmp_path, capsys):
+    sess = _write(tmp_path / "sessions" / "s1", _metric(camera_mm=150.0))
+    cd.main(["--sessions", str(tmp_path / "sessions"),
+             "--min-mm", "100", "--max-mm", "400", "--write"])
+    doc = json.loads((sess / "meta" / "session.json").read_text())
+    assert doc["depth_kind"] == "metric"
+    assert "custom plausible range" in capsys.readouterr().out
+
+
+def test_the_default_range_is_unaffected_when_no_override_is_given(tmp_path):
+    sess = _write(tmp_path / "sessions" / "s1", _metric())     # ~1200mm
+    cd.main(["--sessions", str(tmp_path / "sessions"), "--write"])
+    doc = json.loads((sess / "meta" / "session.json").read_text())
+    assert doc["depth_kind"] == "metric"
