@@ -133,6 +133,7 @@ CONFIG = {
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
     "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
+    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
