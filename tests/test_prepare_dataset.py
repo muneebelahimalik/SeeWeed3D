@@ -565,3 +565,126 @@ def test_unknown_drop_class_fails_clearly(tmp_path):
         prep.build(root, tmp_path / "images", tmp_path / "out",
                    drop_classes=["nonexistent_weed"], strict=False)
     assert "nonexistent_weed" in str(e.value)
+
+
+# --------------------------------------------------------------------------- #
+# Naming what a build IS, rather than what it lacks
+# --------------------------------------------------------------------------- #
+def _crop_and_weeds_export(tmp_path, name="cw", frames_per=10):
+    """Onions AND weeds in every frame - the export a crop-only build has to
+    narrow down."""
+    items = []
+    for f in range(frames_per):
+        anns = [
+            {"id": 1, "type": "polygon", "label_id": L["grass_weed"],
+             "group": 1, "points": _sq(20, 20, 60), "z_order": 0,
+             "attributes": {"lep_visibility": "visible", "targetable": "yes"}},
+            {"id": 2, "type": "points", "label_id": L["weed_LEP"], "group": 1,
+             "points": [50.0, 50.0], "z_order": 0, "attributes": {}},
+            {"id": 3, "type": "polygon", "label_id": L[CROP_CLASS],
+             "group": 2, "points": _sq(200, 20, 60), "z_order": 0,
+             "attributes": {}},
+        ]
+        items.append({"id": f"sessC_{f:06d}", "annotations": anns,
+                      "image": {"path": f"sessC_{f:06d}.png",
+                                "size": [480, 640]}})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []} for n in LABELS],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / name
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_keep_classes_builds_a_crop_only_dataset(tmp_path):
+    """Combining the onion-only sessions into one build: name the class the
+    build is FOR and everything else goes, without enumerating the weeds."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    report, _, rows = prep.build(root, tmp_path / "images", out,
+                                 val_fraction=0.2, test_fraction=0.2, seed=1,
+                                 strict=False, keep_classes=[CROP_CLASS])
+
+    assert set(report.per_class) == {CROP_CLASS}
+    assert all(r["class_name"] == CROP_CLASS for r in rows)
+
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["active_classes"] == [CROP_CLASS]
+    assert mapping["train_index_to_ontology_name"] == {"0": CROP_CLASS}
+
+
+def test_an_allow_list_does_not_admit_a_class_appended_later(tmp_path):
+    """The reason to prefer it over the equivalent deny-list. The ontology
+    grows by APPENDING, and a deny-list written today does not mention a class
+    added tomorrow - so that class would silently enter a build that named
+    itself onion-only. Asserting against the LIVE ontology is what makes this
+    test keep testing the property as CLASSES grows."""
+    from common.ontology import CLASSES as LIVE
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               keep_classes=[CROP_CLASS])
+
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["dropped"] == sorted(set(LIVE) - {CROP_CLASS})
+    assert mapping["selection_mode"] == "keep"
+    assert mapping["kept_requested"] == [CROP_CLASS]
+
+
+def test_a_drop_build_still_records_itself_as_one(tmp_path):
+    """The mode is recorded so a later reader can tell 'onion only, by intent'
+    from 'these happened to be dropped that day'."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               drop_classes=["wild_radish"])
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["selection_mode"] == "drop"
+    assert mapping["kept_requested"] is None
+
+
+def test_drop_applies_on_top_of_keep(tmp_path):
+    """Narrowing an allow-list without rewriting it."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               keep_classes=[CROP_CLASS, "grass_weed"],
+               drop_classes=["grass_weed"])
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["active_classes"] == [CROP_CLASS]
+
+
+def test_an_empty_keep_list_is_refused_not_read_as_keep_everything(tmp_path):
+    """`[]` is a mistake worth naming. Treating it as 'no allow-list' would
+    build the full-ontology dataset the caller was trying to narrow."""
+    root = _crop_and_weeds_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        prep.build(root, tmp_path / "images", tmp_path / "out",
+                   keep_classes=[], strict=False)
+    assert "keep-classes" in str(e.value).lower()
+
+
+def test_unknown_keep_class_fails_clearly(tmp_path):
+    """A typo must not quietly produce an empty dataset."""
+    root = _crop_and_weeds_export(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        prep.build(root, tmp_path / "images", tmp_path / "out",
+                   keep_classes=["onion_plants"], strict=False)   # trailing s
+    assert "onion_plants" in str(e.value)
+
+
+def test_no_keep_list_keeps_every_class(tmp_path):
+    """None is not the same as an empty list."""
+    root = _crop_and_weeds_export(tmp_path)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False)
+    mapping = json.loads((out / "class_mapping.json").read_text())
+    assert mapping["dropped"] == []
+    assert mapping["selection_mode"] == "drop"

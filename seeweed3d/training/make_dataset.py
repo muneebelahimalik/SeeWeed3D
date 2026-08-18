@@ -145,6 +145,19 @@ CONFIG = {
     # pollutes the metrics.
     "DROP_CLASSES": ["wild_radish", "weed_cluster"],
 
+    # The inverse, and the better spelling when the build is defined by what it
+    # IS rather than by what it lacks. None = no allow-list (use DROP_CLASSES).
+    #
+    #   "KEEP_CLASSES": ["onion_plant"]     a crop-only detector
+    #
+    # Why not just list the five weeds in DROP_CLASSES? Because the two pick the
+    # same classes today and diverge the moment a class is appended to the
+    # ontology - which is the documented way it grows. The deny-list would
+    # silently admit that new class into an onion-only dataset; the allow-list
+    # keeps meaning what it said. DROP_CLASSES still applies on top, so you can
+    # narrow an allow-list without rewriting it.
+    "KEEP_CLASSES": None,
+
     # -- Splits ----------------------------------------------------------------
     # With ONE session these become contiguous FRAME BLOCKS separated by a
     # discarded gap, not random frames - adjacent video frames are near
@@ -332,6 +345,7 @@ def main(cfg=None):
         include_frames=c["INCLUDE_FRAMES"] or None,
         exclude_frames=c["EXCLUDE_FRAMES"] or None,
         drop_classes=c["DROP_CLASSES"],
+        keep_classes=c.get("KEEP_CLASSES"),
         val_fraction=c["VAL_FRACTION"], test_fraction=c["TEST_FRACTION"],
         gap_frames=c["GAP_FRAMES"], seed=c["SEED"],
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],

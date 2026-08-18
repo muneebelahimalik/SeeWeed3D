@@ -347,7 +347,8 @@ def list_frames(datumaro_root, contract=None):
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
-          drop_classes=(), keep_empty_frames=False, require_lep="auto",
+          drop_classes=(), keep_classes=None,
+          keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
           split_mode="auto", blocks_per_session=1):
     """Everything after out_root is keyword-only on purpose: a positional
@@ -367,6 +368,24 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         A `class_mapping.json` records ontology name -> training index, so a
         model trained on the reduced set can still be interpreted against the
         full ontology.
+
+    keep_classes: the inverse - name what this build IS, and everything else in
+        the ontology is dropped. None (default) means "no allow-list", which is
+        not the same as an empty one; an empty list is refused rather than
+        silently building nothing.
+
+        Prefer this over drop_classes whenever the build is defined by what it
+        contains rather than by what it lacks - a crop-only detector is
+        "onion_plant", not "not these five weeds". The two spellings pick the
+        same classes TODAY and diverge the moment a class is appended to the
+        ontology: the deny-list silently admits it into a dataset that was never
+        meant to have it, while the allow-list keeps meaning what it said. Since
+        appending classes is the documented way the ontology grows, that is a
+        question of when, not if.
+
+        Combining both is allowed and drop_classes still applies on top, so
+        keep=[a, b] with drop=[b] yields [a] - useful for narrowing an
+        allow-list without rewriting it.
 
     require_lep: "auto" (default) | True | False. Whether a visible, targetable
         weed must carry a grouped LEP point.
@@ -429,6 +448,25 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         raise SystemExit(
             f"ERROR: --drop-classes names classes not in the ontology: "
             f"{unknown_drop}\nKnown: {CLASSES}")
+
+    # An allow-list is turned into the equivalent deny-list here, so everything
+    # downstream - active_classes, class_mapping.json, the per-class report -
+    # has exactly one notion of what is in this build. `is not None` and not a
+    # truth test: an EMPTY keep list is a mistake worth naming, not a silent
+    # "keep everything".
+    if keep_classes is not None:
+        keep = {c for c in keep_classes}
+        unknown_keep = sorted(keep - set(CLASSES))
+        if unknown_keep:
+            raise SystemExit(
+                f"ERROR: --keep-classes names classes not in the ontology: "
+                f"{unknown_keep}\nKnown: {CLASSES}")
+        if not keep:
+            raise SystemExit(
+                "ERROR: --keep-classes is empty. Name the classes this build "
+                "is FOR, or omit it entirely to keep every class.")
+        drop |= set(CLASSES) - keep
+
     active_classes = [c for c in CLASSES if c not in drop]
     if not active_classes:
         raise SystemExit("ERROR: every class was dropped; nothing to train on.")
@@ -820,6 +858,14 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         "ontology": list(CLASSES),
         "active_classes": list(active_classes),
         "dropped": sorted(drop),
+        # What was ASKED for, alongside what it resolved to. An allow-list build
+        # records the allow-list, so a later reader can tell "onion only, by
+        # intent" from "these five happened to be dropped that day" - which is
+        # the difference between a dataset that should gain a newly-added class
+        # on rebuild and one that should not.
+        "selection_mode": "keep" if keep_classes is not None else "drop",
+        "kept_requested": (sorted(keep_classes)
+                           if keep_classes is not None else None),
         "train_index_to_ontology_name": {i: n for i, n in
                                          enumerate(active_classes)},
         "note": ("Training indices are into active_classes, which is contiguous. "
@@ -899,6 +945,13 @@ def main(argv=None):
                    help="exclude these ontology classes from THIS build "
                         "(e.g. --drop-classes wild_radish weed_cluster). "
                         "common/ontology.py is NOT modified.")
+    p.add_argument("--keep-classes", nargs="*", default=None,
+                   help="the inverse of --drop-classes: keep ONLY these and "
+                        "drop the rest of the ontology (e.g. --keep-classes "
+                        "onion_plant for a crop-only detector). Prefer this "
+                        "when the build is defined by what it contains - a "
+                        "deny-list silently admits any class appended to the "
+                        "ontology later, an allow-list does not.")
     p.add_argument("--keep-empty-frames", action="store_true",
                    help="keep frames with no annotations as negative examples. "
                         "Off by default: an empty frame is usually one you did "
@@ -935,6 +988,7 @@ def main(argv=None):
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
+          keep_classes=a.keep_classes,
           keep_empty_frames=a.keep_empty_frames,
           require_lep=False if a.no_require_lep else "auto",
           include_frames=a.include_frames, exclude_frames=a.exclude_frames)

@@ -277,6 +277,36 @@ report generalisation.
 "DROP_CLASSES": ["wild_radish", "weed_cluster"],   # too few instances yet
 ```
 
+**Every onion-only session, as a crop-only detector:**
+
+```python
+"SOURCES": [ ... one entry per onion CVAT export ... ],
+"KEEP_CLASSES": ["onion_plant"],   # not DROP_CLASSES: see below
+"SPLIT_MODE": "frame_block",       # unless you can pin an onion session
+"BLOCKS_PER_SESSION": 4,
+"STRATIFY_BY_SCENE": True,         # a no-op when every session is onion_only
+```
+
+`KEEP_CLASSES` names what the build **is**; `DROP_CLASSES` names what it lacks.
+For a crop-only build the two pick the same classes today and diverge the moment
+a class is appended to the ontology — which is
+[the documented way it grows](../seeweed3d/common/ontology.py). A deny-list
+listing the five current weeds would silently admit the sixth into a dataset
+that called itself onion-only; the allow-list keeps meaning what it said.
+`class_mapping.json` records which spelling was used, so a later reader can tell
+*onion-only by intent* from *these happened to be dropped that day*. Both may be
+combined — `DROP_CLASSES` applies on top, which narrows an allow-list without
+rewriting it.
+
+> **What a crop-only model can and cannot tell you.** Trained on onion-only
+> scenes it has never seen a weed, so it has not learned *not everything green
+> is an onion* and will over-fire on weeds in a mixed field. That is the
+> expected result, not a bug: this build measures **crop detection**, and its
+> value is as the onion half of the complement approach
+> (`prelabel_complement_sam3.py`, where "not onion" becomes the weed proposal)
+> and as a baseline the mixed-scene model must beat on onions. Do not read its
+> AP as field performance on a mixed bed.
+
 **Merging a new active-learning round into an existing dataset:** add its
 export to `SOURCES` and rebuild. The split is deterministic for a seed, so
 sessions that were in test stay in test — as long as you do not change `SEED`.
