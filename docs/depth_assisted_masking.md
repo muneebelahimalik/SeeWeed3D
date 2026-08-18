@@ -56,6 +56,33 @@ type <sessions>\<sid>\meta\session.json | findstr depth_kind
 | `preview` | an 8-bit preview normalised **per frame** at capture. No constant relates it to millimetres; unrecoverable |
 | `none` | no depth stream |
 
+### If `depth_kind` says `unknown`
+
+`depth_kind` was only added to the extractor in **#80**, so any session
+extracted before that has no such field — it reads as `unknown` and the veto
+correctly refuses to run, even when the depth PNGs are perfectly good.
+
+Re-extracting answers it at the cost of hours and of whatever curation state
+the pool carries. This reads the frames instead and classifies them:
+
+```powershell
+python -m seeweed3d.validation.check_extracted_depth --sessions E:\...\sessions
+```
+
+```
+  Visit1_20260108_132749
+    depth_kind : metric
+    because    : median 1187 is a plausible camera distance in millimetres, and
+                 the per-frame maxima vary with scene content rather than being pinned
+    median 1187.0 | max 2410.0 | max spread 380.0 | peak saturated 0.0001
+```
+
+Add `--write` to record it in each `meta/session.json`. It **refuses to write
+an uncertain classification** — a 16-bit PNG is not by itself evidence that the
+numbers are millimetres, since ffmpeg produces `gray16le` from any source by
+scaling values it invented, and guessing here would recreate by hand exactly
+the fiction `REQUIRE_16BIT_DEPTH` exists to prevent.
+
 Your v1 (AVI) captures are `preview` or `none`. Your v2 (MKV/FFV1) captures are
 `metric`. `USE_DEPTH_HEIGHT = "auto"` uses depth where it exists and behaves
 exactly as before where it does not, so a mixed set of sessions needs no
