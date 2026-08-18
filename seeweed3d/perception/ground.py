@@ -456,7 +456,7 @@ def session_depth_setup(sid, session_dir, cfg, printer=print):
 
     USE_DEPTH_HEIGHT True raises rather than falling back, so a run you believe
     is depth-gated cannot quietly not be."""
-    want = cfg.get("USE_DEPTH_HEIGHT", "auto")
+    want = cfg.get("USE_DEPTH_HEIGHT", False)
     kind = session_depth_kind(session_dir)
     use = bool(want) and kind in METRIC_DEPTH_KINDS
     if want is True and not use:

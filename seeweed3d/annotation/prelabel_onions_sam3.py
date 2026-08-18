@@ -166,7 +166,25 @@ CONFIG = {
     # thin, low-texture tissue, which is exactly the small plants a height gate
     # would otherwise delete, so the veto fires only on positive evidence of
     # flatness. See perception/ground.py and docs/depth_assisted_masking.md.
-    "USE_DEPTH_HEIGHT": "auto",
+    # OFF BY DEFAULT - FIELD-TESTED AND REVERTED. A trial on a real metric-depth
+    # onion session (dense transplanted seedlings, ~885mm boom height) showed
+    # the veto removing genuine onion tissue: a thin leaf next to a taller one
+    # in the same cluster lost its mask entirely. The likely mechanism is the
+    # local soil-surface estimate - dense clusters leave few bare-soil pixels
+    # per GROUND_TILE_PX tile, so a nearby tile's estimate (pulled toward a
+    # TALLER neighbour) gets borrowed by nearest-neighbour fill and makes the
+    # shorter, thinner leaf read as below that borrowed ground level.
+    #
+    # A missed onion is a worse failure than a phantom speckle survives here:
+    # this project already reverted RECOVER_MISSED_PLANTS and the weed
+    # boundary-refinement block on exactly this trade-off, and the same
+    # judgment applies. The infrastructure (perception/ground.py) is unchanged
+    # and worth revisiting for a use that does not delete on this evidence -
+    # e.g. restricting the veto to backstop-only "recovered" instances that
+    # have no other corroboration, or making it advisory (route to
+    # review_first.txt) rather than a silent drop. See
+    # docs/depth_assisted_masking.md.
+    "USE_DEPTH_HEIGHT": False,
     "HEIGHT_MIN_MM": 6.0,
     "HEIGHT_MIN_MEASURED_FRAC": 0.25,
     "HEIGHT_PERCENTILE": 75.0,
