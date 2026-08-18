@@ -10,6 +10,8 @@ extract_sessions.py first." - is exactly wrong advice when extraction HAS been
 run and its output is in another folder. It sends you to re-run a job that
 already succeeded and says nothing about the path you typed.
 """
+from pathlib import Path
+
 import pytest
 
 from conftest import load_script
@@ -127,3 +129,74 @@ def test_the_stage_uses_the_shared_check(script):
            ).read_text(encoding="utf-8")
     assert "require_sessions_root" in src
     assert "not found. Run extract_sessions.py first." not in src
+
+
+# --------------------------------------------------------------------------- #
+# A root may BE a session folder, not only the folder of sessions
+# --------------------------------------------------------------------------- #
+def _session_tree(tmp_path, sid, n=3):
+    d = tmp_path / "sessions" / sid
+    for sub in ("rgb", "depth"):
+        (d / sub).mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        (d / "rgb" / f"{sid}_{i:06d}.png").write_bytes(b"")
+        (d / "depth" / f"{sid}_{i:06d}.png").write_bytes(b"")
+    return d
+
+
+def test_a_session_folder_works_as_an_images_root(tmp_path):
+    """Naming one root per session is a natural way to describe a merged
+    build, and it must not cost a recursive scan per image."""
+    sd = load_script("training/seg_dataset.py")
+    s = _session_tree(tmp_path, "Visit1_20260108_132749")
+    got = sd.resolve_image("Visit1_20260108_132749_000001.png", [s],
+                           session_id="Visit1_20260108_132749")
+    assert Path(got).parent.name == "rgb"
+    assert Path(got).name == "Visit1_20260108_132749_000001.png"
+
+
+def test_the_sessions_root_form_still_works(tmp_path):
+    sd = load_script("training/seg_dataset.py")
+    _session_tree(tmp_path, "Visit1_20260108_132749")
+    got = sd.resolve_image("Visit1_20260108_132749_000001.png",
+                           [tmp_path / "sessions"],
+                           session_id="Visit1_20260108_132749")
+    assert Path(got).parent.name == "rgb"
+
+
+def test_one_root_per_session_resolves_every_session(tmp_path):
+    """The real merged case: several roots, each a session folder."""
+    sd = load_script("training/seg_dataset.py")
+    a = _session_tree(tmp_path, "Visit1_20260108_132749")
+    b = _session_tree(tmp_path, "Visit2_20260210_164149")
+    for sid in ("Visit1_20260108_132749", "Visit2_20260210_164149"):
+        got = sd.resolve_image(f"{sid}_000002.png", [a, b], session_id=sid)
+        assert Path(got).name == f"{sid}_000002.png"
+        assert Path(got).parent.parent.name == sid, "resolved from the wrong session"
+
+
+def test_a_session_folder_root_prefers_rgb_over_depth(tmp_path):
+    """depth/ holds a file of the SAME name; picking it would train on depth."""
+    sd = load_script("training/seg_dataset.py")
+    s = _session_tree(tmp_path, "Visit1_20260108_132749")
+    got = sd.resolve_image("Visit1_20260108_132749_000000.png", [s],
+                           session_id="Visit1_20260108_132749")
+    assert Path(got).parent.name == "rgb"
+
+
+def test_a_renamed_session_folder_still_resolves(tmp_path):
+    """The folder can be renamed after extraction while the frames inside keep
+    their original prefix - session id comes from the FILENAME, so
+    <root>/<session_id>/rgb/ cannot match and only the session-folder form can.
+    This is the layout the onion build actually has: a folder called
+    Visit1_20260108_132749 holding frames named vid3_20260108_132749_*.png."""
+    sd = load_script("training/seg_dataset.py")
+    folder = tmp_path / "sessions" / "Visit1_20260108_132749"
+    (folder / "rgb").mkdir(parents=True)
+    for i in range(3):
+        (folder / "rgb" / f"vid3_20260108_132749_{i:06d}.png").write_bytes(b"")
+
+    got = sd.resolve_image("vid3_20260108_132749_000001.png", [folder],
+                           session_id="vid3_20260108_132749")
+    assert Path(got).name == "vid3_20260108_132749_000001.png"
+    assert Path(got).parent.name == "rgb"

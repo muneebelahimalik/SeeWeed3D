@@ -72,10 +72,16 @@ def resolve_image(rel, images_root, session_id=None):
     whichever root actually contains its session, not to all of them.
 
     CVAT tasks are flat uploads, so an export's media path is usually a bare
-    filename with no session folder in it. The canonical layout is
-    <root>/<session_id>/rgb/<name>, and trying that directly matters: the
-    fallback is a recursive scan, and running one per image per epoch over a
-    dataset root holding tens of thousands of PNGs dominates training time.
+    filename with no session folder in it. Two layouts resolve directly:
+
+        <root>/<session_id>/rgb/<name>    root is the SESSIONS folder
+        <root>/rgb/<name>                 root IS one session's folder
+
+    Both are accepted because both are natural ways to describe a merged build
+    - one root covering many sessions, or one root per session. Trying them
+    directly matters: the fallback is a recursive scan, and running one per
+    image per epoch over a root holding tens of thousands of PNGs dominates
+    training time.
 
     Every root's cheap, direct checks run before any root's expensive scan, so
     a frame that resolves canonically under the SECOND root never pays for a
@@ -95,6 +101,20 @@ def resolve_image(rel, images_root, session_id=None):
         cand = root / p
         if cand.exists():
             return cand
+        # The root may BE a session folder rather than the folder of sessions:
+        # <session>/rgb/<name>. Giving one root per session is a natural way to
+        # name a merged build, and the recursive scan below would find these
+        # anyway - at the cost of a full walk per root, which the docstring
+        # above explains is what dominates training time. This makes it a
+        # direct hit instead.
+        #
+        # Safe without checking the folder's name against `sess`: extraction
+        # prefixes every frame with its own session id, so a file of this exact
+        # name cannot be sitting in a different session's rgb/.
+        for sub in RGB_SUBDIRS:
+            cand = root / sub / p.name if sub else root / p.name
+            if cand.exists():
+                return cand
         if sess:
             for sub in RGB_SUBDIRS:
                 cand = root / sess / sub / p.name if sub else root / sess / p.name
@@ -117,11 +137,12 @@ def resolve_image(rel, images_root, session_id=None):
     shown = ", ".join(str(r) for r in roots)
     raise FileNotFoundError(
         f"image {rel!r} not found under: {shown}\n"
-        f"Expected <images-root>/<session_id>/rgb/<name>. Point --images-root "
-        f"at the SESSIONS folder - the one whose children are session id "
-        f"folders - not at a session itself and not at its rgb/ subfolder. If "
-        f"your sessions are split across more than one parent folder, pass all "
-        f"of them.")
+        f"Expected <images-root>/<session_id>/rgb/<name>, or "
+        f"<images-root>/rgb/<name> when the root IS one session's folder. "
+        f"Point --images-root at the SESSIONS folder - the one whose children "
+        f"are session id folders - or at the session folders themselves, but "
+        f"not at an rgb/ subfolder. If your sessions are split across more "
+        f"than one parent folder, pass all of them.")
 
 
 #: Augmentation preset names. See build_augmentation() for what each does and,

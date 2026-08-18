@@ -88,18 +88,35 @@ CONFIG = {
     #   different folders (an onion set recorded separately from the weed
     #   sessions). Images are never copied; manifests point at these files.
     "SOURCES": [
-        # ONION CAMPAIGNS ONLY. Your annotations live inside each session
-        # folder next to rgb/, so ONE path serves as both: as DATUMARO_ROOT it
-        # recurses and finds every session's annotations/default.json, and as
-        # IMAGES_ROOT its children are already the session-id folders.
-        # Add one block per onion campaign folder; same path in both fields.
+        # ONE SESSION FOLDER PER ENTRY. Each holds annotations/, rgb/, depth/
+        # and meta/, so the same path serves as both roots: DATUMARO_ROOT finds
+        # its annotations/default.json, and IMAGES_ROOT resolves
+        # <root>/rgb/<name> directly.
         #
-        # Mixed campaigns are deliberately NOT here. Their prelabels were the
-        # weak ones (false masks, tiny spurious instances), and distilling from
-        # a weak teacher bakes those artifacts into the student.
+        # Note Visit1_20260108_132749's frames are named vid3_20260108_132749_*
+        # - the folder was renamed after extraction and the files kept their
+        # original prefix. Session id comes from the FILENAME, so that session
+        # reports as vid3_20260108_132749 in every split and report.
+        #
+        # Visit2 is from a Mix campaign but only its ONION stretch was
+        # annotated; its weed-only frames carry no annotations and are excluded
+        # as empty. Being a month later than the Visit1 sessions, it is the only
+        # real date variety here - which is why it is the pinned test session.
         {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_132749",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_132749",
+        },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_133306",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_133306",
+        },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_134015",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_134015",
+        },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
         },
     ],
     # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
@@ -115,7 +132,7 @@ CONFIG = {
     #"IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
-    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion",
+    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
@@ -215,7 +232,7 @@ CONFIG = {
     # Choose one that is representative rather than convenient: a different
     # day from the training sessions, and ideally a mixed scene, since mixed is
     # the only scene where the crop-vs-weed decision is actually exercised.
-    "HOLDOUT_TEST_SESSIONS": [],
+    "HOLDOUT_TEST_SESSIONS": ["Visit2_20260210_164149"],
     "HOLDOUT_VAL_SESSIONS": [],
 
     # Allocate the remaining sessions SEPARATELY WITHIN each scene, so
@@ -270,7 +287,7 @@ CONFIG = {
     # separation in video frames and warns when it is under 60; raise this
     # until that warning clears. The cost is a handful of annotated frames,
     # which is far cheaper than a test score wrong in the optimistic direction.
-    "GAP_FRAMES": 8,
+    "GAP_FRAMES": 12,
 
     # -- Safety ----------------------------------------------------------------
     # False (default) refuses to write when the annotation contract is violated.
