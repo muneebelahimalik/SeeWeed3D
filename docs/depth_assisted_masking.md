@@ -24,6 +24,24 @@ So depth is used here as a **veto and a scale reference, never a boundary
 source**. Colour keeps every boundary. Depth deletes things lying on the dirt
 and converts pixels to millimetres.
 
+## Which prelabeler gets it
+
+All four, since a single-class scene has the same pebbly ground as a mixed one.
+
+| Prelabeler | `HEIGHT_MIN_MM` | Note |
+|---|---|---|
+| `prelabel_onions_sam3.py` | 6.0 | transplanted onions stand up — the safest case |
+| `prelabel_mixed_sam3.py` | 6.0 | per instance, before polygons |
+| `prelabel_complement_sam3.py` | 6.0 | applied to the **weed** side only |
+| `prelabel_weeds_sam3.py` | **4.0** | see the caution below |
+
+> **Weeds are not the same problem.** Some broadleaf weeds grow **prostrate**,
+> pressed flat against the soil — real targets that genuinely have almost no
+> height, and a height gate is exactly the wrong instrument for them. Onions
+> stand up. The weed default is lower for that reason; trial it on 20 frames
+> and look for rosettes disappearing before trusting it, and set
+> `USE_DEPTH_HEIGHT = False` there if they do.
+
 ## Which sessions can use it
 
 Only captures with real 16-bit depth. Check per session:

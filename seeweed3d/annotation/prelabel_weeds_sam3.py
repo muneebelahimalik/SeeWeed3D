@@ -228,6 +228,28 @@ CONFIG = {
     "STAGE_COTYLEDON_MAX_PX": 1200,
     "STAGE_EARLY_MAX_PX": 6000,
 
+    # -- Depth: height above the soil (metric-depth sessions only) -------------
+    # Same machinery as the mixed prelabeler - see perception/ground.py and
+    # docs/depth_assisted_masking.md. "auto" uses it only where session.json
+    # says depth_kind is "metric", so every v1 AVI session - which is all of
+    # the field data this module's defaults were validated against - is
+    # untouched.
+    #
+    # CAUTION SPECIFIC TO WEEDS. Some broadleaf weeds grow PROSTRATE, pressed
+    # flat against the soil, and a height gate is exactly the wrong instrument
+    # for those: they are real targets that genuinely have almost no height.
+    # Onions stand up and this is safe on them; a weed frame is not the same
+    # problem. Trial it on 20 frames and look for rosettes disappearing before
+    # trusting it, and lower HEIGHT_MIN_MM - or set this False - if they do.
+    "USE_DEPTH_HEIGHT": "auto",
+    "HEIGHT_MIN_MM": 4.0,            # lower than onions: prostrate weeds exist
+    "HEIGHT_MIN_MEASURED_FRAC": 0.25,
+    "HEIGHT_PERCENTILE": 75.0,
+    "GROUND_TILE_PX": 32,
+    "GROUND_PERCENTILE": 80.0,
+    "DEPTH_MIN_CONFIDENCE": 0.30,
+    "MIN_INSTANCE_AREA_MM2": None,   # None = keep the pixel floor
+
     # -- Frame-level safety ----------------------------------------------------
     "MAX_MASK_FRACTION": 0.5,        # total veg > this = colour-cast/glare failure
 
@@ -1153,6 +1175,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
     print_pool_report(sid, session_dir, len(frames))
+
+    from perception import ground as gr
+    use_depth, fx, fy, polarity = gr.session_depth_setup(sid, session_dir, cfg)
+    depth_qa = {"height_dropped_flat": 0, "height_dropped_small": 0,
+                "height_abstained": 0}
     if not frames:
         print(f"  [{sid}] no pool frames - run extract_sessions.py first")
         return None
@@ -1227,6 +1254,15 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                     depth_mm = raw.astype(np.float32)
                     depth_mm[raw == 0] = np.nan          # 0 is the invalid sentinel
         instances, veg = analyze_frame(proc, sam_masks, cfg, depth_mm, estimator)
+        if use_depth:
+            dm, conf_img = gr.load_frame_depth(session_dir, fn, use_depth,
+                                               polarity)
+            if dm is not None:
+                instances, dqa = gr.height_veto(instances, veg, dm, cfg,
+                                                conf=conf_img,
+                                                polarity=polarity, fx=fx, fy=fy)
+                for k in depth_qa:
+                    depth_qa[k] += dqa.get(k, 0)
 
         link_or_copy(rgb_path, cvat_dir / fn)
         img_id = coco.add_image(fn, bgr.shape[0], bgr.shape[1])

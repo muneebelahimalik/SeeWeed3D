@@ -180,6 +180,7 @@ from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              PRELABEL_CLASS, prelabel_categories,
                              prelabel_cvat_labels)
 from common.progress import Progress  # noqa: E402
+from perception.ground import height_veto  # noqa: E402,F401
 from common.vegetation import (component_boxes, distance_peaks,  # noqa: E402
                                excess_green, remove_small, vegetation_mask,
                                vegetation_score, white_balance)
@@ -948,70 +949,6 @@ def instance_bbox(mask):
 # --------------------------------------------------------------------------- #
 # One frame
 # --------------------------------------------------------------------------- #
-def height_veto(instances, veg, depth_mm, cfg, conf=None, polarity=None,
-                fx=None, fy=None):
-    """Drop instances that are lying on the ground, and say what was decided.
-
-    THE ASYMMETRY THIS IS BUILT AROUND. Stereo drops out on thin, low-texture
-    tissue and fringes at every depth discontinuity - which is to say, on
-    exactly the small plants a height gate would otherwise delete. So an
-    instance whose height cannot be measured is KEPT. The veto only ever fires
-    on positive evidence that something is flat, never on absence of evidence
-    that it is not.
-
-    Returns (kept, qa). Every instance gains `height_mm` (None when
-    unmeasured), `height_measured_frac` and, where calibration allows it,
-    `area_mm2` - so the numbers behind a decision travel with the instance
-    into instances.csv rather than only into this function."""
-    from perception import ground as gr
-
-    valid = gr.confidence_mask(conf, polarity, cfg["DEPTH_MIN_CONFIDENCE"])
-    height, measured = gr.height_map(
-        depth_mm, veg=veg, valid=valid,
-        tile_px=cfg["GROUND_TILE_PX"], percentile=cfg["GROUND_PERCENTILE"],
-        smooth_tiles=0)
-    surface = gr.surface_report(depth_mm, veg=veg, valid=valid,
-                                tile_px=cfg["GROUND_TILE_PX"],
-                                percentile=cfg["GROUND_PERCENTILE"],
-                                smooth_tiles=0)
-
-    floor_mm2 = cfg.get("MIN_INSTANCE_AREA_MM2")
-    kept, dropped_flat, dropped_small, abstained = [], 0, 0, 0
-    for inst in instances:
-        h, frac = gr.instance_height(
-            inst["mask"], height, measured,
-            min_measured_frac=cfg["HEIGHT_MIN_MEASURED_FRAC"],
-            percentile=cfg["HEIGHT_PERCENTILE"])
-        inst["height_mm"] = None if h is None else round(h, 1)
-        inst["height_measured_frac"] = round(frac, 3)
-        a2 = gr.area_mm2(inst["mask"], depth_mm, fx, fy)
-        inst["area_mm2"] = None if a2 is None else round(a2, 1)
-
-        if h is None:
-            abstained += 1
-            kept.append(inst)
-            continue
-        if h < cfg["HEIGHT_MIN_MM"]:
-            dropped_flat += 1
-            continue
-        # The metric floor REPLACES the pixel one where it can be computed, so
-        # the threshold stops depending on mount height. Where it cannot be
-        # computed the pixel floor has already been applied upstream.
-        if floor_mm2 and a2 is not None and a2 < float(floor_mm2):
-            dropped_small += 1
-            continue
-        kept.append(inst)
-
-    return kept, {
-        "height_dropped_flat": dropped_flat,
-        "height_dropped_small": dropped_small,
-        "height_abstained": abstained,
-        "ground_relief_mm": surface["relief_mm"],
-        "depth_measured_frac": surface["measured_frac"],
-        "median_depth_mm": surface["median_depth_mm"],
-    }
-
-
 def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, conf=None,
                   polarity=None, fx=None, fy=None):
     """Vegetation prior -> seeds -> watershed -> cleaned instances.

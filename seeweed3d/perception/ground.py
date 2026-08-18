@@ -358,3 +358,143 @@ def instance_height(mask, height_mm, measured, min_measured_frac=0.20,
     if frac < min_measured_frac:
         return None, frac
     return float(np.percentile(height_mm[got], percentile)), frac
+
+
+def height_veto(instances, veg, depth_mm, cfg, conf=None, polarity=None,
+                fx=None, fy=None):
+    """Drop instances that are lying on the ground, and say what was decided.
+
+    THE ASYMMETRY THIS IS BUILT AROUND. Stereo drops out on thin, low-texture
+    tissue and fringes at every depth discontinuity - which is to say, on
+    exactly the small plants a height gate would otherwise delete. So an
+    instance whose height cannot be measured is KEPT. The veto only ever fires
+    on positive evidence that something is flat, never on absence of evidence
+    that it is not.
+
+    Returns (kept, qa). Every instance gains `height_mm` (None when
+    unmeasured), `height_measured_frac` and, where calibration allows it,
+    `area_mm2` - so the numbers behind a decision travel with the instance
+    into instances.csv rather than only into this function."""
+    valid = confidence_mask(conf, polarity, cfg["DEPTH_MIN_CONFIDENCE"])
+    height, measured = height_map(
+        depth_mm, veg=veg, valid=valid,
+        tile_px=cfg["GROUND_TILE_PX"], percentile=cfg["GROUND_PERCENTILE"],
+        smooth_tiles=0)
+    surface = surface_report(depth_mm, veg=veg, valid=valid,
+                                tile_px=cfg["GROUND_TILE_PX"],
+                                percentile=cfg["GROUND_PERCENTILE"],
+                                smooth_tiles=0)
+
+    floor_mm2 = cfg.get("MIN_INSTANCE_AREA_MM2")
+    kept, dropped_flat, dropped_small, abstained = [], 0, 0, 0
+    for inst in instances:
+        h, frac = instance_height(
+            inst["mask"], height, measured,
+            min_measured_frac=cfg["HEIGHT_MIN_MEASURED_FRAC"],
+            percentile=cfg["HEIGHT_PERCENTILE"])
+        inst["height_mm"] = None if h is None else round(h, 1)
+        inst["height_measured_frac"] = round(frac, 3)
+        a2 = area_mm2(inst["mask"], depth_mm, fx, fy)
+        inst["area_mm2"] = None if a2 is None else round(a2, 1)
+
+        if h is None:
+            abstained += 1
+            kept.append(inst)
+            continue
+        if h < cfg["HEIGHT_MIN_MM"]:
+            dropped_flat += 1
+            continue
+        # The metric floor REPLACES the pixel one where it can be computed, so
+        # the threshold stops depending on mount height. Where it cannot be
+        # computed the pixel floor has already been applied upstream.
+        if floor_mm2 and a2 is not None and a2 < float(floor_mm2):
+            dropped_small += 1
+            continue
+        kept.append(inst)
+
+    return kept, {
+        "height_dropped_flat": dropped_flat,
+        "height_dropped_small": dropped_small,
+        "height_abstained": abstained,
+        "ground_relief_mm": surface["relief_mm"],
+        "depth_measured_frac": surface["measured_frac"],
+        "median_depth_mm": surface["median_depth_mm"],
+    }
+
+
+def mask_height_filter(mask, veg, depth_mm, cfg, conf=None, polarity=None,
+                       fx=None, fy=None):
+    """Height veto for a caller that holds ONE merged mask, not instances.
+
+    The onion and weed prelabelers export a single boolean mask per frame
+    rather than a list, so the veto is applied per connected component and the
+    survivors are unioned back. Same evidence, same abstention rule, same
+    thresholds as height_veto() - a component whose height cannot be measured
+    is KEPT, because stereo drops out on exactly the thin tissue a height gate
+    would otherwise delete.
+
+    Returns (mask, qa)."""
+    m = np.asarray(mask, bool)
+    if not m.any():
+        return m, {}
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), 8)
+    instances = [{"mask": labels == i} for i in range(1, n)]
+    kept, qa = height_veto(instances, veg, depth_mm, cfg, conf=conf,
+                           polarity=polarity, fx=fx, fy=fy)
+    out = np.zeros(m.shape, bool)
+    for inst in kept:
+        out |= inst["mask"]
+    return out, qa
+
+
+def session_depth_setup(sid, session_dir, cfg, printer=print):
+    """Decide ONCE per session whether depth may be used, and say so.
+
+    Returns (use_depth, fx, fy, polarity). Deciding it here rather than per
+    frame means a session that cannot support the veto says so before the GPU
+    starts, instead of silently skipping it eight hundred times.
+
+    USE_DEPTH_HEIGHT True raises rather than falling back, so a run you believe
+    is depth-gated cannot quietly not be."""
+    want = cfg.get("USE_DEPTH_HEIGHT", "auto")
+    kind = session_depth_kind(session_dir)
+    use = bool(want) and kind in METRIC_DEPTH_KINDS
+    if want is True and not use:
+        raise SystemExit(
+            f"ERROR: [{sid}] USE_DEPTH_HEIGHT is True but this session's "
+            f"depth_kind is {kind!r}, not 'metric'. Only v2 (MKV/FFV1) captures "
+            f"carry real millimetres; a v1 preview was normalised per frame at "
+            f"capture and cannot be used as height. Set it to \"auto\" to skip "
+            f"depth on sessions that lack it.")
+    if not use:
+        if want:
+            printer(f"  [{sid}] depth: {kind} - height veto off, colour and "
+                    f"pixel-size gates only")
+        return False, None, None, None
+
+    fx, fy = calibration(session_dir)
+    polarity = confidence_polarity(session_dir)
+    printer(f"  [{sid}] depth: metric | height veto on "
+            f"(>= {cfg['HEIGHT_MIN_MM']:.0f} mm above local soil)")
+    if fx is None:
+        printer(f"  [!] no calibration.json - a mm^2 floor cannot be applied, "
+                f"falling back to the pixel floor.")
+    if polarity is None and (Path(session_dir) / "conf").is_dir():
+        printer(f"  [!] a confidence map exists but session.json does not "
+                f"record its polarity, so it is NOT used. Gating the wrong way "
+                f"round keeps exactly the pixels it should drop.")
+    return True, fx, fy, polarity
+
+
+def load_frame_depth(session_dir, filename, use_depth, polarity):
+    """(depth_mm, conf) for one frame, or (None, None). Never raises."""
+    if not use_depth:
+        return None, None
+    session_dir = Path(session_dir)
+    dpath = session_dir / "depth" / filename
+    depth = load_depth_mm(dpath) if dpath.exists() else None
+    conf = None
+    cpath = session_dir / "conf" / filename
+    if depth is not None and polarity and cpath.exists():
+        conf = cv2.imread(str(cpath), cv2.IMREAD_UNCHANGED)
+    return depth, conf
