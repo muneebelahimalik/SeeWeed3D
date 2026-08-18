@@ -82,7 +82,7 @@ CONFIG = {
     # -- The model that finds the onions ---------------------------------------
     # A checkpoint trained on ONION-ONLY sessions. It does not need to know what
     # a weed is; that is the point.
-    "CHECKPOINT": r"E:\Dataset_Vidalia\training1\rfdetr_v4\best.pt",
+    "CHECKPOINT": r"E:\Dataset_Vidalia\onions_20260108_1",
     "BACKEND": "rfdetr",              # "maskrcnn" | "rfdetr"
     "DEVICE": "cuda",
 
@@ -131,25 +131,7 @@ CONFIG = {
     "VEG_MIN_COMPONENT_PX": 150,
 
     # -- Depth (see perception/ground.py and docs/depth_assisted_masking.md) ----
-    # OFF BY DEFAULT - FIELD-TESTED AND REVERTED. A trial on a real metric-depth
-    # onion session (dense transplanted seedlings, ~885mm boom height) showed
-    # the veto removing genuine onion tissue: a thin leaf next to a taller one
-    # in the same cluster lost its mask entirely. The likely mechanism is the
-    # local soil-surface estimate - dense clusters leave few bare-soil pixels
-    # per GROUND_TILE_PX tile, so a nearby tile's estimate (pulled toward a
-    # TALLER neighbour) gets borrowed by nearest-neighbour fill and makes the
-    # shorter, thinner leaf read as below that borrowed ground level.
-    #
-    # A missed onion is a worse failure than a phantom speckle survives here:
-    # this project already reverted RECOVER_MISSED_PLANTS and the weed
-    # boundary-refinement block on exactly this trade-off, and the same
-    # judgment applies. The infrastructure (perception/ground.py) is unchanged
-    # and worth revisiting for a use that does not delete on this evidence -
-    # e.g. restricting the veto to backstop-only "recovered" instances that
-    # have no other corroboration, or making it advisory (route to
-    # review_first.txt) rather than a silent drop. See
-    # docs/depth_assisted_masking.md.
-    "USE_DEPTH_HEIGHT": False,
+    "USE_DEPTH_HEIGHT": "auto",
     "HEIGHT_MIN_MM": 6.0,
     "HEIGHT_MIN_MEASURED_FRAC": 0.25,
     "HEIGHT_PERCENTILE": 75.0,
@@ -344,7 +326,7 @@ def prelabel_session(sid, session_dir, out_root, cfg, seg):
     if not frames:
         return None
 
-    want = cfg.get("USE_DEPTH_HEIGHT", False)
+    want = cfg.get("USE_DEPTH_HEIGHT", "auto")
     use_depth = bool(want) and gr.has_metric_depth(session_dir)
     if want is True and not use_depth:
         sys.exit(f"ERROR: [{sid}] USE_DEPTH_HEIGHT is True but depth_kind is "

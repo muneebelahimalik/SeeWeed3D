@@ -80,12 +80,12 @@ INPUT_ROOTS = [
         "trip":       "Visit1",
         "site":       "vidalia_1",
         "field":      "field_A",
-        "scene_hint": "onion_only",   # mixed | onion_only | weed_only | unknown
+        "scene_hint": "onions",        # mixed | onion_only | weed_only | unknown
         "notes":      "Vidalia Visit One - onions only",
     },
     # Add more visits by uncommenting and editing:
     # {
-    #     "path":       r"M:\Research\Data\Vidalia_onions_visit3",
+    #     "path":       r"M:\Research\Data\Vidalia_onions_visit3as",
     #     "trip":       "vid3", "site": "vidalia", "field": "field_A",
     #     "scene_hint": "mixed",
     #     "notes":      "v2 capture - SVO + confidence + locked exposure",
@@ -113,63 +113,10 @@ CONFIG = {
     "FFPROBE": "ffprobe",
 
     # -- File discovery (case-insensitive). Covers every visit variant. --------
-    # Patterns are matched against the file STEM, and the extension is checked
-    # separately against VIDEO_SUFFIXES. Earlier visits wrote AVI and later ones
-    # MKV; when the patterns carried ".mkv" the AVI sessions were not merely
-    # skipped, they were INVISIBLE - discover() returned them nowhere and
-    # printed nothing, so a run over a mixed folder looked like a success while
-    # silently extracting a fraction of it.
-    "RGB_PATTERNS":   ["rgb_video", "rgb", "left", "*left*"],
-    "RIGHT_PATTERNS": ["rgb_right_video", "right", "*right*"],
-    "DEPTH_PATTERNS": ["depth_video", "depth", "*depth*"],
-    "CONF_PATTERNS":  ["confidence_video", "confidence", "*conf*"],
-    "VIDEO_SUFFIXES": [".mkv", ".avi", ".mp4", ".mov"],
-
-    # -- Depth integrity -------------------------------------------------------
-    # Depth is decoded by asking ffmpeg for gray16le. ffmpeg will produce that
-    # from ANY source, including an 8-bit lossy one, by scaling values it made
-    # up - so a depth stream that is not genuinely 16-bit yields plausible-
-    # looking millimetres that are fiction. Nothing downstream can detect it:
-    # the PNGs are valid, the QC fractions are computed, and the LEP's canopy-
-    # height channel reads garbage as terrain.
-    #
-    # AVI is the reason this exists. Its usual codecs (MJPEG, XVID, DIVX) have
-    # no 16-bit grayscale format at all, so an AVI depth track is very likely
-    # 8-bit - but SOME writers do put FFV1 in AVI, which is fine. So this is
-    # checked per session rather than assumed from the container.
-    #
-    # True  = refuse to write depth for a session whose depth is not 16-bit,
-    #         extract RGB, and say so. The session is still usable for
-    #         segmentation; only 3D and LEP need real depth.
-    # False = write it anyway. Only correct if you have verified the pipeline
-    #         that produced the file actually stored millimetres.
-    "REQUIRE_16BIT_DEPTH": True,
-
-    # -- Recovering an 8-bit depth PREVIEW (opt-in, and read this first) -------
-    # Some v1 captures wrote the GUI's depth preview instead of the depth data:
-    # the range scaled to 0..255 against `depth_vis_max_mm`, optionally
-    # colourised, then lossily encoded. The geometry survives that, coarsely.
-    #
-    # Run validation/inspect_depth_video.py FIRST. It reports whether a given
-    # file is a grayscale preview, a colourised one, or not a range image at
-    # all - and there is nothing to recover in the last case.
-    #
-    # WHAT THIS IS WORTH. At DEPTH_VIS_MAX_MM=3000 one level is 11.8 mm, before
-    # DCT ringing that concentrates at exactly the depth discontinuities that
-    # matter. Usable for a ground plane, camera height or row geometry. NOT
-    # usable for the LEP's canopy-height channel, where the whole signal is a
-    # few centimetres of relief on one plant.
-    #
-    # Recovered frames go to `depth_approx/`, NEVER to `depth/`. A file under
-    # depth/ is metric millimetres and everything downstream is entitled to
-    # assume so; putting an approximation there would recreate, by hand, the
-    # exact silent corruption REQUIRE_16BIT_DEPTH exists to prevent.
-    "RECOVER_8BIT_DEPTH": False,
-
-    # The scale the preview was drawn at. 3000 is the v1 capture GUI's
-    # constant. If your sessions have a session_meta.txt, take it from there;
-    # if they do not, this is an assumption and every distance inherits it.
-    "DEPTH_VIS_MAX_MM": 3000.0,
+    "RGB_PATTERNS":   ["rgb_video.mkv", "rgb.mkv", "left.mkv", "*left*.mkv"],
+    "RIGHT_PATTERNS": ["rgb_right_video.mkv", "right.mkv", "*right*.mkv"],
+    "DEPTH_PATTERNS": ["depth_video.mkv", "depth.mkv", "*depth*.mkv"],
+    "CONF_PATTERNS":  ["confidence_video.mkv", "confidence.mkv", "*conf*.mkv"],
 
     # -- What to write out (ignored when the session has no such stream) ------
     "WRITE_RIGHT": True,
@@ -190,36 +137,7 @@ CONFIG = {
     "DEPTH_MAX_VALID_MM":      2000,
 
     "METRIC_WIDTH": 512,
-    # PNG is lossless at every level - this trades file size against write
-    # speed and nothing else. It cannot cost image quality.
     "PNG_COMPRESSION": 3,
-
-    # -- Decode fidelity --------------------------------------------------------
-    # swscale flags for the YUV->RGB conversion. Only bites on the LOSSY v1
-    # captures (AVI/mpeg4/yuv420p); an FFV1 stream is bgr24 or gray16le already
-    # and decodes bit-exact either way, which is asserted by a test.
-    #
-    # `accurate_rnd` makes swscale ROUND rather than truncate. Truncation
-    # leaves a systematic negative bias - measured at a uniform -2 per channel
-    # on flat patches, dropping to about -0.8 with this flag. That bias is not
-    # cosmetic here: the vegetation prior thresholds ExG and compares g against
-    # b, so a channel-dependent error moves real decisions. Measured on a
-    # synthetic field frame, it cut vegetation_mask() disagreement against the
-    # uncompressed original from 0.607% of pixels to 0.474%, and mean absolute
-    # pixel error from 3.30 to 2.78, at no measurable decode cost.
-    #
-    # NOT `full_chroma_int`: measured a no-op here, because it governs chroma
-    # interpolation during RESIZING and extraction never resizes.
-    #
-    # Deliberately no colorspace or range override. v1 AVIs carry no colour
-    # metadata at all, so both ends fall back to defaults - and those defaults
-    # already agree. Measured on flat patches, the default (BT.601, limited
-    # range in) leaves a colour-neutral offset, while forcing BT.709 swings
-    # green by -21 and red by +7, and forcing full-range input triples the
-    # error. Both were tried; both were worse. Leave this alone unless a future
-    # capture writes tagged colour metadata.
-    "SWS_FLAGS": "accurate_rnd",
-
     "OVERWRITE": False,
     "DRY_RUN": False,
 }
@@ -258,17 +176,10 @@ def _glob_match(name, pat):
     return fnmatch.fnmatch(name, pat)
 
 
-def find_one(folder, patterns, want_right=False, suffixes=None):
-    """Case-insensitive first match in priority order.
-
-    Patterns match the file STEM and the extension is checked separately, so
-    one pattern list covers every container a visit happened to be recorded in
-    - AVI in the early sessions, MKV in the later ones, sometimes both under
-    the same parent folder.
-
-    Files with 'right' in the name are only matched by right-hand patterns, so
-    RGB_right_video.mkv can never be mistaken for the left stream."""
-    suffixes = [s.lower() for s in (suffixes or CONFIG["VIDEO_SUFFIXES"])]
+def find_one(folder, patterns, want_right=False):
+    """Case-insensitive first match in priority order. Files with 'right' in the
+    name are only matched by right-hand patterns, so RGB_right_video.mkv can
+    never be mistaken for the left stream."""
     try:
         files = [f for f in folder.iterdir() if f.is_file()]
     except (PermissionError, OSError):
@@ -276,12 +187,10 @@ def find_one(folder, patterns, want_right=False, suffixes=None):
     for pat in patterns:
         pat_l = pat.lower()
         for f in files:
-            if f.suffix.lower() not in suffixes:
-                continue
-            n, stem = f.name.lower(), f.stem.lower()
+            n = f.name.lower()
             if ("right" in n) != want_right:
                 continue
-            if ("*" in pat_l and _glob_match(stem, pat_l)) or stem == pat_l:
+            if ("*" in pat_l and _glob_match(n, pat_l)) or n == pat_l:
                 return f
     return None
 
@@ -395,26 +304,16 @@ def read_frames_csv(path):
 
 class RawDecoder:
     """Decode FFV1/MKV to raw frames. -vsync 0 guarantees one output frame per
-    coded frame (no duplication or dropping), which keeps indices honest.
+    coded frame (no duplication or dropping), which keeps indices honest."""
 
-    sws_flags reaches the YUV->RGB conversion, so it matters only for the lossy
-    v1 captures; a bgr24 or gray16le FFV1 stream needs no conversion and comes
-    back bit-exact with or without it. See CONFIG["SWS_FLAGS"] for what is set
-    and, just as importantly, what was measured and deliberately not set."""
-
-    def __init__(self, ffmpeg, path, pix_fmt, w, h, channels, dtype,
-                 sws_flags=None):
+    def __init__(self, ffmpeg, path, pix_fmt, w, h, channels, dtype):
         self.shape = (h, w, channels) if channels > 1 else (h, w)
         self.dtype = dtype
         self.bpf = w * h * channels * np.dtype(dtype).itemsize
-        cmd = [ffmpeg, "-loglevel", "error", "-i", str(path)]
-        if sws_flags:
-            cmd += ["-sws_flags", str(sws_flags)]
-        cmd += ["-f", "rawvideo", "-pix_fmt", pix_fmt, "-vsync", "0", "pipe:1"]
-        self.cmd = cmd
         self.proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            bufsize=self.bpf * 2)
+            [ffmpeg, "-loglevel", "error", "-i", str(path),
+             "-f", "rawvideo", "-pix_fmt", pix_fmt, "-vsync", "0", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=self.bpf * 2)
 
     def __iter__(self):
         while True:
@@ -488,141 +387,6 @@ def frame_metrics(bgr, depth, conf, cfg):
     return m
 
 
-#: Pixel formats that genuinely carry 16 bits per sample. Anything else cannot
-#: hold a millimetre range, whatever the file is named.
-SIXTEEN_BIT_HINTS = ("16le", "16be", "16", "p010", "p016", "yuv420p10",
-                     "gray10", "gray12", "gray14")
-
-
-def depth_precision_problem(info):
-    """Why this depth stream cannot be trusted as millimetres, or None.
-
-    The decoder asks ffmpeg for gray16le, and ffmpeg will produce gray16le from
-    ANY input - including an 8-bit lossy one, by scaling up values it invented.
-    The result is a valid PNG full of plausible numbers that are fiction, and
-    nothing downstream can tell: the QC fractions compute, the depth range
-    looks sane, and the LEP's canopy-height channel reads the noise as terrain.
-
-    So the check happens here, where the pixel format is still visible, rather
-    than being inferred from the container. AVI's usual codecs (MJPEG, XVID,
-    DIVX) have no 16-bit grayscale format at all - but FFV1 in AVI is fine, and
-    a badly-remuxed MKV is not, so the container itself decides nothing.
-    """
-    if not info:
-        return None
-    pf = (info.get("pix_fmt") or "").lower()
-    codec = (info.get("codec") or "?").lower()
-    if not pf:
-        return (f"depth codec {codec} reports no pixel format, so 16-bit "
-                f"millimetres cannot be confirmed")
-    if any(h in pf for h in SIXTEEN_BIT_HINTS):
-        return None
-    return (f"depth is {codec}/{pf}, which is not 16-bit - decoding it as "
-            f"millimetres would invent values that look plausible and are not")
-
-
-def preview_to_mm(bgr, kind, vis_max_mm, colormap=None, tv_range=False):
-    """One frame of an 8-bit depth PREVIEW as approximate millimetres, uint16.
-
-    The inverse of what the capture GUI did: undo the colormap if there was
-    one, undo TV range if the encoder used it, then scale 0..255 back onto
-    0..vis_max_mm.
-
-    0 stays 0 - the invalid sentinel - but only where it actually survived the
-    encode. Lossy compression smears it, so the caller is told separately
-    whether it is still there rather than being allowed to assume it.
-
-    The result is deliberately uint16 millimetres so it reads with the same
-    tooling as real depth, and deliberately written to a different directory so
-    nothing can mistake it for real depth.
-    """
-    if kind == "colormapped_8bit" and colormap:
-        from validation.inspect_depth_video import match_colormap
-        _, _, idx = match_colormap(bgr, names=(colormap,))
-        code = idx.astype(np.float32)
-    else:
-        code = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-    invalid = code <= 0.5
-    if tv_range:
-        # 16..235 is the whole scale; leaving it stretches every distance by
-        # ~14% and pins the near end at a value that is not zero.
-        code = (code - 16.0) * (255.0 / (235.0 - 16.0))
-    code = np.clip(code, 0.0, 255.0)
-
-    mm = code * (float(vis_max_mm) / 255.0)
-    mm[invalid] = 0.0
-    return np.clip(mm, 0, 65535).astype(np.uint16)
-
-
-class PreviewDepthDecoder:
-    """Decodes an 8-bit depth preview and yields approximate uint16 millimetres.
-
-    Wraps RawDecoder so it drops into the same per-frame loop as a real depth
-    stream, which keeps frame alignment handled in exactly one place."""
-
-    def __init__(self, ffmpeg, path, w, h, kind, vis_max_mm, colormap=None,
-                 tv_range=False, sws_flags=None):
-        self._dec = RawDecoder(ffmpeg, path, "bgr24", w, h, 3, np.uint8,
-                               sws_flags=sws_flags)
-        self._args = (kind, vis_max_mm, colormap, tv_range)
-
-    def __iter__(self):
-        for bgr in self._dec:
-            yield preview_to_mm(bgr, *self._args)
-
-    def close(self):
-        self._dec.close()
-
-
-def inspect_preview(cfg, path, w, h):
-    """Classify an 8-bit depth file. Returns the verdict dict, or None if the
-    inspection itself could not run - never a guess."""
-    try:
-        from validation.inspect_depth_video import classify, read_frames
-        frames = read_frames(cfg["FFMPEG"], path, 3, w, h)
-        return classify({"codec": "", "pix_fmt": ""}, frames)
-    except Exception as e:                       # a probe must never kill a run
-        print(f"      [!] could not inspect {Path(path).name}: {e}")
-        return None
-
-
-def _plan_preview_recovery(sess, cfg, sid, w, h, warnings):
-    """Decide whether this 8-bit depth file can be recovered, and on what
-    terms. Returns the plan dict, or None to leave the session without depth.
-
-    Everything it finds is recorded and printed, because an approximation is
-    only safe to use when its terms travel with it."""
-    v = inspect_preview(cfg, sess["depth"], w, h)
-    if not v or not v.get("recoverable"):
-        why = (v or {}).get("detail", "inspection failed")
-        warnings.append(f"8-bit depth not recoverable: {why}")
-        print(f"      not recoverable: {why}")
-        return None
-
-    luma = v.get("luma", {})
-    plan = {"kind": v["verdict"], "colormap": v.get("colormap"),
-            "tv_range": bool(luma.get("looks_tv_range")),
-            "vis_max_mm": float(cfg["DEPTH_VIS_MAX_MM"]),
-            "sentinel_survived": bool(luma.get("zero_frac", 0) >= 0.001),
-            "quantisation_mm": round(float(cfg["DEPTH_VIS_MAX_MM"]) / 255.0, 2)}
-    print(f"      recovering as APPROXIMATE depth -> depth_approx/ "
-          f"({plan['kind']}"
-          f"{', ' + plan['colormap'] if plan['colormap'] else ''}"
-          f"{', TV range' if plan['tv_range'] else ''}) | "
-          f"{plan['quantisation_mm']} mm per level at "
-          f"{plan['vis_max_mm']:.0f} mm")
-    warnings.append(
-        f"depth is APPROXIMATE: recovered from an 8-bit preview at "
-        f"{plan['quantisation_mm']} mm/level. Not metric - see depth_approx/")
-    if not plan["sentinel_survived"]:
-        warnings.append("the 0 = invalid sentinel did not survive the encode, "
-                        "so invalid regions read as near distances")
-        print("      [!] invalid sentinel did not survive - invalid regions "
-              "are indistinguishable from near distances")
-    return plan
-
-
 def make_session_id(folder, trip):
     m = SESSION_RE.search(folder.name)
     if m:
@@ -640,33 +404,16 @@ def discover(cfg):
             print(f"  [SKIP] input root does not exist: {root}")
             continue
         for folder in [root] + [p for p in root.rglob("*") if p.is_dir()]:
-            sfx = cfg["VIDEO_SUFFIXES"]
-            rgb = find_one(folder, cfg["RGB_PATTERNS"], suffixes=sfx)
+            rgb = find_one(folder, cfg["RGB_PATTERNS"])
             if rgb is None:
-                # Flag anything that looks like a recording, so a folder is
-                # never lost without a line of output. The old version only
-                # spoke up when it found depth or an SVO - and since it looked
-                # for those with the same extension list that had just failed,
-                # a folder recorded in an unsupported container produced NO
-                # message at all.
-                has_depth = find_one(folder, cfg["DEPTH_PATTERNS"],
-                                     suffixes=sfx) is not None
+                # Flag folders that look like a recording but have no decodable
+                # left/RGB video (e.g. SVO-only), so they are not silently lost.
+                has_depth = find_one(folder, cfg["DEPTH_PATTERNS"]) is not None
                 has_svo = next((p for p in folder.glob("*.svo*")), None) is not None
-                others = sorted({p.suffix.lower() for p in folder.iterdir()
-                                 if p.is_file() and p.suffix.lower()
-                                 not in [s.lower() for s in sfx]
-                                 and p.suffix.lower() not in (".txt", ".json",
-                                                              ".csv")})
-                if has_svo:
-                    why = "SVO only - decode it to MKV first"
-                elif has_depth:
-                    why = "depth present but no RGB/left video"
-                elif others:
-                    why = (f"video-looking files in an unsupported container "
-                           f"({', '.join(others)}) - add it to VIDEO_SUFFIXES")
-                else:
-                    continue                      # not a recording folder
-                print(f"  [SKIP] {folder} : no usable RGB video ({why})")
+                if has_depth or has_svo:
+                    why = "SVO only - decode it to MKV first" if has_svo else \
+                          "depth present but no RGB/left MKV"
+                    print(f"  [SKIP] {folder} : no RGB video ({why})")
                 continue
 
             def opt(name):
@@ -675,10 +422,9 @@ def discover(cfg):
 
             found.append({
                 "folder": folder, "rgb": rgb,
-                "right": find_one(folder, cfg["RIGHT_PATTERNS"],
-                                  want_right=True, suffixes=sfx),
-                "depth": find_one(folder, cfg["DEPTH_PATTERNS"], suffixes=sfx),
-                "conf": find_one(folder, cfg["CONF_PATTERNS"], suffixes=sfx),
+                "right": find_one(folder, cfg["RIGHT_PATTERNS"], want_right=True),
+                "depth": find_one(folder, cfg["DEPTH_PATTERNS"]),
+                "conf": find_one(folder, cfg["CONF_PATTERNS"]),
                 "calib_txt": opt("calibration_params.txt"),
                 "calib_json": opt("calibration.json"),
                 "meta_txt": opt("session_meta.txt"),
@@ -712,22 +458,7 @@ def extract_session(sess, out_root, cfg):
                 warnings.append(f"{key} resolution differs from RGB - stream dropped")
                 sess[key] = None
 
-    preview = None                       # recovered 8-bit depth, if any
-    if sess["depth"] and cfg.get("REQUIRE_16BIT_DEPTH", True):
-        bad = depth_precision_problem(infos.get("depth"))
-        if bad:
-            warnings.append(f"depth stream dropped: {bad}")
-            print(f"  [!] {sid}: {bad}\n"
-                  f"      RGB is still extracted; this session has no metric "
-                  f"depth. Set REQUIRE_16BIT_DEPTH=False only if you have "
-                  f"verified the writer stored millimetres.")
-            if cfg.get("RECOVER_8BIT_DEPTH", False):
-                preview = _plan_preview_recovery(sess, cfg, sid, W, H, warnings)
-                if preview:
-                    preview["path"] = sess["depth"]
-            sess["depth"] = None
-
-    if sess["depth"] is None and not preview:
+    if sess["depth"] is None:
         warnings.append("no depth video - RGB only session")
     if fmt == "v1":
         warnings.append("v1 capture format: no confidence map, no right image, no "
@@ -768,32 +499,18 @@ def extract_session(sess, out_root, cfg):
     want_right = bool(sess["right"]) and cfg["WRITE_RIGHT"]
     want_conf = bool(sess["conf"]) and cfg["WRITE_CONF"]
     subs = ["rgb", "meta"] + (["depth"] if sess["depth"] else []) \
-        + (["depth_approx"] if preview else []) \
         + (["right"] if want_right else []) + (["conf"] if want_conf else [])
     for sub in subs:
         (sdir / sub).mkdir(parents=True, exist_ok=True)
 
     F = cfg["FFMPEG"]
-    SWS = cfg.get("SWS_FLAGS")
-    decs = {"rgb": RawDecoder(F, sess["rgb"], "bgr24", W, H, 3, np.uint8,
-                              sws_flags=SWS)}
+    decs = {"rgb": RawDecoder(F, sess["rgb"], "bgr24", W, H, 3, np.uint8)}
     if sess["depth"]:
-        decs["depth"] = RawDecoder(F, sess["depth"], "gray16le", W, H, 1,
-                                   np.uint16, sws_flags=SWS)
-    elif preview:
-        # Kept under its own key so nothing here can route it into depth/, and
-        # so frame_metrics is never handed it - the QC columns mean METRIC
-        # depth, and mixing an approximation into them would make the registry
-        # incomparable across sessions.
-        decs["depth_approx"] = PreviewDepthDecoder(
-            F, preview["path"], W, H, preview["kind"], preview["vis_max_mm"],
-            preview["colormap"], preview["tv_range"], sws_flags=SWS)
+        decs["depth"] = RawDecoder(F, sess["depth"], "gray16le", W, H, 1, np.uint16)
     if sess["right"]:
-        decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3,
-                                   np.uint8, sws_flags=SWS)
+        decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3, np.uint8)
     if sess["conf"]:
-        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8,
-                                  sws_flags=SWS)
+        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8)
     its = {k: iter(v) for k, v in decs.items() if k != "rgb"}
 
     index_rows, pool_rows = [], []
@@ -826,9 +543,6 @@ def extract_session(sess, out_root, cfg):
             cv2.imwrite(str(sdir / "rgb" / name), bgr, png_opt)
             if got.get("depth") is not None:
                 cv2.imwrite(str(sdir / "depth" / name), got["depth"], png_opt)
-            if got.get("depth_approx") is not None:
-                cv2.imwrite(str(sdir / "depth_approx" / name),
-                            got["depth_approx"], png_opt)
             if want_right and got.get("right") is not None:
                 cv2.imwrite(str(sdir / "right" / name), got["right"], png_opt)
             if want_conf and got.get("conf") is not None:
@@ -895,51 +609,15 @@ def extract_session(sess, out_root, cfg):
                    "confidence_video": str(sess["conf"]) if sess["conf"] else None,
                    "svo_archive": str(sess["svo"]) if sess["svo"] else None,
                    "probes": infos},
-        # How the pixels were produced, not just where they came from. Decode
-        # settings change pixel values on a lossy source, so two sessions
-        # extracted under different flags are not strictly comparable and the
-        # difference is otherwise invisible after the fact.
-        "decode": {"sws_flags": cfg.get("SWS_FLAGS"),
-                   "png_compression": cfg["PNG_COMPRESSION"],
-                   "note": "PNG is lossless; png_compression trades size "
-                           "against write speed only. sws_flags affects the "
-                           "YUV->RGB conversion and therefore only lossy "
-                           "(v1/AVI) sources - FFV1 decodes bit-exact."},
         "capture_metadata": meta, "capture_metadata_version": meta_ver,
         "camera": {"model": "ZED 2i", "view": "VIEW.LEFT (rectified)",
                    "calibration": calib},
-        # depth_kind is the field to read before using anything under depth*/:
-        #   metric      - depth/, real millimetres from a 16-bit stream
-        #   approximate - depth_approx/, recovered from an 8-bit preview
-        #   none        - the session has no depth at all
-        # The three are not interchangeable and the distinction is not
-        # recoverable from the PNGs, which are uint16 millimetres in both cases.
-        "depth_kind": ("metric" if sess["depth"] else
-                       ("approximate" if preview else "none")),
-        "depth_encoding": ({
+        "depth_encoding": {
             "container": "16-bit grayscale PNG",
-            "directory": "depth",
             "scale_mm_per_unit": cfg["DEPTH_SCALE_MM_PER_UNIT"],
             "invalid_value": cfg["DEPTH_INVALID_VALUE"],
             "note": "Raw millimetres. depth_vis_max_mm in v1 session_meta.txt is "
-                    "a GUI preview constant - do not rescale by it. 0 = invalid."}
-            if sess["depth"] else ({
-                "container": "16-bit grayscale PNG",
-                "directory": "depth_approx",
-                "approximate": True,
-                "recovered_from": preview["kind"],
-                "colormap": preview["colormap"],
-                "tv_range_corrected": preview["tv_range"],
-                "vis_max_mm": preview["vis_max_mm"],
-                "quantisation_mm": preview["quantisation_mm"],
-                "invalid_sentinel_survived": preview["sentinel_survived"],
-                "note": "NOT measurement. Recovered from an 8-bit depth preview "
-                        "by inverting the capture GUI's display scaling, so "
-                        "every value inherits the vis_max_mm assumption and "
-                        "carries quantisation_mm of error before lossy "
-                        "compression. Usable for ground plane and row geometry; "
-                        "not for the LEP canopy-height channel."}
-                if preview else None)),
+                    "a GUI preview constant - do not rescale by it. 0 = invalid."},
         "confidence_encoding": ({"container": "8-bit PNG", "polarity": conf_pol}
                                 if want_conf else None),
         "frames": {"decoded": len(index_rows), "pool": len(pooled),
@@ -1008,9 +686,6 @@ def main():
              "has_svo": bool(r["source"]["svo_archive"]),
              "has_confidence": bool(r["source"]["confidence_video"]),
              "has_right": bool(r["source"]["right_video"]),
-             # metric | approximate | none. Read this before comparing the
-             # depth column across sessions, or before using depth at all.
-             "depth_kind": r.get("depth_kind", "none"),
              "median_depth_valid_frac_veg": r["pool_summary"]["median_depth_valid_frac_veg"],
              "median_sharpness": r["pool_summary"]["median_sharpness"],
              "n_warnings": len(r["warnings"]),
