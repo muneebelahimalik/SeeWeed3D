@@ -61,8 +61,14 @@ def _cfg(tmp_path, sources=None, **over):
         exp, imgs = _export(tmp_path)
         sources = [{"DATUMARO_ROOT": str(exp), "IMAGES_ROOT": str(imgs)}]
     c = dict(md.CONFIG)
+    # Neutralise every selection key, not just the ones that existed when this
+    # helper was written. These tests are about the RUNNER's guard rails, so
+    # they must not inherit whatever class filter the checked-in CONFIG happens
+    # to carry - an onion-only CONFIG silently dropped their synthetic weeds and
+    # the failure surfaced as "no annotated frames left", nowhere near the cause.
     c.update({"SOURCES": sources, "OUT_DIR": str(tmp_path / "ds"),
-              "LIST_FRAMES": False, "INCLUDE_FRAMES": "", "DROP_CLASSES": [],
+              "LIST_FRAMES": False, "INCLUDE_FRAMES": "", "EXCLUDE_FRAMES": "",
+              "DROP_CLASSES": [], "KEEP_CLASSES": None,
               "VAL_FRACTION": 0.0, "TEST_FRACTION": 0.0})
     c.update(over)
     return c
@@ -309,3 +315,15 @@ def test_the_manifest_records_posix_paths_on_every_platform(tmp_path):
     man = json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
     assert all("\\" not in r for r in man["images_root"])
     assert all("\\" not in f["image_path"] for f in man["frames"])
+
+
+def test_the_runner_tests_do_not_inherit_the_checked_in_class_filter(tmp_path):
+    """CONFIG is edited between runs - it is the file you set up a build in.
+    A class filter left there once made every test in this module fail with
+    'no annotated frames left', which points at the export rather than at the
+    config that caused it. The helper must neutralise the filter regardless of
+    what is checked in, so pin that rather than trusting it."""
+    c = _cfg(tmp_path)
+    assert c["KEEP_CLASSES"] is None
+    assert c["DROP_CLASSES"] == []
+    assert c["INCLUDE_FRAMES"] == "" and c["EXCLUDE_FRAMES"] == ""
