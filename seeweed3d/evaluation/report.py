@@ -233,7 +233,8 @@ def collect(checkpoint, dataset_dir, images_root, split="val", device="cpu",
     records = []
     for rec in frames:
         try:
-            path = resolve_image(rec["image_path"], root, rec.get("session_id"))
+            path = resolve_image(rec["image_path"], root,
+                                 rec.get("session_id"), rec.get("export_dir"))
         except FileNotFoundError as e:
             raise SystemExit(f"ERROR: {e}")
         bgr = cv2.imread(str(path))

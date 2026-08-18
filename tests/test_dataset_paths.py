@@ -200,3 +200,70 @@ def test_a_renamed_session_folder_still_resolves(tmp_path):
                            session_id="vid3_20260108_132749")
     assert Path(got).name == "vid3_20260108_132749_000001.png"
     assert Path(got).parent.name == "rgb"
+
+
+# --------------------------------------------------------------------------- #
+# A session folder renamed AFTER its CVAT export was taken
+# --------------------------------------------------------------------------- #
+def test_export_dir_repairs_a_renamed_session(tmp_path):
+    """The real failure: the folder AND its files were renamed after
+    extraction, while the export kept the original item ids. The frame's
+    session id then matches neither the folder nor the files, and every root
+    looks equally plausible - all four hold a frame of the same index."""
+    sd = load_script("training/seg_dataset.py")
+    roots = []
+    for sid in ("Visit1_20260108_132749", "Visit1_20260108_133306",
+                "Visit1_20260108_134015", "Visit2_20260210_164149"):
+        d = tmp_path / sid
+        (d / "rgb").mkdir(parents=True)
+        (d / "annotations").mkdir()
+        for i in (0, 5, 10):
+            (d / "rgb" / f"{sid}_{i:06d}.png").write_bytes(b"")
+        roots.append(d)
+
+    # The export in the FIRST folder still calls its frames vid3_*.
+    got = sd.resolve_image("vid3_20260108_132749_000005.png", roots,
+                           session_id="vid3_20260108_132749",
+                           export_dir=roots[0])
+    assert Path(got).name == "Visit1_20260108_132749_000005.png"
+    assert Path(got).parent.parent.name == "Visit1_20260108_132749"
+
+
+def test_without_export_dir_the_rename_is_unresolvable(tmp_path):
+    """Why export_dir is needed rather than an index match across roots: with
+    every root holding a frame of that index, matching on index alone would be
+    a coin flip between four sessions."""
+    sd = load_script("training/seg_dataset.py")
+    roots = []
+    for sid in ("Visit1_20260108_132749", "Visit1_20260108_133306"):
+        d = tmp_path / sid
+        (d / "rgb").mkdir(parents=True)
+        (d / "rgb" / f"{sid}_000005.png").write_bytes(b"")
+        roots.append(d)
+    with pytest.raises(FileNotFoundError):
+        sd.resolve_image("vid3_20260108_132749_000005.png", roots,
+                         session_id="vid3_20260108_132749")
+
+
+def test_export_dir_never_guesses_between_two_candidates(tmp_path):
+    """A tie inside the export folder is not an answer - a mislabelled frame is
+    worse than a missing one."""
+    sd = load_script("training/seg_dataset.py")
+    d = tmp_path / "sess"
+    (d / "rgb").mkdir(parents=True)
+    (d / "rgb" / "a_000005.png").write_bytes(b"")
+    (d / "rgb" / "b_000005.png").write_bytes(b"")
+    with pytest.raises(FileNotFoundError):
+        sd.resolve_image("orig_000005.png", [d], session_id="orig",
+                         export_dir=d)
+
+
+def test_an_exact_name_in_the_export_dir_wins_over_the_index(tmp_path):
+    sd = load_script("training/seg_dataset.py")
+    d = tmp_path / "sess"
+    (d / "rgb").mkdir(parents=True)
+    (d / "rgb" / "orig_000005.png").write_bytes(b"")
+    (d / "rgb" / "other_000005.png").write_bytes(b"")
+    got = sd.resolve_image("orig_000005.png", [d], session_id="orig",
+                           export_dir=d)
+    assert Path(got).name == "orig_000005.png"
