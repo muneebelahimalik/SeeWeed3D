@@ -151,13 +151,40 @@ CONFIG = {
     # auto-labels) and counted as 'flagged' for manual annotation.
     "MAX_MASK_FRACTION": 0.5,
 
+    # -- Depth: height above the soil (metric-depth sessions only) -------------
+    # A colour index cannot tell a green-tinted pebble from onion tissue, and on
+    # pale, pebbly ground it does not try - both clear ExG. Height can: the
+    # pebble sits at 0 mm above the local soil surface and the onion does not.
+    #
+    # "auto"  use it where meta/session.json says depth_kind is "metric".
+    #         v1 AVI sessions have no usable depth and behave exactly as before.
+    # False   never.
+    # True    require it, and fail loudly on a session without it - so a run you
+    #         believe is depth-gated cannot quietly not be.
+    #
+    # An instance whose height CANNOT be measured is KEPT. Stereo drops out on
+    # thin, low-texture tissue, which is exactly the small plants a height gate
+    # would otherwise delete, so the veto fires only on positive evidence of
+    # flatness. See perception/ground.py and docs/depth_assisted_masking.md.
+    "USE_DEPTH_HEIGHT": "auto",
+    "HEIGHT_MIN_MM": 6.0,
+    "HEIGHT_MIN_MEASURED_FRAC": 0.25,
+    "HEIGHT_PERCENTILE": 75.0,
+    "GROUND_TILE_PX": 32,
+    "GROUND_PERCENTILE": 80.0,
+    "DEPTH_MIN_CONFIDENCE": 0.30,
+    # mm^2 counterpart of POLY_MIN_AREA_PX, used where depth AND calibration
+    # both exist. This is what stops the floor depending on boom height.
+    # None = keep using pixels even where depth allows better.
+    "MIN_INSTANCE_AREA_MM2": 40.0,
+
     # -- Polygon export --------------------------------------------------------
     "POLY_MIN_AREA_PX": 300,     # skip tiny polygons (noise, single leaf tips)
     "POLY_APPROX_EPS": 1.5,      # Douglas-Peucker simplification (px)
     "MERGE_INTO_ONE_MASK": False,  # False = one polygon per leaf clump (editable)
 
     # -- Run control -----------------------------------------------------------
-    "LIMIT_PER_SESSION": 20,   # e.g. 20 for a quick quality trial, then None
+    "LIMIT_PER_SESSION": 20,     # e.g. 20 for a quick quality trial, then None
 
     # Run over only PART of a session, by video frame index. Empty = all frames.
     #
@@ -527,6 +554,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     if cfg["LIMIT_PER_SESSION"]:
         frames = frames[:cfg["LIMIT_PER_SESSION"]]
     print_pool_report(sid, session_dir, len(frames))
+
+    from perception import ground as gr
+    use_depth, fx, fy, polarity = gr.session_depth_setup(sid, session_dir, cfg)
+    depth_qa = {"height_dropped_flat": 0, "height_dropped_small": 0,
+                "height_abstained": 0}
     if not frames:
         print(f"  [{sid}] no pool frames - run stage 1 first"); return None
 
@@ -568,6 +600,20 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
         # than MAX_MASK_FRACTION is a colour-cast/glare failure - blank it and
         # route the frame to a separate manual-only set rather than exporting
         # garbage or leaving it mixed into the main prelabeled dataset.
+        if use_depth:
+            # Applied to the FUSED mask, before polygons: depth deletes flat
+            # mineral the colour prior admitted, and never moves a boundary -
+            # stereo is least reliable at exactly the leaf margins.
+            depth_mm, conf_img = gr.load_frame_depth(session_dir, fn,
+                                                     use_depth, polarity)
+            if depth_mm is not None:
+                final, dqa = gr.mask_height_filter(final, veg, depth_mm, cfg,
+                                                   conf=conf_img,
+                                                   polarity=polarity,
+                                                   fx=fx, fy=fy)
+                for k in depth_qa:
+                    depth_qa[k] += dqa.get(k, 0)
+
         is_flagged = float(final.mean()) > cfg["MAX_MASK_FRACTION"]
         if is_flagged:
             final = np.zeros_like(final)
@@ -600,6 +646,10 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
           f"      cvat_ready/ has {stats['frames'] - stats['flagged']} frames "
           f"matching instances_default.json exactly; flagged_rgb/ has "
           f"{stats['flagged']} frames for a separate manual pass")
+    if use_depth:
+        print(f"      depth: dropped {depth_qa['height_dropped_flat']} flat + "
+              f"{depth_qa['height_dropped_small']} undersized, abstained on "
+              f"{depth_qa['height_abstained']}")
     return stats
 
 
