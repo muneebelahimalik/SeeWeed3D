@@ -305,3 +305,112 @@ def test_a_frame_with_no_valid_depth_does_not_crash():
     height, measured = gr.height_map(d)
     assert not measured.any()
     assert gr.surface_report(d)["measured_frac"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# The single-mask path, for callers that export one merged mask per frame
+# --------------------------------------------------------------------------- #
+def _cfg(**kw):
+    base = dict(HEIGHT_MIN_MM=6.0, HEIGHT_MIN_MEASURED_FRAC=0.25,
+                HEIGHT_PERCENTILE=75.0, GROUND_TILE_PX=32,
+                GROUND_PERCENTILE=80.0, DEPTH_MIN_CONFIDENCE=0.30,
+                MIN_INSTANCE_AREA_MM2=None, USE_DEPTH_HEIGHT="auto")
+    base.update(kw)
+    return base
+
+
+def test_a_merged_mask_keeps_the_raised_component_and_drops_the_flat_one():
+    """The onion and weed prelabelers export one boolean mask per frame, not a
+    list of instances, so the veto has to work per connected component."""
+    d = _flat_scene()
+    plant = _disc(d.shape, 200, 240, 25)
+    stone = _disc(d.shape, 450, 240, 22)
+    d[plant] -= 15.0
+    veg = plant | stone
+
+    out, qa = gr.mask_height_filter(veg, veg, d, _cfg())
+    assert (out & plant).sum() > plant.sum() * 0.9
+    assert not (out & stone).any()
+    assert qa["height_dropped_flat"] == 1
+
+
+def test_an_unmeasurable_component_survives_the_merged_path_too():
+    d = _flat_scene()
+    plant = _disc(d.shape, 200, 240, 25)
+    d[plant] = np.nan
+    out, qa = gr.mask_height_filter(plant, plant, d, _cfg())
+    assert (out & plant).any() and qa["height_abstained"] == 1
+
+
+def test_an_empty_mask_is_returned_unchanged():
+    d = _flat_scene()
+    empty = np.zeros(d.shape, bool)
+    out, qa = gr.mask_height_filter(empty, empty, d, _cfg())
+    assert not out.any() and qa == {}
+
+
+# --------------------------------------------------------------------------- #
+# The per-session decision, made once
+# --------------------------------------------------------------------------- #
+def test_metric_depth_turns_the_veto_on(tmp_path, capsys):
+    s = _session(tmp_path, depth_kind="metric")
+    use, fx, fy, pol = gr.session_depth_setup("sess", s, _cfg())
+    assert use is True
+    assert "height veto on" in capsys.readouterr().out
+
+
+def test_a_preview_session_turns_it_off_and_says_so(tmp_path, capsys):
+    s = _session(tmp_path, depth_kind="preview")
+    use, fx, fy, pol = gr.session_depth_setup("sess", s, _cfg())
+    assert use is False
+    assert "height veto off" in capsys.readouterr().out
+
+
+def test_requiring_depth_on_a_session_without_it_is_a_hard_error(tmp_path):
+    """So a run you believe is depth-gated cannot quietly not be."""
+    s = _session(tmp_path, depth_kind="preview")
+    with pytest.raises(SystemExit, match="not 'metric'"):
+        gr.session_depth_setup("sess", s, _cfg(USE_DEPTH_HEIGHT=True))
+
+
+def test_depth_can_be_switched_off_entirely(tmp_path):
+    s = _session(tmp_path, depth_kind="metric")
+    assert gr.session_depth_setup("sess", s, _cfg(USE_DEPTH_HEIGHT=False))[0] \
+        is False
+
+
+def test_a_frame_without_a_depth_png_yields_none(tmp_path):
+    s = _session(tmp_path, depth_kind="metric")
+    assert gr.load_frame_depth(s, "missing.png", True, None) == (None, None)
+
+
+def test_no_depth_is_read_when_the_veto_is_off(tmp_path):
+    s = _session(tmp_path, depth_kind="metric")
+    assert gr.load_frame_depth(s, "any.png", False, None) == (None, None)
+
+
+# --------------------------------------------------------------------------- #
+# Every prelabeler can use it
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("script", [
+    "annotation/prelabel_weeds_sam3.py",
+    "annotation/prelabel_onions_sam3.py",
+    "annotation/prelabel_mixed_sam3.py",
+    "annotation/prelabel_complement_sam3.py",
+])
+def test_every_prelabeler_offers_the_height_veto(script):
+    """A single-class scene has the same pebbly ground as a mixed one, so
+    leaving one prelabeler without it just moves the problem."""
+    mod = load_script(script)
+    assert mod.CONFIG["USE_DEPTH_HEIGHT"] in ("auto", True, False)
+    assert mod.CONFIG["HEIGHT_MIN_MM"] > 0
+
+
+def test_the_weed_default_is_lower_than_the_onion_one():
+    """Some broadleaf weeds grow PROSTRATE, pressed flat to the soil - real
+    targets with almost no height. Onions stand up; a weed frame is not the
+    same problem, and the same threshold on both would delete the flattest
+    weeds first."""
+    wd = load_script("annotation/prelabel_weeds_sam3.py")
+    on = load_script("annotation/prelabel_onions_sam3.py")
+    assert wd.CONFIG["HEIGHT_MIN_MM"] < on.CONFIG["HEIGHT_MIN_MM"]
