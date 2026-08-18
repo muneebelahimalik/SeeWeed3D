@@ -19,6 +19,7 @@ again on the way out, so every index outside this file is plain ontology order.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -63,7 +64,18 @@ def _session_from_name(p):
     return None
 
 
-def resolve_image(rel, images_root, session_id=None):
+def _frame_index(name):
+    """Trailing zero-padded index of an extractor filename, or None.
+
+    `<session>_000123.png` -> "000123". The index is assigned by extraction and
+    is stable across any later renaming of the session or its files, which is
+    what makes it usable to re-pair an export with images whose prefix has
+    since changed."""
+    m = re.search(r"_(\d+)$", Path(name).stem)
+    return m.group(1) if m else None
+
+
+def resolve_image(rel, images_root, session_id=None, export_dir=None):
     """Find a frame on disk from the relative path a manifest stored.
 
     `images_root` is a single path or a list of candidate roots, tried in
@@ -96,6 +108,32 @@ def resolve_image(rel, images_root, session_id=None):
     roots = as_roots(images_root)
     sess = session_id or (p.parts[0] if len(p.parts) > 1 else None) \
         or _session_from_name(p)
+
+    # The export's own folder is tried FIRST and, uniquely, is allowed to match
+    # on frame index rather than on name. It is the one root known to hold this
+    # frame, so an index match here re-pairs an export with images whose prefix
+    # changed when the session folder was renamed - without the ambiguity that
+    # makes the same match unsafe across a list of roots that all contain a
+    # frame of that index.
+    if export_dir:
+        home = Path(export_dir)
+        for sub in RGB_SUBDIRS:
+            cand = (home / sub / p.name) if sub else (home / p.name)
+            if cand.exists():
+                return cand
+        idx = _frame_index(p.name)
+        if idx:
+            for sub in RGB_SUBDIRS:
+                d = (home / sub) if sub else home
+                if not d.is_dir():
+                    continue
+                hits = sorted(q for q in d.glob(f"*_{idx}{p.suffix}")
+                              if q.is_file())
+                # Exactly one, or it is not an answer - a tie means guessing
+                # which frame an annotation belongs to, and a mislabelled frame
+                # is worse than a missing one.
+                if len(hits) == 1:
+                    return hits[0]
 
     for root in roots:
         cand = root / p
@@ -272,12 +310,13 @@ class SegManifestDataset(Dataset):
     def __len__(self):
         return len(self.frames)
 
-    def _resolve(self, rel, session_id=None):
-        return resolve_image(rel, self.images_root, session_id)
+    def _resolve(self, rel, session_id=None, export_dir=None):
+        return resolve_image(rel, self.images_root, session_id, export_dir)
 
     def __getitem__(self, i):
         rec = self.frames[i]
-        path = self._resolve(rec["image_path"], rec.get("session_id"))
+        path = self._resolve(rec["image_path"], rec.get("session_id"),
+                             rec.get("export_dir"))
         bgr = cv2.imread(str(path))
         if bgr is None:
             raise FileNotFoundError(f"cannot read image {path}")

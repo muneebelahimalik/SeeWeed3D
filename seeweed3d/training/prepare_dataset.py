@@ -847,9 +847,28 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         split = where.get(f.item_id)
         if split is None or not f.instances:
             continue
+        # Where this frame's export lived. An unzipped CVAT export sits at
+        # <session>/annotations/default.json with the frames beside it in
+        # <session>/rgb/, so the export's grandparent is the one root KNOWN to
+        # hold this frame - as opposed to the flat images_root list, which has
+        # lost which source each frame came from by the time it is written.
+        #
+        # That distinction is not academic: a session folder renamed after
+        # extraction keeps the ORIGINAL prefix in its export's item ids, so the
+        # frame's session id matches neither the folder nor the files on disk,
+        # and every root looks equally (im)plausible. Resolving by frame index
+        # instead would be ambiguous across roots and could silently pair one
+        # session's annotation with another session's image.
+        home = None
+        for src in origin.get(f.item_id, []):
+            cand = Path(src).parent.parent
+            if (cand / "rgb").is_dir():
+                home = cand.as_posix()
+                break
         seg_frames.append({
             "session_id": f.session_id, "item_id": f.item_id,
             "image_path": Path(f.image_path).as_posix(),
+            "export_dir": home,
             "width": f.width, "height": f.height, "split": split,
             "instances": [{"class_name": i.class_name,
                            "class_index": active_classes.index(i.class_name),

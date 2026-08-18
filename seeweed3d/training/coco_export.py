@@ -148,7 +148,8 @@ def export(dataset_dir, out_dir, images_root=None, link=False, overwrite=False):
 
         names = {}
         for rec in frames:
-            src = resolve_image(rec["image_path"], roots, rec.get("session_id"))
+            src = resolve_image(rec["image_path"], roots,
+                                rec.get("session_id"), rec.get("export_dir"))
             # Flatten into the split directory, keeping the session prefix that
             # the extractor already put in every filename - so two sessions can
             # never collide here even though the tree is flat.

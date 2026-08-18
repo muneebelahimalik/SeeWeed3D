@@ -272,7 +272,8 @@ def _log_previews(trk, model, records, images_root, classes, device,
         for k, rec in enumerate(records):
             try:
                 path = resolve_image(rec["image_path"], images_root,
-                                     rec.get("session_id"))
+                                     rec.get("session_id"),
+                                     rec.get("export_dir"))
             except FileNotFoundError:
                 continue
             bgr = cv2.imread(str(path))
