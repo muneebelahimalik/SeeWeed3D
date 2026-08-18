@@ -228,6 +228,52 @@ def test_unknown_label_fails_clearly(tmp_path):
     assert "ontology" in str(e.value)
 
 
+def test_a_separator_slip_in_a_label_name_is_repaired(tmp_path):
+    """'ignore region' and 'ignore_region' are the same label typed two ways.
+    CVAT's label field is free text, and refusing the export over one character
+    costs a re-annotation round trip."""
+    labels = LABELS[:-1] + ["ignore region"]        # the slip REPLACES it
+    ann = {"id": 1, "type": "polygon", "label_id": labels.index("ignore region"),
+           "group": 0, "points": _square(1, 1, 9), "z_order": 0,
+           "attributes": {}}
+    doc = _doc([_item(annotations=[ann])], labels=labels)
+    frames, report = dm.load_datumaro(_write(tmp_path, doc))
+    assert len(frames[0].ignore_regions) == 1      # read as the real label
+    assert frames[0].instances == []               # and not as a class
+    kinds = [w["kind"] for w in report.warnings]
+    assert "label_name_normalised" in kinds, "the repair must be recorded"
+
+
+def test_case_and_hyphen_slips_are_repaired_too(tmp_path):
+    labels = [("Grass-Weed" if n == "grass_weed" else n) for n in LABELS]
+    ann = {"id": 1, "type": "polygon", "label_id": labels.index("Grass-Weed"),
+           "group": 0, "points": _square(1, 1, 9), "z_order": 0,
+           "attributes": {"lep_visibility": "not_visible", "targetable": "no"}}
+    doc = _doc([_item(annotations=[ann])], labels=labels)
+    frames, _ = dm.load_datumaro(_write(tmp_path, doc))
+    assert [i.class_name for i in frames[0].instances] == ["grass_weed"]
+
+
+def test_a_label_that_is_a_guess_about_intent_still_fails(tmp_path):
+    """The repair resolves only on an EXACT match after normalising. 'weeds' is
+    not a separator slip, it is a guess about which class was meant - and
+    guessing that is how a dataset silently trains on the wrong label."""
+    doc = _doc([_item(annotations=[_poly("wild_radish", _square(1, 1, 9),
+                                         ann_id=1)])],
+               labels=LABELS + ["weeds"])
+    with pytest.raises(dm.DatumaroFormatError) as e:
+        dm.load_datumaro(_write(tmp_path, doc))
+    assert "weeds" in str(e.value)
+
+
+def test_a_clean_export_records_no_normalisation_warning(tmp_path):
+    doc = _doc([_item(annotations=[_poly("grass_weed", _square(1, 1, 9),
+                                         ann_id=1)])])
+    _, report = dm.load_datumaro(_write(tmp_path, doc))
+    assert not any(w["kind"] == "label_name_normalised"
+                   for w in report.warnings)
+
+
 def test_missing_categories_fails_clearly(tmp_path):
     p = _write(tmp_path, {"info": {}, "items": []})
     with pytest.raises(dm.DatumaroFormatError) as e:

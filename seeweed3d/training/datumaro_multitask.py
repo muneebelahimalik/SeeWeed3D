@@ -46,6 +46,7 @@ ungrouped, not as a group whose id happens to be zero.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, asdict
@@ -221,6 +222,27 @@ def _label_names(doc, path):
     return [str(l["name"]) for l in labels]
 
 
+def _canonical_label(name):
+    """An ontology name that differs from `name` ONLY in separator or case.
+
+    `ignore region` and `ignore_region` are the same label typed two ways: CVAT's
+    label field accepts free text, and a space where the ontology has an
+    underscore is the easiest possible slip. Refusing that export costs a
+    re-annotation round trip over a character.
+
+    This is deliberately NOT a rename table, which is why it earns an exception
+    to "do not rename it here". It resolves only when the normalised form
+    matches a known name EXACTLY, so `weeds`, `onion` or `grass` still fail -
+    those are guesses about intent, and guessing which class an annotator meant
+    is how a dataset silently trains on the wrong label. Returns None when there
+    is no such match."""
+    key = re.sub(r"[\s\-]+", "_", str(name).strip().lower())
+    for known in CLASSES + [LEP_LABEL, IGNORE_LABEL]:
+        if key == known.lower():
+            return known
+    return None
+
+
 def _item_image(item, path):
     """(image_path, width, height). Datumaro has used both `image` and `media`;
     both are accepted so an export from either CVAT generation works."""
@@ -323,6 +345,29 @@ def load_datumaro(json_path, contract=None, session_from=None, report=None,
         raise DatumaroFormatError(f"{path}: cannot read as JSON ({e}).")
 
     names = _label_names(doc, path)
+
+    # Separator/case slips are repaired onto the ontology name and RECORDED.
+    # Not silent: the export really does disagree with the schema, and the fix
+    # belongs in CVAT so the next export is clean - this only stops that being
+    # a blocker today. Anything that does not resolve exactly still raises.
+    fixed = []
+    for i, n in enumerate(names):
+        if n in CLASSES or n in (LEP_LABEL, IGNORE_LABEL):
+            continue
+        canon = _canonical_label(n)
+        if canon is not None:
+            fixed.append((n, canon))
+            names[i] = canon
+    if fixed:
+        detail = ", ".join(f"{a!r} -> {b!r}" for a, b in fixed)
+        report.add_warning(
+            str(path), "label_name_normalised",
+            f"label(s) differing from the ontology only by separator or case "
+            f"were read as the ontology name: {detail}. Rename them in the "
+            f"CVAT project (annotation/regen_cvat_labels.py regenerates the "
+            f"schema) so future exports match exactly.")
+        print(f"  [!] {path.name}: normalised label name(s) {detail}")
+
     unknown = sorted(set(names) - set(CLASSES) - {LEP_LABEL, IGNORE_LABEL})
     if unknown and contract.strict_unknown_labels:
         raise DatumaroFormatError(
