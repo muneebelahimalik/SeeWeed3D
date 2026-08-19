@@ -760,3 +760,47 @@ def test_verify_images_is_off_by_default_so_build_needs_no_images(tmp_path):
     prep.build(root, tmp_path / "no_images_here", out, val_fraction=0.0,
                test_fraction=0.0, seed=1, strict=False)
     assert json.loads((out / "seg_manifest.json").read_text())["n_frames"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# Writing the manifests
+# --------------------------------------------------------------------------- #
+def test_the_frame_manifests_are_not_pretty_printed(tmp_path):
+    """indent=2 puts every polygon COORDINATE on its own line. On a few
+    thousand masks that is hundreds of megabytes of whitespace, and the whole
+    string then goes through a single write() - which Windows rejects with
+    OSError 22 on some volumes while succeeding on others."""
+    root = _crop_and_weeds_export(tmp_path, frames_per=4)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.0,
+               test_fraction=0.0, seed=1, strict=False)
+
+    for name in ("seg_manifest.json", "lep_manifest.json"):
+        text = (out / name).read_text(encoding="utf-8")
+        assert json.loads(text), f"{name} must still be valid JSON"
+        # One line, or close to it - certainly not one line per coordinate.
+        assert text.count("\n") <= 1, f"{name} is pretty-printed"
+
+    # The small reports stay readable: they are read by people.
+    report = (out / "dataset_report.json").read_text(encoding="utf-8")
+    assert report.count("\n") > 1
+
+
+def test_the_manifests_survive_a_round_trip(tmp_path):
+    """Dropping the indent must not change the CONTENT."""
+    root = _crop_and_weeds_export(tmp_path, frames_per=4)
+    out = tmp_path / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.0,
+               test_fraction=0.0, seed=1, strict=False)
+    doc = json.loads((out / "seg_manifest.json").read_text(encoding="utf-8"))
+    assert doc["frames"] and doc["classes"]
+    assert doc["frames"][0]["instances"][0]["polygons"]
+    assert "label_provenance" in doc and "images_root" in doc
+
+
+def test_a_manifest_is_written_even_if_the_directory_is_new(tmp_path):
+    root = _crop_and_weeds_export(tmp_path, frames_per=4)
+    out = tmp_path / "deep" / "nested" / "out"
+    prep.build(root, tmp_path / "images", out, val_fraction=0.0,
+               test_fraction=0.0, seed=1, strict=False)
+    assert (out / "seg_manifest.json").exists()
