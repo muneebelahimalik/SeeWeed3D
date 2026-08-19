@@ -575,30 +575,45 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
             prev_last = this_last
         return out
 
-    n_test = int(round(test_fraction * n))
-    n_val = int(round(val_fraction * n))
     gap = max(0, int(gap_frames))
 
-    # Layout: [ train | gap | val | gap | test ]
-    # Test last so it sits at one end of the drive, furthest from training.
+    # THE GAP IS CHARGED TO THE WHOLE BLOCK, NOT TO TRAIN.
+    #
+    # `n_train = n - n_val - n_test - gaps` sizes val and test from the raw
+    # block and lets training absorb every buffered frame. A requested
+    # 70/15/15 then came out 56/22/22 - the fractions describe what was asked
+    # for and not what was built, and the shortfall lands entirely on the split
+    # that needed the frames most.
+    #
+    # So the buffers come off first, and the fractions apply to what survives.
     #
     # A gap is spent only where a REAL boundary exists. With test_fraction=0
     # there is no train|val|test seam to buffer, only train|val, and charging
     # for the absent one would discard annotated frames to separate a block
-    # from nothing. On a 45-frame dataset that is two hand-corrected frames
-    # thrown away for no separation at all.
-    n_gaps = (1 if n_val else 0) + (1 if n_test else 0)
-    need = n_val + n_test + n_gaps * gap
-    if need >= n:
-        gap = 0                                    # too small to afford buffers
-        need = n_val + n_test
-    if need >= n:
+    # from nothing.
+    n_gaps = (1 if val_fraction > 0 else 0) + (1 if test_fraction > 0 else 0)
+    for _ in range(2):
+        # Twice: a fraction can round to zero frames on a short block, which
+        # removes its seam, which returns frames, which can change the rounding.
+        # Two passes settle it; a third would change nothing.
+        available = n - n_gaps * gap
+        if available < 3:
+            gap, n_gaps, available = 0, 0, n
+        n_test = int(round(test_fraction * available))
+        n_val = int(round(val_fraction * available))
+        n_gaps = (1 if n_val else 0) + (1 if n_test else 0)
+
+    available = n - n_gaps * gap
+    if available < 3:
+        gap, n_gaps, available = 0, 0, n
+        n_test = int(round(test_fraction * available))
+        n_val = int(round(val_fraction * available))
+    n_train = available - n_val - n_test
+    if n_train <= 0:
         raise SplitError(
             f"{n} frames cannot be split into train/val/test at "
-            f"val={val_fraction}, test={test_fraction}. Lower the fractions or "
-            f"annotate more frames.")
-
-    n_train = n - need
+            f"val={val_fraction}, test={test_fraction} with a {gap}-frame gap. "
+            f"Lower the fractions, lower the gap, or annotate more frames.")
     sizes = {"train": n_train, "val": n_val, "test": n_test}
 
     # WHICH SPLIT SITS WHERE ALONG THE DRIVE IS ROTATED PER BLOCK.

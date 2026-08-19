@@ -297,3 +297,39 @@ def test_the_result_holds_frames_and_nothing_else():
         assert sum(len(v) for v in out.values()) == len(ids)
         for v in out.values():
             assert all(isinstance(f, str) and f in ids for f in v)
+
+
+def test_the_fractions_describe_what_is_built_not_what_was_asked_for():
+    """Sizing val and test from the RAW block and letting train absorb every
+    buffered frame turned a requested 70/15/15 into 56/22/22 on real data - the
+    shortfall landing entirely on the split that needed the frames most."""
+    ids = _ids("vid1_20260108_101500", range(0, 246 * 5, 5))
+    out = sp.assign_frame_blocks(ids, 0.15, 0.15, gap_frames=12, n_blocks=3,
+                                 _key="s")
+    kept = len(out["train"]) + len(out["val"]) + len(out["test"])
+    assert abs(len(out["val"]) / kept - 0.15) < 0.03
+    assert abs(len(out["test"]) / kept - 0.15) < 0.03
+    assert abs(len(out["train"]) / kept - 0.70) < 0.04
+
+
+def test_the_ratios_hold_across_block_counts_and_gaps():
+    """The gap and the block count change how much is buffered; neither should
+    change the SHAPE of what survives."""
+    ids = _ids("vid1_20260108_101500", range(0, 300 * 5, 5))
+    for n_blocks in (1, 2, 4):
+        for gap in (0, 6, 12):
+            out = sp.assign_frame_blocks(ids, 0.2, 0.1, gap_frames=gap,
+                                         n_blocks=n_blocks, _key="s")
+            kept = sum(len(out[k]) for k in ("train", "val", "test"))
+            assert abs(len(out["val"]) / kept - 0.2) < 0.05, (n_blocks, gap)
+            assert abs(len(out["test"]) / kept - 0.1) < 0.05, (n_blocks, gap)
+
+
+def test_a_block_too_small_for_its_buffers_still_produces_a_split():
+    """Short sessions must not raise: the gap is dropped rather than the
+    build."""
+    ids = _ids("vid1_20260108_101500", range(0, 30 * 5, 5))
+    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=12, n_blocks=1,
+                                 _key="s")
+    assert out["train"] and out["val"] and out["test"]
+    assert sum(len(v) for v in out.values()) == len(ids)

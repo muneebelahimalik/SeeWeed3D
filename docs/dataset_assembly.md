@@ -345,6 +345,12 @@ middles and ends.
 > opposite sides of the split boundary, and the score then measures
 > memorisation. Blocks stay contiguous — only their *order* rotates.
 
+**The fractions describe what is built, not what was asked for.** The buffers
+come off the block first; the fractions then apply to what survives. Sizing val
+and test from the raw block and letting train absorb every buffered frame turned
+a requested 70/15/15 into **56/22/22** on real data — the shortfall landing
+entirely on the split that needed the frames most.
+
 **What the gaps cost, and which ones are free.** A buffer is charged at every
 seam where the split changes. With the layout rotated, two chunks often meet at
 the *same* split, and dropping frames to separate train from train buys nothing
