@@ -140,8 +140,7 @@ CONFIG = {
     #"IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
-    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
-    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
+    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion__only_all_sessions_final_dataset",
 
     # -- Pass 1: look before you select ---------------------------------------
     # True  = print the numbered frame table and STOP. Writes nothing.
