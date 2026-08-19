@@ -25,13 +25,66 @@ def _positions(chosen, all_ids):
 # --------------------------------------------------------------------------- #
 # Representative: sampled from along the drive, not only its tail
 # --------------------------------------------------------------------------- #
-def test_one_block_puts_test_only_at_the_end():
-    """The behaviour being fixed. With a single block, test is always the LAST
-    stretch of the recording - which on this data is later in the day, further
-    along the bed, often the headland where the rig turns."""
+def test_without_rotation_test_is_only_ever_the_end_of_the_drive():
+    """The behaviour rotation fixes. A fixed layout puts test at the tail of
+    every block of every session, so the test set is made entirely of
+    drive-ends - later in the pass, further along the bed, often the headland
+    where the rig turns. A test set of drive-ends measures drive-ends."""
     ids = _ids("vid1_20260108_101500", range(0, 2000, 5))
-    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, n_blocks=1)
+    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, n_blocks=1,
+                                 rotate=False)
     assert min(_positions(out["test"], ids)) > 0.7
+
+
+def test_rotation_moves_the_test_block_off_the_tail():
+    """Across sessions the test block must not always land in the same place.
+    One session proves nothing - the rotation is keyed, so this asks whether
+    the BIAS is gone across many of them."""
+    where = []
+    for k in range(24):
+        ids = _ids(f"vid{k}_20260108_101500", range(0, 800, 5))
+        out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, n_blocks=1,
+                                     _key=f"sess{k}")
+        where.append(min(_positions(out["test"], ids)))
+    assert min(where) < 0.3, "test never starts near the beginning"
+    assert max(where) > 0.6, "test never lands late either"
+    assert len(set(round(w, 1) for w in where)) >= 2
+
+
+def test_rotation_is_deterministic_for_a_seed():
+    ids = _ids("vid1_20260108_101500", range(0, 800, 5))
+    a = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, _key="s")
+    b = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, _key="s")
+    assert a["test"] == b["test"] and a["train"] == b["train"]
+
+
+def test_rotation_keeps_every_block_contiguous():
+    """Rotating the ORDER must not become a random frame shuffle - that would
+    put a frame and its near-duplicate on opposite sides of the boundary, the
+    exact failure blocks exist to prevent."""
+    ids = _ids("vid1_20260108_101500", range(0, 800, 5))
+    out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, _key="s")
+    for split in ("train", "val", "test"):
+        idx = sorted(ids.index(f) for f in out[split])
+        assert idx == list(range(idx[0], idx[0] + len(idx))), \
+            f"{split} is not one contiguous run"
+
+
+def test_rotation_shares_nothing_between_splits():
+    ids = _ids("vid1_20260108_101500", range(0, 800, 5))
+    for k in range(6):
+        out = sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4, _key=f"s{k}")
+        seen = out["train"] + out["val"] + out["test"]
+        assert len(seen) == len(set(seen))
+
+
+def test_two_sessions_do_not_rotate_identically():
+    """Keyed by session, so the test set is not the same stretch of each."""
+    ids = _ids("vid1_20260108_101500", range(0, 800, 5))
+    got = {tuple(sp.assign_frame_blocks(ids, 0.2, 0.2, gap_frames=4,
+                                        _key=f"sess_{k}")["test"])
+           for k in range(12)}
+    assert len(got) >= 2
 
 
 def test_several_blocks_spread_the_test_set_along_the_drive():
@@ -189,3 +242,58 @@ def test_an_unknown_mode_is_refused(tmp_path):
     pdz = load_script("training/prepare_dataset.py")
     with pytest.raises(SystemExit, match="split_mode must be"):
         pdz.build(tmp_path, tmp_path, tmp_path / "out", split_mode="random")
+
+
+# --------------------------------------------------------------------------- #
+# What the gaps cost, and not paying for the ones that buy nothing
+# --------------------------------------------------------------------------- #
+def test_a_seam_between_two_chunks_of_the_same_split_costs_nothing():
+    """With the layout rotated, two chunks often meet at the SAME split.
+    Dropping frames to separate train from train buys no separation at all, and
+    at several blocks it was throwing away a third of every session."""
+    ids = _ids("vid1_20260108_101500", range(0, 3000, 5))
+    charged = sp.assign_frame_blocks(ids, 0.15, 0.15, gap_frames=12,
+                                     n_blocks=6, _key="s", rotate=True)
+    # Every real boundary is still buffered: nothing is shared, and every
+    # split remains a set of contiguous runs.
+    seen = charged["train"] + charged["val"] + charged["test"]
+    assert len(seen) == len(set(seen))
+    # And the saving is real - some seam somewhere matched and was not charged.
+    worst = 12 * (6 - 1) + 12 * 2 * 6
+    assert len(charged["_dropped_gap"]) < worst
+
+
+def test_every_session_still_reaches_every_split_after_rotation():
+    """The property frame blocks exist for: no class can be missing from
+    training, because every session contributes to every split."""
+    by = {f"vid{k}_20260108_10150{k}": _ids(f"vid{k}_20260108_10150{k}",
+                                            range(0, 1500, 5))
+          for k in range(4)}
+    out = sp.assign_frame_blocks_per_session(by, 0.15, 0.15, gap_frames=12,
+                                             n_blocks=3, seed=1234)
+    for sess in by:
+        for split in ("train", "val", "test"):
+            assert any(f.startswith(sess) for f in out[split]), \
+                f"{sess} missing from {split}"
+
+
+def test_the_gap_is_still_charged_where_the_split_really_changes():
+    """The optimisation must not become 'skip the buffer'. With rotation off,
+    every chunk ends with test and begins with train, so every seam is real."""
+    ids = _ids("vid1_20260108_101500", range(0, 3000, 5))
+    out = sp.assign_frame_blocks(ids, 0.15, 0.15, gap_frames=12, n_blocks=4,
+                                 rotate=False)
+    assert len(out["_dropped_gap"]) >= 12 * 3, "chunk seams went unbuffered"
+
+
+def test_the_result_holds_frames_and_nothing_else():
+    """Callers sum the returned dict to account for every frame. A layout
+    description living in there as an extra key is silently counted as three
+    frames that do not exist."""
+    ids = _ids("vid1_20260108_101500", range(0, 800, 5))
+    for n_blocks in (1, 3):
+        out = sp.assign_frame_blocks(ids, 0.15, 0.15, gap_frames=12,
+                                     n_blocks=n_blocks, _key="s")
+        assert sum(len(v) for v in out.values()) == len(ids)
+        for v in out.values():
+            assert all(isinstance(f, str) and f in ids for f in v)

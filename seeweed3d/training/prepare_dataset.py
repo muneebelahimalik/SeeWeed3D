@@ -352,7 +352,8 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           verify_images=False,
           keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
-          split_mode="auto", blocks_per_session=1):
+          split_mode="auto", blocks_per_session=1,
+          split_granularity="auto"):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -720,6 +721,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # failure modes are silent unless checked. `reason` stays None while the
     # session split remains usable.
     split_mode, frame_split, split_map, reason = "session", None, None, None
+    split_info = None
     if split_mode_wanted == "frame_block":
         # Chosen deliberately, not fallen back to. The reason is stated in the
         # same words the fallback uses, so the output means the same thing
@@ -731,10 +733,11 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                   f"({infos[0].session_id if infos else '?'}) - there is "
                   f"nothing to hold out")
     else:
-        split_map = sp.assign_splits(infos, val_fraction, test_fraction, seed,
-                                     holdout_val=holdout_val,
-                                     holdout_test=holdout_test,
-                                     stratify_by_scene=stratify_by_scene)
+        split_map, split_info = sp.plan_splits(
+            infos, val_fraction, test_fraction, seed,
+            holdout_val=holdout_val, holdout_test=holdout_test,
+            stratify_by_scene=stratify_by_scene,
+            granularity=split_granularity)
         # Whole sessions are indivisible, so a fraction that rounds below one
         # session yields an EMPTY val: training then runs blind, saves no
         # checkpoint and reports no metric, hours later.
@@ -764,6 +767,15 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         session_where = {s: k for k, v in split_map.items() for s in v}
         where = {f.item_id: session_where.get(f.session_id) for f in frames}
 
+        if split_info and split_info.get("fell_back"):
+            # Printed BEFORE the numbers, because it changes what they mean.
+            print(f"\n  [!] Split granularity: SESSION, not day.")
+            print(f"      {split_info['reason']}")
+        elif split_info:
+            print(f"\n  Split granularity: {split_info['granularity']} "
+                  f"({split_info['n_units']} independent unit(s)) - val and "
+                  f"test share no day with training.")
+
         rep = sp.scene_representation(split_map, infos)
         print("\n  Scene representation (sessions per split):")
         for split in ("train", "val", "test"):
@@ -791,7 +803,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             by_session.setdefault(f.session_id, []).append(f.item_id)
         frame_split = sp.assign_frame_blocks_per_session(
             by_session, val_fraction, test_fraction, gap_frames=gap_frames,
-            n_blocks=blocks_per_session)
+            n_blocks=blocks_per_session, seed=seed)
         split_map = {"train": [i.session_id for i in infos], "val": [],
                      "test": []}
         where = {}
@@ -850,6 +862,14 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         frames_by_session.setdefault(f.session_id, []).append(f.image_path)
     summary = sp.write_splits(out / "splits", split_map, frames_by_session, infos)
     summary["split_mode"] = split_mode
+    if split_info:
+        # Travels with the dataset: a run against a session-granularity split
+        # is not comparable with one against a held-out day, and months later
+        # the manifest is the only record of which it was.
+        summary["split_granularity"] = split_info["granularity"]
+        summary["split_granularity_fell_back"] = bool(split_info["fell_back"])
+        if split_info.get("reason"):
+            summary["split_granularity_note"] = split_info["reason"]
     if frame_split:
         summary["frame_blocks"] = {k: v for k, v in frame_split.items()}
         summary["warning"] = (
@@ -1050,6 +1070,14 @@ def main(argv=None):
                    help="exclude these ontology classes from THIS build "
                         "(e.g. --drop-classes wild_radish weed_cluster). "
                         "common/ontology.py is NOT modified.")
+    p.add_argument("--split-granularity", default="auto",
+                   choices=["auto", "group", "session"],
+                   help="what unit is held out. 'group' = a whole "
+                        "date+field+camera, the only split that estimates "
+                        "generalisation. 'session' = a whole recording from a "
+                        "date training also saw - no frame leakage, but an "
+                        "upper bound. 'auto' (default) tries group and falls "
+                        "back, saying so.")
     p.add_argument("--keep-classes", nargs="*", default=None,
                    help="the inverse of --drop-classes: keep ONLY these and "
                         "drop the rest of the ontology (e.g. --keep-classes "
@@ -1106,6 +1134,7 @@ def main(argv=None):
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
           keep_classes=a.keep_classes,
+          split_granularity=a.split_granularity,
           label_provenance=a.label_provenance,
           verify_images=a.verify_images,
           keep_empty_frames=a.keep_empty_frames,

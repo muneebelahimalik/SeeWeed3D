@@ -60,35 +60,76 @@ def _stable_rank(session_id, seed):
     return zlib.crc32(f"{seed}:{session_id}".encode()) / 0xFFFFFFFF
 
 
-def _quota_walk(ordered, val_fraction, test_fraction, out, guarantee_train):
+def _quota_walk(ordered, val_fraction, test_fraction, out, guarantee_train,
+                size_by_session=None):
     """Fill test, then val, then train from an ordered list of groups.
 
-    Groups are indivisible, so the quotas are targets rather than exact counts.
-    `guarantee_train` reserves the last group for training when nothing has
-    reached training yet - used for the dataset as a whole, and NOT per scene
-    stratum, where a single-session stratum going wholly to val is a legitimate
-    outcome that the overall guarantee still backstops."""
-    total = sum(len(m) for _, m in ordered)
-    want_test = int(round(test_fraction * total))
-    want_val = int(round(val_fraction * total))
-    n_test = n_val = 0
-    n_groups = len(ordered)
-    for gi, (_, members) in enumerate(ordered):
-        members = sorted(members)
-        last = (n_groups - gi - 1) == 0
-        if guarantee_train and last and not out["train"]:
-            # A whole group is indivisible, so a few large groups can consume
-            # the val/test quotas and leave training empty. A dataset with no
-            # training data is never the intended outcome of a fraction.
-            out["train"].extend(members)
-        elif n_test < want_test:
-            out["test"].extend(members)
-            n_test += len(members)
-        elif n_val < want_val:
-            out["val"].extend(members)
-            n_val += len(members)
-        else:
-            out["train"].extend(members)
+    BEST FIT, NOT FIRST FIT. Groups are indivisible, and the obvious loop -
+    "add this group if the split is still under quota" - checks the quota
+    BEFORE adding and so overshoots by the whole size of the group. Asking for
+    20% test from groups of 1, 2 and 3 sessions put all three of the last group
+    in test: 50% of the data, and its entire capture date absent from training.
+
+    So a group is taken only if it FITS the remaining quota. When nothing fits,
+    the split takes the smallest remaining group rather than the first one it
+    happens to see - a split has to contain something, but it does not have to
+    swallow whatever came first.
+
+    Sizes are FRAMES when they are known. A 500-frame session and a 50-frame
+    one are not interchangeable, and counting sessions makes a 20% split mean
+    anything between 5% and 60% of the actual data. Falls back to counting
+    sessions when no frame counts were supplied.
+
+    `guarantee_train` reserves a group for training when nothing has reached it
+    - a dataset with no training data is never the intended outcome."""
+    units = [(sorted(m), _unit_size(m, size_by_session)) for _, m in ordered]
+    total = sum(w for _, w in units)
+    if not total:
+        return
+    want = {"test": test_fraction * total, "val": val_fraction * total}
+    taken = {"test": 0.0, "val": 0.0}
+    remaining = list(range(len(units)))
+
+    for split in ("test", "val"):
+        if want[split] <= 0:
+            continue
+        while remaining:
+            room = want[split] - taken[split]
+            if room <= 0:
+                break
+            fits = [i for i in remaining if units[i][1] <= room]
+            if fits:
+                i = fits[0]                     # keep the interleaved order
+            elif taken[split] == 0:
+                # Nothing fits and the split is empty: take the SMALLEST, not
+                # the first. This is the whole difference between a test set of
+                # 20% and one of 50%.
+                i = min(remaining, key=lambda j: (units[j][1], units[j][0][0]))
+            else:
+                break
+            taken[split] += units[i][1]
+            out[split].extend(units[i][0])
+            remaining.remove(i)
+
+    for i in remaining:
+        out["train"].extend(units[i][0])
+
+    if guarantee_train and not out["train"]:
+        # Every unit was consumed by val/test. Give the largest back rather
+        # than shipping an empty training set.
+        biggest = max((u for u in units), key=lambda u: (u[1], u[0][0]))
+        for split in ("val", "test"):
+            out[split] = [s for s in out[split] if s not in biggest[0]]
+        out["train"].extend(biggest[0])
+
+
+def _unit_size(members, size_by_session=None):
+    """Frames in a group when known, else its session count."""
+    if size_by_session:
+        n = sum(int(size_by_session.get(s, 0)) for s in members)
+        if n:
+            return n
+    return len(members)
 
 
 def scene_of(members, scene_by_session):
@@ -125,9 +166,107 @@ def scene_representation(split_map, sessions):
     return {"counts": counts, "missing": missing}
 
 
+#: Split granularity, best first. The unit that is held out decides what a
+#: validation number can possibly mean.
+#:
+#:   group        a whole date+field+camera. Val/test share NO conditions with
+#:                train - different day, light, growth stage. The only split
+#:                that estimates generalisation.
+#:   session      a whole recording, from a date that training also saw. No
+#:                frame-level leakage, but the conditions are shared, so the
+#:                score is an upper bound on a new drive.
+#:   frame_block  contiguous blocks WITHIN each session. Val/test come from the
+#:                same recording as train; adjacent frames are near-duplicates.
+#:                Measures fit, not generalisation.
+GRANULARITIES = ("group", "session")
+
+
+def _interleave(strata, seed):
+    """One order that visits every stratum before repeating any.
+
+    Round-robin rather than one quota walk per stratum. Independent per-stratum
+    quotas inflate the small splits on small strata - three sessions at a 20%
+    test quota rounds to one, which is 33% - and those errors compound across
+    strata until the global ratio bears no relation to what was asked for.
+    Interleaving keeps the global quota exact AND still hands the early
+    positions (test, then val) to different strata.
+
+    Strata are visited largest-first so a scene with many sessions absorbs the
+    rounding a one-session stratum cannot."""
+    ranked = {k: sorted(v, key=lambda kv: _stable_rank(sorted(kv[1])[0], seed))
+              for k, v in strata.items()}
+    order = sorted(ranked, key=lambda k: (-sum(len(m) for _, m in ranked[k]), k))
+    out, i = [], 0
+    while any(len(ranked[k]) > i for k in order):
+        for k in order:
+            if len(ranked[k]) > i:
+                out.append(ranked[k][i])
+        i += 1
+    return out
+
+
+def plan_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
+                holdout_val=(), holdout_test=(), holdout_train=(),
+                stratify_by_scene=True, granularity="auto"):
+    """assign_splits, plus what it had to settle for. Returns (map, info).
+
+    granularity "auto" tries `group` and falls back to `session` when a
+    requested split comes out empty - which happens as soon as the dataset has
+    few metadata groups. Six sessions recorded on two days are TWO groups, and
+    two indivisible units cannot fill three splits: test ends up empty and
+    training sees one date.
+
+    Falling back to `session` is a real loss and is reported as one: val and
+    test then share a date with training, so the score is an upper bound. It is
+    still far better than frame blocks, which share the recording itself.
+
+    info: {"granularity", "fell_back", "reason", "n_units"}."""
+    want = str(granularity or "auto").lower()
+    if want not in ("auto",) + GRANULARITIES:
+        raise SplitError(
+            f"granularity must be 'auto', 'group' or 'session'; got "
+            f"{granularity!r}")
+
+    tries = GRANULARITIES if want == "auto" else (want,)
+    last = None
+    for g in tries:
+        out = assign_splits(sessions, val_fraction, test_fraction, seed,
+                            holdout_val, holdout_test, holdout_train,
+                            stratify_by_scene, _granularity=g)
+        empty = [s for s, frac in (("val", val_fraction),
+                                   ("test", test_fraction))
+                 if frac > 0 and not out.get(s)]
+        info = {"granularity": g, "fell_back": g != tries[0],
+                "n_units": _n_units(sessions, g), "reason": None}
+        if not empty:
+            if info["fell_back"]:
+                info["reason"] = (
+                    "too few metadata groups to fill every split, so whole "
+                    "SESSIONS were held out instead of whole days. Val and "
+                    "test share a date with training: no frame leaks between "
+                    "them, but the conditions are shared, so read the score as "
+                    "an upper bound on a new drive.")
+            return out, info
+        last = (out, info, empty)
+    out, info, empty = last
+    info["reason"] = (f"even at {info['granularity']} granularity "
+                      f"{', '.join(empty)} came out empty")
+    return out, info
+
+
+def _n_units(sessions, granularity):
+    infos = [SessionInfo(session_id=s) if isinstance(s, str) else s
+             for s in sessions]
+    if granularity == "session":
+        return len(infos)
+    return len({i.group_key() if any(i.group_key()) else ("__solo__",
+                                                          i.session_id, "")
+                for i in infos})
+
+
 def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
                   holdout_val=(), holdout_test=(), holdout_train=(),
-                  stratify_by_scene=True):
+                  stratify_by_scene=True, _granularity="group"):
     """Assign every session to exactly one split.
 
     sessions: [SessionInfo] or [str]. Returns {split: [session_id]}.
@@ -191,6 +330,12 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
     # one group and hand the whole dataset to a single split.
     groups = defaultdict(list)
     for i in free:
+        if _granularity == "session":
+            # Each recording is its own unit. Deliberate, not a relaxation of
+            # the leakage rule: no FRAME is shared between splits either way.
+            # What is given up is that val/test now share a date with training.
+            groups[("__session__", i.session_id, "")].append(i.session_id)
+            continue
         key = i.group_key()
         groups[key if any(key) else ("__solo__", i.session_id, "")].append(
             i.session_id)
@@ -203,20 +348,24 @@ def assign_splits(sessions, val_fraction=0.2, test_fraction=0.2, seed=1234,
                     guarantee_train=True)
     else:
         scene_by = {i.session_id: (i.scene or "unknown") for i in infos}
+        date_by = {i.session_id: (i.date or "") for i in infos}
         strata = defaultdict(list)
         for key, members in ordered:
-            strata[scene_of(members, scene_by)].append((key, members))
-        # Deterministic stratum order, and the LARGEST first. A scene with many
-        # sessions can absorb the rounding losses that a one-session stratum
-        # cannot, and processing it first means the overall train guarantee is
-        # normally satisfied before the thin strata are reached - so a stratum
-        # of one session is free to go to val, which is exactly the
-        # representation this is for.
-        for _, groups_in_scene in sorted(
-                strata.items(),
-                key=lambda kv: (-sum(len(m) for _, m in kv[1]), kv[0])):
-            _quota_walk(groups_in_scene, val_fraction, test_fraction, out,
-                        guarantee_train=False)
+            stratum = scene_of(members, scene_by)
+            if _granularity == "session":
+                # Date joins the stratum key ONLY here. At group granularity the
+                # date IS the grouping, so adding it would say nothing; at
+                # session granularity it is the axis that actually varies, and
+                # without it a split can end up holding one day entirely -
+                # which on this data means training never sees January.
+                dates = {date_by.get(s, "") for s in members}
+                stratum = (stratum, dates.pop() if len(dates) == 1 else "mixed")
+            strata[stratum].append((key, members))
+        # ONE quota walk over an interleaved order, not one walk per stratum.
+        # Per-stratum quotas inflate the small splits on small strata (three
+        # sessions at 20% rounds to one, which is 33%) and the errors compound.
+        _quota_walk(_interleave(strata, seed), val_fraction, test_fraction,
+                    out, guarantee_train=True)
         if not out["train"]:
             # Every stratum was thin enough to be consumed by val/test. Give
             # back the largest group rather than shipping an empty training set.
@@ -247,7 +396,7 @@ MIN_FRAMES_FOR_BLOCKS = 5
 
 def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
                                     test_fraction=0.2, gap_frames=2,
-                                    n_blocks=1):
+                                    n_blocks=1, seed=1234, rotate=True):
     """Contiguous frame blocks WITHIN each session, merged across sessions.
 
     USE WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE OR HARMFUL. Splitting by whole
@@ -272,8 +421,11 @@ def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
             out["train"].extend(ids)
             out["_train_only_sessions"].append(sess)
             continue
+        # Keyed by session, so two sessions do not rotate identically and the
+        # test set is not the same stretch of every drive.
         part = assign_frame_blocks(ids, val_fraction, test_fraction,
-                                   gap_frames=gap_frames, n_blocks=n_blocks)
+                                   gap_frames=gap_frames, n_blocks=n_blocks,
+                                   seed=seed, rotate=rotate, _key=sess)
         for key in ("train", "val", "test", "_dropped_gap"):
             out[key].extend(part[key])
     return out
@@ -295,8 +447,46 @@ def missing_from_train(split_map, class_counts_by_session):
     return sorted(everywhere - in_train)
 
 
+def _split_order(key, seed, rotate):
+    """Which split occupies which position along a block."""
+    order = ["train", "val", "test"]
+    if not rotate:
+        return order
+    r = _rotation(key, seed)
+    return order[r:] + order[:r]
+
+
+def _edge_splits(chunk, val_fraction, test_fraction, seed, key, rotate):
+    """(first, last) split along this chunk, without laying it out.
+
+    Derived from the layout rather than read back from the result: the result
+    is a dict of frame lists, and recovering position from it would depend on
+    ids sorting in positional order - true of the extractor's zero-padded names
+    and not a property worth relying on. Returning the order as an extra dict
+    key is worse still: callers sum the dict to account for every frame, and a
+    list of split names in there is silently counted as frames.
+
+    A chunk too short to block-split goes wholly to train."""
+    n = len(chunk)
+    if n < MIN_FRAMES_FOR_BLOCKS:
+        return "train", "train"
+    sizes = {"val": int(round(val_fraction * n)),
+             "test": int(round(test_fraction * n))}
+    order = _split_order(key, seed, rotate)
+    present = [s for s in order if s == "train" or sizes.get(s, 0) > 0]
+    if not present:
+        return "train", "train"
+    return present[0], present[-1]
+
+
+def _rotation(key, seed):
+    """Which of train/val/test starts this block. Deterministic from the key."""
+    return int(zlib.crc32(f"{seed}:{key}".encode()) % 3)
+
+
 def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
-                        gap_frames=2, n_blocks=1):
+                        gap_frames=2, n_blocks=1, seed=1234, rotate=True,
+                        _key=""):
     """Split ONE session into contiguous frame blocks, with a discarded buffer.
 
     USE ONLY WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE (a single recording). It
@@ -355,25 +545,34 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
         # rather than failing the build.
         out = {"train": [], "val": [], "test": [], "_dropped_gap": []}
         edges = [round(j * n / k) for j in range(k + 1)]
+        # `_order` is per-chunk and meaningless once chunks are merged, so it is
+        # read for the seam decision and not accumulated.
         gap = max(0, int(gap_frames))
+        prev_last = None
         for j, (a, b) in enumerate(zip(edges, edges[1:])):
             chunk = ids[a:b]
-            # THE SEAM BETWEEN CHUNKS NEEDS A BUFFER TOO. Each chunk ends with
-            # its test block and the next begins with its train block, so
-            # without this they are adjacent frames - and multiplying blocks
-            # would multiply unbuffered seams, making a split that looks more
-            # representative measurably more contaminated. Charged to the later
-            # chunk so the first keeps all of its frames.
-            if j and gap and len(chunk) > gap:
+            # THE SEAM BETWEEN CHUNKS NEEDS A BUFFER - but only when the split
+            # actually changes across it. Each chunk used to end with test and
+            # begin with train, so a buffer was always required; with the
+            # layout rotated per chunk, two chunks often meet at the SAME
+            # split, and dropping frames to separate train from train buys
+            # nothing. At five blocks and a twelve-frame gap this was throwing
+            # away a third of every session.
+            nxt, this_last = _edge_splits(chunk, val_fraction, test_fraction,
+                                          seed, f"{_key}#{j}", rotate)
+            if j and gap and len(chunk) > gap and prev_last != nxt:
                 out["_dropped_gap"].extend(chunk[:gap])
                 chunk = chunk[gap:]
             if len(chunk) < MIN_FRAMES_FOR_BLOCKS:
                 out["train"].extend(chunk)
+                prev_last = "train"
                 continue
             part = assign_frame_blocks(chunk, val_fraction, test_fraction,
-                                       gap_frames, n_blocks=1)
+                                       gap_frames, n_blocks=1, seed=seed,
+                                       rotate=rotate, _key=f"{_key}#{j}")
             for key in out:
                 out[key].extend(part[key])
+            prev_last = this_last
         return out
 
     n_test = int(round(test_fraction * n))
@@ -400,13 +599,38 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
             f"annotate more frames.")
 
     n_train = n - need
-    i = 0
-    train = ids[i:i + n_train]; i += n_train + (gap if n_val else 0)
-    val = ids[i:i + n_val]; i += n_val + (gap if n_test else 0)
-    test = ids[i:i + n_test]
-    return {"train": train, "val": val, "test": test,
-            "_dropped_gap": [f for f in ids
-                             if f not in set(train) | set(val) | set(test)]}
+    sizes = {"train": n_train, "val": n_val, "test": n_test}
+
+    # WHICH SPLIT SITS WHERE ALONG THE DRIVE IS ROTATED PER BLOCK.
+    #
+    # The layout is still [ a | gap | b | gap | c ] - contiguous, buffered, no
+    # frame shared - but which of train/val/test is `a` rotates deterministically
+    # with the block. Fixing the order put val in the middle of every stretch of
+    # every session and test at the end of every one, so the test set was made
+    # entirely of block-ends: later in the pass, further along the bed, often
+    # the headland where the rig turns. A test set of drive-ends measures
+    # drive-ends.
+    #
+    # Rotating costs nothing - the same three segment sizes, the same two seams
+    # - and buys a test set drawn from beginnings, middles and ends. It is NOT
+    # a random frame shuffle: that would put a frame and its near-duplicate on
+    # opposite sides of the boundary, which is the failure blocks exist to
+    # prevent.
+    order = _split_order(_key, seed, rotate)
+
+    parts, i = {}, 0
+    for j, name in enumerate(order):
+        k = sizes[name]
+        parts[name] = ids[i:i + k]
+        i += k
+        # A gap only where a REAL boundary follows: a zero-length segment is
+        # not a seam, and charging for an absent one throws away annotated
+        # frames to separate a block from nothing.
+        if k and any(sizes[o] for o in order[j + 1:]):
+            i += gap
+    used = set(parts["train"]) | set(parts["val"]) | set(parts["test"])
+    return {"train": parts["train"], "val": parts["val"], "test": parts["test"],
+            "_dropped_gap": [f for f in ids if f not in used]}
 
 
 #: Below this many VIDEO frames between a test frame and the nearest training
