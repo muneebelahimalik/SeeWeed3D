@@ -118,6 +118,14 @@ CONFIG = {
             "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
             "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
         },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
+        },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
+        },
     ],
     # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
     # `annotations/default.json`. May also be one PARENT folder holding several
