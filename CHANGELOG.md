@@ -666,6 +666,24 @@ annotating from scratch when the prelabels are good; repairing a merged mask is
 often slower than one click. The crown click *is* the instance definition, and
 yields identity, the LEP and a SAM prompt in one gesture.
 
+**The ruler, and what to annotate next.** `evaluation/bench_mixed.py` scores any
+prelabeler or model against the hand-annotated mixed frames, reporting the three
+groups above without combining them, and flags a small frame count next to the
+numbers rather than letting a per-frame fraction from ten frames look sturdy.
+Crop error pools by PIXEL, so a frame holding four onions does not weigh the
+same as one holding forty. `annotation/rank_by_contact.py` ranks frames by how
+much onion/weed boundary they contain - the decision that matters - and runs on
+whatever prelabels exist, before anything is trained. It caps per session by
+default, because ranking on one signal and taking the top N returns the same
+stretch of one drive.
+
+[`docs/stage_a_improvements.md`](docs/stage_a_improvements.md) records the Stage A
+analysis: that the current limit is label provenance rather than architecture,
+so an architecture comparison run today measures agreement with SAM; that
+resolution has historically bought more than capacity on this data; and that the
+two-stage arrangement - trained model for identity, SAM for boundaries - is the
+only route to output better than the masks trained on.
+
 ---
 
 ## Lessons this project paid for

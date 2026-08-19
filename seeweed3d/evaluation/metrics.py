@@ -222,6 +222,205 @@ def onion_safety_metrics(pred_onion, gt_onion):
 
 
 # --------------------------------------------------------------------------- #
+# Mixed scenes: the asymmetry, and instance identity
+# --------------------------------------------------------------------------- #
+#: A predicted instance must claim this fraction of a true instance before it
+#: counts as having swallowed it, and a prediction must lie this far inside one
+#: true instance before it counts as a fragment of it. Below a half the same
+#: pair could be called both at once.
+CLAIM_FRACTION = 0.5
+
+#: Half-width, in pixels, of the band around an onion/weed contact. Errors here
+#: are the ones that put a laser next to crop, so they are reported apart from
+#: the frame-wide numbers that would average them away.
+CONTACT_BAND_PX = 12
+
+
+def _union(masks, classes, want_crop):
+    """Union of every mask whose class is (or is not) the crop."""
+    out = None
+    for m, c in zip(masks, classes):
+        if (c == CROP_CLASS) != want_crop:
+            continue
+        a = np.asarray(m).astype(bool)
+        out = a if out is None else (out | a)
+    return out
+
+
+def _dilate(mask, px):
+    import cv2
+    if mask is None or px <= 0:
+        return mask
+    k = 2 * int(px) + 1
+    return cv2.dilate(np.asarray(mask, np.uint8),
+                      cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+                      ).astype(bool)
+
+
+def crop_confusion(pred_masks, pred_classes, gt_masks, gt_classes,
+                   contact_band_px=CONTACT_BAND_PX):
+    """The two directions of crop/weed error, never averaged together.
+
+    onion_as_weed is the one that fires a laser at the crop. weed_as_onion only
+    skips a weed. A mean IoU over the frame reports these as one number, and a
+    model can look excellent while making the first kind - which is why this is
+    reported apart from the class table, exactly as onion_safety_metrics is.
+
+    The contact band restricts the same measurement to pixels near an
+    onion/weed boundary, because that is where the decision is actually
+    exercised: a frame of well-separated plants can score perfectly while every
+    contact in it is wrong."""
+    gt_on = _union(gt_masks, gt_classes, True)
+    gt_wd = _union(gt_masks, gt_classes, False)
+    pr_on = _union(pred_masks, pred_classes, True)
+    pr_wd = _union(pred_masks, pred_classes, False)
+
+    shape = None
+    for m in list(gt_masks) + list(pred_masks):
+        shape = np.asarray(m).shape
+        break
+    if shape is None:
+        return {"note": "no masks"}
+    z = np.zeros(shape, bool)
+    gt_on = z if gt_on is None else gt_on
+    gt_wd = z if gt_wd is None else gt_wd
+    pr_on = z if pr_on is None else pr_on
+    pr_wd = z if pr_wd is None else pr_wd
+
+    on_as_weed = int((gt_on & pr_wd).sum())
+    wd_as_onion = int((gt_wd & pr_on).sum())
+    # Crop the model saw as nothing at all. Not the same failure as calling it
+    # weed - it will not be fired at - but it is still crop the system cannot
+    # protect, so it is counted rather than folded into either direction.
+    on_unclaimed = int((gt_on & ~pr_on & ~pr_wd).sum())
+
+    out = {
+        "onion_as_weed_px": on_as_weed,
+        "onion_as_weed_fraction": (float(on_as_weed / gt_on.sum())
+                                   if gt_on.any() else None),
+        "weed_as_onion_px": wd_as_onion,
+        "weed_as_onion_fraction": (float(wd_as_onion / gt_wd.sum())
+                                   if gt_wd.any() else None),
+        "onion_unclaimed_px": on_unclaimed,
+        "gt_onion_px": int(gt_on.sum()), "gt_weed_px": int(gt_wd.sum()),
+    }
+
+    band = None
+    if gt_on.any() and gt_wd.any():
+        band = _dilate(gt_on, contact_band_px) & _dilate(gt_wd, contact_band_px)
+    if band is not None and band.any():
+        b_on, b_wd = gt_on & band, gt_wd & band
+        out["contact_band_px_count"] = int(band.sum())
+        out["contact_onion_as_weed_px"] = int((b_on & pr_wd).sum())
+        out["contact_onion_as_weed_fraction"] = (
+            float((b_on & pr_wd).sum() / b_on.sum()) if b_on.any() else None)
+        out["contact_weed_as_onion_fraction"] = (
+            float((b_wd & pr_on).sum() / b_wd.sum()) if b_wd.any() else None)
+    else:
+        # No contact in this frame. Reported as None, not 0: "nothing to get
+        # wrong here" and "got the hard part right" are different claims.
+        out["contact_band_px_count"] = 0
+        out["contact_onion_as_weed_fraction"] = None
+        out["contact_weed_as_onion_fraction"] = None
+    return out
+
+
+def identity_errors(pred_masks, gt_masks, claim_fraction=CLAIM_FRACTION):
+    """Merges and fragments - the failure the mixed prelabeler actually has.
+
+    Class-agnostic on purpose: identity is a separate question from labelling,
+    and a merge of two plants is the same defect whatever they are called.
+
+      merged    one prediction claims most of two or more true instances
+      fragment  two or more predictions lie mostly inside one true instance
+
+    Both are reported because they are opposite failures with opposite fixes,
+    and a single "instance count error" cancels them against each other - a
+    frame that merges two plants and shatters a third scores perfectly."""
+    P, G = len(pred_masks), len(gt_masks)
+    pm = [np.asarray(m).astype(bool) for m in pred_masks]
+    gm = [np.asarray(m).astype(bool) for m in gt_masks]
+    p_area = [max(1, int(m.sum())) for m in pm]
+    g_area = [max(1, int(m.sum())) for m in gm]
+
+    merged, fragmented = [], []
+    inter = np.zeros((P, G), np.int64)
+    for i in range(P):
+        for j in range(G):
+            inter[i, j] = int((pm[i] & gm[j]).sum())
+
+    for i in range(P):
+        claimed = [j for j in range(G)
+                   if inter[i, j] / g_area[j] >= claim_fraction]
+        if len(claimed) >= 2:
+            merged.append({"pred": i, "gt": claimed})
+    for j in range(G):
+        inside = [i for i in range(P)
+                  if inter[i, j] / p_area[i] >= claim_fraction]
+        if len(inside) >= 2:
+            fragmented.append({"gt": j, "pred": inside})
+
+    return {"n_pred": P, "n_gt": G, "count_error": P - G,
+            "n_merged_predictions": len(merged),
+            "n_merged_gt_instances": sum(len(m["gt"]) for m in merged),
+            "n_fragmented_gt": len(fragmented),
+            "merge_rate": float(len(merged) / P) if P else None,
+            "fragment_rate": float(len(fragmented) / G) if G else None,
+            "merged": merged, "fragmented": fragmented}
+
+
+def cluster_over_prediction(pred_masks, pred_classes, gt_masks, gt_classes,
+                            cluster_class="weed_cluster",
+                            claim_fraction=CLAIM_FRACTION):
+    """Predicted clusters covering ground truth that IS separable.
+
+    Tracked because annotation policy becomes deployed policy: a cluster class
+    used when separation is merely tedious teaches the model to do the same at
+    runtime, where it means weeds that never receive an individual LEP. A rising
+    rate is the early warning, visible long before a missed weed in the field.
+
+    Only the direction that costs targets is counted. Predicting separate
+    instances where the truth is a cluster is not the same defect - it produces
+    targets that can be checked, not targets that silently never exist."""
+    gm = [np.asarray(m).astype(bool) for m in gt_masks]
+    g_area = [max(1, int(m.sum())) for m in gm]
+    n_clusters = bad = 0
+    for m, c in zip(pred_masks, pred_classes):
+        if c != cluster_class:
+            continue
+        n_clusters += 1
+        a = np.asarray(m).astype(bool)
+        covered = [j for j in range(len(gm))
+                   if gt_classes[j] != cluster_class
+                   and int((a & gm[j]).sum()) / g_area[j] >= claim_fraction]
+        if len(covered) >= 2:
+            bad += 1
+    return {"n_predicted_clusters": n_clusters,
+            "clusters_over_separable_gt": bad,
+            "cluster_over_prediction_rate": (float(bad / n_clusters)
+                                             if n_clusters else None)}
+
+
+def mixed_scene_metrics(pred_masks, pred_classes, gt_masks, gt_classes,
+                        contact_band_px=CONTACT_BAND_PX,
+                        claim_fraction=CLAIM_FRACTION):
+    """Every mixed-scene number for ONE frame, in one call.
+
+    Deliberately NOT a single score. The three groups answer different
+    questions - is the crop safe, are the instances right, is the cluster class
+    being over-used - and collapsing them would reproduce the averaging this
+    module exists to avoid."""
+    return {
+        "crop": crop_confusion(pred_masks, pred_classes, gt_masks, gt_classes,
+                               contact_band_px),
+        "identity": identity_errors(pred_masks, gt_masks, claim_fraction),
+        "cluster": cluster_over_prediction(pred_masks, pred_classes, gt_masks,
+                                           gt_classes,
+                                           claim_fraction=claim_fraction),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # LEP localisation
 # --------------------------------------------------------------------------- #
 def lep_errors(pred_uv, gt_uv, plant_radius_px=None):
