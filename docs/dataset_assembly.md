@@ -307,6 +307,58 @@ rewriting it.
 > and as a baseline the mixed-scene model must beat on onions. Do not read its
 > AP as field performance on a mixed bed.
 
+### How the splits are actually made
+
+Three decisions, each of which was a defect before it was fixed.
+
+**What unit is held out** — `SPLIT_GRANULARITY`. `group` holds out a whole
+date+field+camera, the only split that estimates generalisation. `session`
+holds out a whole recording from a date training also saw: no frame leaks, but
+the conditions are shared, so the score is an upper bound. `auto` tries `group`,
+falls back, and **says which it used** — the manifest records it, because a run
+against one is not comparable with a run against the other.
+
+Six sessions recorded on two days are only **two** groups, and two indivisible
+units cannot fill three splits: test comes out empty and training sees one date.
+
+**How much lands in each split** — best fit, not first fit. The obvious loop
+("add this group if the split is still under quota") checks the quota *before*
+adding and overshoots by the whole size of the group. Asking for 20% test from
+groups of 1, 2 and 3 sessions put all three of the last group in test — 50% of
+the data, with its entire capture date absent from training. A group is now
+taken only if it *fits*; when nothing fits, the split takes the **smallest**
+remaining group rather than the first one it happens to see. Sizes are counted
+in **frames**, not sessions: a 500-frame and a 50-frame session are not
+interchangeable, and counting sessions makes a 20% split mean anything between
+5% and 60% of the data.
+
+**Where along each drive the splits sit** — the block layout rotates.
+`[train | gap | val | gap | test]` used to be fixed, so val was the middle of
+every stretch of every session and test was the end of every one. A test set
+made entirely of drive-ends measures drive-ends: later in the pass, further
+along the bed, often the headland where the rig turns. The order now rotates
+deterministically per session and per block, so test is drawn from beginnings,
+middles and ends.
+
+> This is **not** a random frame shuffle. Adjacent video frames are
+> near-duplicates; shuffling frames puts a frame and its own near-duplicate on
+> opposite sides of the split boundary, and the score then measures
+> memorisation. Blocks stay contiguous — only their *order* rotates.
+
+**What the gaps cost, and which ones are free.** A buffer is charged at every
+seam where the split changes. With the layout rotated, two chunks often meet at
+the *same* split, and dropping frames to separate train from train buys nothing
+— that seam is now free. The internal seams within a block are all real and are
+still charged.
+
+The remaining cost is unavoidable and worth knowing: at `GAP_FRAMES: 12` and
+`BLOCKS_PER_SESSION: 3`, roughly **a quarter to a third of frames are dropped**
+as buffers. `GAP_FRAMES` is set by the separation floor — 12 pool frames at a
+stride of 5 is 60 video frames, exactly `MIN_SEAM_SEPARATION` — so it cannot be
+lowered without the build's own separation warning firing. More blocks means a
+more representative test set and more seams to pay for; three is the balance,
+and the build prints what it actually dropped.
+
 **Merging a new active-learning round into an existing dataset:** add its
 export to `SOURCES` and rebuild. The split is deterministic for a seed, so
 sessions that were in test stay in test — as long as you do not change `SEED`.

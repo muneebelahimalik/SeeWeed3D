@@ -23,7 +23,8 @@ seeweed3d/
   extraction/   extract_sessions.py        recordings -> indexed, QC'd frame pool (v1 & v2)
                 curate_pool.py             drop redundant/bad frames (manifest-only, reversible)
                 select_batches.py          pool -> CVAT-ready annotation batches (holdout-safe)
-  annotation/   prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
+  annotation/   rank_by_contact.py         which mixed frames to annotate first (onion/weed contact)
+                prelabel_onions_sam3.py    SAM 3 onion prelabels for onion-only scenes
                 prelabel_weeds_sam3.py     SAM 3 weed instances + morphology + LEP proposals
                 prelabel_mixed_sam3.py     MIXED scenes: precise masks, one class, no guessing
                 mine_pool.py               model-in-the-loop: rank the pool, export the next batch
@@ -52,7 +53,8 @@ seeweed3d/
                 roi.py lep_targets.py lep_roinet.py lep_dataset.py train_lep.py
                                            Stage B: ROI transform, targets, model, training
                 train_seg.py               Ultralytics backend (AGPL, opt-in)
-  evaluation/   eval_seg.py                Stage A metrics + crop safety + confidence sweep
+  evaluation/   bench_mixed.py             the mixed-scene ruler: crop asymmetry, merges, cluster over-use
+                eval_seg.py                Stage A metrics + crop safety + confidence sweep
                 metrics.py                 segmentation, LEP, safety, 3D and latency metrics
                 report.py                  self-contained HTML report: misses, overlays, buckets
                 plots.py                   training curves, per-class AP, sweep, recall-by-size
@@ -123,6 +125,10 @@ lossless guarantees, what was measured, and what is not claimed**),
 `docs/onion_prelabeling.md` and `docs/weed_prelabeling.md` (the SAM 3
 workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 `docs/dataset_growth.md` (active learning, and how to grow the dataset well),
+**`docs/mixed_dataset_strategy.md` (how the mixed-scene dataset gets built, and
+why instance identity — not boundary quality — is the bottleneck)**,
+**`docs/stage_a_improvements.md` (what actually improves Stage A, and why an
+architecture swap today would measure the teacher)**,
 `docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
 `docs/capture_changelog.md` (capture rationale, v1→v2).
 

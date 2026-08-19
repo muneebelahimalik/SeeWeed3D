@@ -227,8 +227,8 @@ CONFIG = {
     # error bars wider than the number it reports. The cost is that val does
     # double duty and its scores are optimistic. Cut a real test set from a
     # HELD-OUT SESSION once you have two or three annotated.
-    "VAL_FRACTION": 0.2,
-    "TEST_FRACTION": 0.0,
+    "VAL_FRACTION": 0.15,
+    "TEST_FRACTION": 0.15,
 
     # PIN a session to test or val by name. This is how a real held-out test
     # set is created, and it is the single most valuable thing you can do for
@@ -247,7 +247,7 @@ CONFIG = {
     # Choose one that is representative rather than convenient: a different
     # day from the training sessions, and ideally a mixed scene, since mixed is
     # the only scene where the crop-vs-weed decision is actually exercised.
-    "HOLDOUT_TEST_SESSIONS": ["Visit2_20260210_164149"],
+    "HOLDOUT_TEST_SESSIONS": [],
     "HOLDOUT_VAL_SESSIONS": [],
 
     # Allocate the remaining sessions SEPARATELY WITHIN each scene, so
@@ -282,6 +282,23 @@ CONFIG = {
     # Record one when you can, and rebuild with HOLDOUT_TEST_SESSIONS.
     "SPLIT_MODE": "frame_block",
 
+    # WHAT UNIT IS HELD OUT - this decides what val/test numbers can mean.
+    #
+    #   "group"    a whole date+field+camera. Val/test share no day, light or
+    #              growth stage with training: the only split that estimates
+    #              GENERALISATION.
+    #   "session"  a whole recording, from a date training also saw. No frame
+    #              leaks, but the conditions are shared, so the score is an
+    #              upper bound on a new drive.
+    #   "auto"     try group, fall back to session, and SAY which it used.
+    #
+    # Six sessions recorded on two days are only TWO groups, and two indivisible
+    # units cannot fill three splits - test comes out empty and training sees
+    # one date. "auto" notices that and drops to session granularity, which is
+    # still strictly better than frame blocks: those put val and test inside the
+    # same recording as train, where adjacent frames are near-duplicates.
+    "SPLIT_GRANULARITY": "auto",
+
     # Cut each session into this many stretches and split WITHIN each one, so
     # val and test are sampled from several places along every drive.
     #
@@ -290,7 +307,7 @@ CONFIG = {
     # the bed, often the headland where the rig turns. A test set made only of
     # drive-ends measures drive-ends. 4 is a reasonable choice; more blocks cost
     # more gap frames, one seam per boundary.
-    "BLOCKS_PER_SESSION": 4,
+    "BLOCKS_PER_SESSION": 3,
 
     # Frames discarded at each seam. Adjacent pool frames still overlap
     # heavily, and this buffer is the only thing separating a test frame from
@@ -416,6 +433,7 @@ def main(cfg=None):
         keep_empty_frames=c["KEEP_EMPTY_FRAMES"],
         strict=not c["ALLOW_ERRORS"],
         split_mode=c.get("SPLIT_MODE", "auto"),
+        split_granularity=c.get("SPLIT_GRANULARITY", "auto"),
         blocks_per_session=c.get("BLOCKS_PER_SESSION", 1),
         holdout_test=c.get("HOLDOUT_TEST_SESSIONS") or (),
         holdout_val=c.get("HOLDOUT_VAL_SESSIONS") or (),

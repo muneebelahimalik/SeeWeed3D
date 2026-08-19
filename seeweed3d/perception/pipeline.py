@@ -156,12 +156,20 @@ class InferencePipeline:
                 tgt.targetability_probs = [float(v) for v in tgt_p[k]]
                 vis_conf = float(vis_p[k][vi])
                 tgt_conf = float(tgt_p[k][ti])
-                weight_full = None
+                # Weight the 3D depth sample by the network's own belief about
+                # where the crown is. Without this every pixel in the sampling
+                # window counts equally, so a pixel several px off the peak -
+                # possibly on a different leaf at a different depth - carries
+                # the same weight as the peak itself.
+                weight_full = roi_mod.heatmap_to_full(
+                    heatmaps[k], tfs[k], bgr.shape[:2])
             else:
                 lep = self._fallback_lep(bgr, det, i, depth_mm, tfs[k])
                 tgt.visibility = (lep or {}).get("visibility", "unknown")
                 tgt.targetable = "unknown"
                 vis_conf = tgt_conf = None
+                # The hand-engineered fallback produces a point, not a
+                # confidence field, so there is nothing honest to weight by.
                 weight_full = None
 
             if lep is not None:
