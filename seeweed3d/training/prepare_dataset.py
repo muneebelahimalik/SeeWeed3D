@@ -40,6 +40,25 @@ from training.config import AnnotationContract  # noqa: E402
 RANGE_RE = re.compile(r"\d+-\d+")
 
 
+def _write_json(path, doc, indent=2):
+    """Write JSON incrementally, and without pretty-printing the huge ones.
+
+    Two Windows failures, one fix. `json.dumps(..., indent=2)` puts every
+    polygon COORDINATE on its own line, so a manifest of a few thousand masks
+    becomes hundreds of megabytes of whitespace - and `write_text` then pushes
+    that whole string through a single write(), which Windows rejects with
+    OSError 22 (Invalid argument) on some volumes. The same build wrote fine on
+    another drive, which is what makes it a trap rather than a size limit.
+
+    json.dump streams into the handle in small writes, so neither the string nor
+    the write is ever whole. indent=None on the frame manifests: nobody reads a
+    200 MB JSON by eye, and the reader does not care."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        json.dump(doc, fh, indent=indent)
+
+
 def find_annotation_files(roots):
     """Every Datumaro JSON under one or several export roots.
 
@@ -954,29 +973,28 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # against a frame_block split is not comparable with one against a held-out
     # session. Months later the experiment table is the only record of which
     # was which, and "unknown" there is worse than useless.
-    (out / "seg_manifest.json").write_text(
-        json.dumps({"images_root": [r.as_posix() for r in img_roots],
+    _write_json(out / "seg_manifest.json",
+        {"images_root": [r.as_posix() for r in img_roots],
                     "classes": list(active_classes),
                     "dataset_kind": ("segmentation_only" if seg_only
                                      else "multitask"),
                     "split_strategy": split_mode,
                     "label_provenance": label_provenance,
                     "sessions": sorted({f.session_id for f in frames}),
-                    "n_frames": len(seg_frames), "frames": seg_frames}, indent=2),
-        encoding="utf-8")
+                    "n_frames": len(seg_frames), "frames": seg_frames},
+        indent=None)
 
     # -- LEP manifest, split-aware -----------------------------------------
     rows = dmm.to_lep_manifest(frames)
     for r in rows:
         r["split"] = where.get(r["item_id"], "unassigned")
-    (out / "lep_manifest.json").write_text(
-        json.dumps({"images_root": [r.as_posix() for r in img_roots],
+    _write_json(out / "lep_manifest.json",
+        {"images_root": [r.as_posix() for r in img_roots],
                     "dataset_kind": ("segmentation_only" if seg_only
                                      else "multitask"),
                     "split_strategy": split_mode,
                     "label_provenance": label_provenance,
-                    "n_rows": len(rows), "rows": rows}, indent=2),
-        encoding="utf-8")
+                    "n_rows": len(rows), "rows": rows}, indent=None)
 
     (out / "class_mapping.json").write_text(json.dumps({
         "ontology": list(CLASSES),
