@@ -327,3 +327,44 @@ def test_the_runner_tests_do_not_inherit_the_checked_in_class_filter(tmp_path):
     assert c["KEEP_CLASSES"] is None
     assert c["DROP_CLASSES"] == []
     assert c["INCLUDE_FRAMES"] == "" and c["EXCLUDE_FRAMES"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# The config blocks are hand-edited, and Python does not complain
+# --------------------------------------------------------------------------- #
+def test_no_config_block_has_a_duplicate_key():
+    """A dict literal with the same key twice is legal Python: the LAST one
+    wins, silently. In a config block that is edited by hand every run - and
+    patched by scripts that match one line at a time - that is a setting you
+    believe you changed and did not.
+
+    It has happened: make_dataset.py carried two "OUT_DIR" lines, so the build
+    wrote to whichever came second regardless of which one was edited."""
+    import ast
+    from collections import Counter
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "seeweed3d"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not (isinstance(target, ast.Name) and target.id.isupper()):
+                continue
+            if not isinstance(node.value, ast.Dict):
+                continue
+            keys = [k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            for key, n in Counter(keys).items():
+                if n > 1:
+                    offenders.append(
+                        f"{path.relative_to(root)}: {target.id}[{key!r}] "
+                        f"appears {n} times")
+    assert not offenders, "duplicate keys silently take the last value:\n  " \
+        + "\n  ".join(offenders)
