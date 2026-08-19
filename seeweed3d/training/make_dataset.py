@@ -88,43 +88,31 @@ CONFIG = {
     #   different folders (an onion set recorded separately from the weed
     #   sessions). Images are never copied; manifests point at these files.
     "SOURCES": [
-        # ONE SESSION FOLDER PER ENTRY. Each holds annotations/, rgb/, depth/
-        # and meta/, so the same path serves as both roots: DATUMARO_ROOT finds
-        # its annotations/default.json, and IMAGES_ROOT resolves
-        # <root>/rgb/<name> directly.
+        # ONE ENTRY PER CAMPAIGN, pointed at its `sessions` folder - not one
+        # entry per session. DATUMARO_ROOT recurses to find every session's
+        # annotations/default.json under it, and IMAGES_ROOT resolves
+        # <sessions>/<session>/rgb/<name>, so adding a seventh session or
+        # renaming a campaign folder does not mean editing six paths.
+        #
+        # Per-session entries broke exactly that way: a campaign folder was
+        # renamed and the build died on SOURCES[4] pointing at a path that no
+        # longer existed, while three of its siblings were still valid.
         #
         # Note Visit1_20260108_132749's frames are named vid3_20260108_132749_*
         # - the folder was renamed after extraction and the files kept their
         # original prefix. Session id comes from the FILENAME, so that session
         # reports as vid3_20260108_132749 in every split and report.
         #
-        # Visit2 is from a Mix campaign but only its ONION stretch was
-        # annotated; its weed-only frames carry no annotations and are excluded
-        # as empty. Being a month later than the Visit1 sessions, it is the only
-        # real date variety here - which is why it is the pinned test session.
+        # The Visit2 sessions come from a Mix campaign, but only their ONION
+        # stretch was annotated; the weed-only frames carry no annotations and
+        # are excluded as empty.
         {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_132749",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_132749",
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
         },
         {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_133306",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_133306",
-        },
-        {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_134015",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\onions_20260108_1\sessions\Visit1_20260108_134015",
-        },
-        {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
-        },
-        {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
-        },
-        {
-            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
-            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions",
         },
     ],
     # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
