@@ -118,6 +118,14 @@ CONFIG = {
             "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
             "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_2026_\sessions\Visit2_20260210_164149",
         },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164614",
+        },
+        {
+            "DATUMARO_ROOT": r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
+            "IMAGES_ROOT":   r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions\Visit2_20260210_164812",
+        },
     ],
     # The UNZIPPED CVAT 'Datumaro 1.0' export - the folder containing
     # `annotations/default.json`. May also be one PARENT folder holding several
@@ -132,6 +140,7 @@ CONFIG = {
     #"IMAGES_ROOT": r"E:\Dataset_Vidalia\Weeds_3_good\sessions",
 
     # Where the dataset manifests are written. Safe to delete and rebuild.
+    "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
     "OUT_DIR": r"E:\Dataset_Vidalia\training_onion_only_whole_dataset",
 
     # -- Pass 1: look before you select ---------------------------------------
