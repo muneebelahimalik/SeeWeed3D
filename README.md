@@ -129,6 +129,8 @@ workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 why instance identity — not boundary quality — is the bottleneck)**,
 **`docs/stage_a_improvements.md` (what actually improves Stage A, and why an
 architecture swap today would measure the teacher)**,
+**`docs/new_machine_setup.md` (standing up a second training machine — and why
+you copy the sessions, not the built dataset)**,
 `docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
 `docs/capture_changelog.md` (capture rationale, v1→v2).
 
