@@ -123,6 +123,8 @@ lossless guarantees, what was measured, and what is not claimed**),
 `docs/onion_prelabeling.md` and `docs/weed_prelabeling.md` (the SAM 3
 workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 `docs/dataset_growth.md` (active learning, and how to grow the dataset well),
+**`docs/mixed_dataset_strategy.md` (how the mixed-scene dataset gets built, and
+why instance identity — not boundary quality — is the bottleneck)**,
 `docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
 `docs/capture_changelog.md` (capture rationale, v1→v2).
 

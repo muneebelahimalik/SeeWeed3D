@@ -31,6 +31,8 @@ arbitrary or over-cautious until you know which failure produced them.
 | [13. Growing the dataset](#13-growing-the-dataset) | active learning, reachable at last |
 | [14. Loss shaping](#14-loss-shaping) | Dice's symmetry broken deliberately |
 | [15. Mixed scenes](#15-mixed-scenes) | onions and weeds in one frame |
+| [16. The Feb 2025 visit](#16-the-feb-2025-visit-and-depth-that-never-existed) | depth that never existed, and how it was proven |
+| [17. The mixed-scene dataset strategy](#17-the-mixed-scene-dataset-strategy) | identity is the bottleneck, and laziness ships |
 
 ---
 
@@ -622,6 +624,50 @@ currently being built.
 
 ---
 
+## 17. The mixed-scene dataset strategy
+
+The height veto was field-tested and reverted (#93), and the onion build made it
+clear the exports carry **unreviewed** SAM output rather than corrected
+annotation — recorded from then on as `label_provenance`, and restated by
+preflight at train time, because it decides whether a reported AP measures
+performance or agreement with the prelabeler.
+
+That forced the question of how a mixed-scene dataset actually gets built.
+[`docs/mixed_dataset_strategy.md`](docs/mixed_dataset_strategy.md) is the record.
+The findings that changed the plan:
+
+**The bottleneck is instance identity, not boundary quality.** The mixed
+prelabeler's marker-and-watershed design is sound, but a watershed is only as
+good as its markers, and zero-shot SAM gets identity wrong in dense mixed scenes.
+Boundary refinement improves the half that already works. Identity is domain
+knowledge — that two touching onion *leaves* are one plant while two touching
+onion *plants* are two — and only data teaches it.
+
+**`weed_cluster` is not an escape hatch.** Annotation policy becomes deployed
+policy: reach for the cluster class whenever separation is *tedious* rather than
+*impossible*, and the model reproduces that at runtime as weeds that never get an
+individual LEP. The ontology's criterion was always crown-based — *"no separable
+single LEP"* — not foliage-based. Its **rate** is therefore a process metric, and
+a rising one is an early warning that effort is decaying.
+
+**Merges are not equally costly, but that ranks effort rather than licensing
+skips.** weed+weed loses a target; onion+onion barely matters because protection
+is a union and onions are never targeted; onion+weed is the dangerous one. For
+onions the risk is mask *extent*, not count — err large, without training the
+model to be indiscriminate.
+
+**Mean IoU would hide exactly the failure that matters**, averaging the
+catastrophic direction into many harmless ones. The mixed benchmark reports
+onion-labelled-weed separately from weed-labelled-onion, the same reasoning that
+already keeps `onion_recall` apart from IoU in `onion_safety_metrics`.
+
+**Separation gets cheaper, not optional.** Prelabel-then-correct only beats
+annotating from scratch when the prelabels are good; repairing a merged mask is
+often slower than one click. The crown click *is* the instance definition, and
+yields identity, the LEP and a SAM prompt in one gesture.
+
+---
+
 ## Lessons this project paid for
 
 Each of these cost a run, a dataset, or a batch of annotation time.
@@ -658,6 +704,11 @@ Each of these cost a run, a dataset, or a batch of annotation time.
    increasingly careful inference, and the capture source settled it in one
    line.
 
-8. **A pipeline that skips input silently is worse than one that crashes.**
+8. **Annotation policy becomes deployed policy.** A cluster class used when
+   separation is merely tedious teaches the model to do the same at runtime,
+   where it means weeds that are never targeted. Systematic label bias is
+   reproduced, not averaged out.
+
+9. **A pipeline that skips input silently is worse than one that crashes.**
    Seven of nine sessions vanished with no output at all, and the run looked
    like a success.
