@@ -193,3 +193,57 @@ def test_model_exports_to_onnx_when_the_exporter_is_available(tmp_path):
     with torch.no_grad():
         ref = model(rgb, geom)["heatmap"].numpy()
     assert np.abs(got[0] - ref).max() < 1e-4
+
+
+# --------------------------------------------------------------------------- #
+# The LEP heatmap as a depth-sampling weight
+# --------------------------------------------------------------------------- #
+def test_a_heatmap_maps_back_to_where_its_peak_is_in_the_frame(tmp_path):
+    """The inverse of the crop, under the SAME transform - so the confidence at
+    a full-frame pixel is what the network assigned to the ROI pixel it
+    became."""
+    roi = load_script("training/roi.py")
+    tf = roi.make_transform([100.0, 60.0, 40.0, 40.0], 64, 1.5, 640, 480)
+
+    hm = np.zeros((64, 64), np.float32)
+    peak_full = (118.0, 78.0)                      # somewhere inside the box
+    pu, pv = tf.to_roi(*peak_full)
+    hm[int(round(pv)), int(round(pu))] = 1.0
+
+    full = roi.heatmap_to_full(hm, tf, (480, 640))
+    assert full.shape == (480, 640)
+    v, u = np.unravel_index(int(np.argmax(full)), full.shape)
+    assert abs(u - peak_full[0]) <= 1.5 and abs(v - peak_full[1]) <= 1.5
+
+
+def test_outside_the_roi_the_weight_is_zero():
+    """A weight map that leaked outside its own ROI would pull the depth sample
+    toward a neighbouring plant."""
+    roi = load_script("training/roi.py")
+    tf = roi.make_transform([100.0, 60.0, 40.0, 40.0], 64, 1.5, 640, 480)
+    full = roi.heatmap_to_full(np.ones((64, 64), np.float32), tf, (480, 640))
+    assert full[0, 0] == 0.0 and full[479, 639] == 0.0
+    assert full[int(80), int(120)] > 0.0            # inside the expanded box
+
+
+def test_the_weight_changes_which_depth_the_sampler_returns():
+    """Why this is worth wiring at all: the peak's surface should win over an
+    equally-populated surface a few px away."""
+    d3 = load_script("perception/depth3d.py")
+    h = w = 40
+    depth = np.full((h, w), 900.0, np.float32)
+    depth[:, 20:] = 940.0                       # a second surface, 40mm behind
+    valid = np.ones((h, w), bool)
+    weight = np.zeros((h, w), np.float32)
+    weight[:, :20] = 1.0                        # believe the NEAR surface
+
+    z_w, _ = d3.sample_depth_weighted(depth, valid, (20.0, 20.0),
+                                      weight_map=weight, radius_px=8,
+                                      max_spread_mm=100.0,
+                                      discontinuity_mm=100.0)
+    z_u, _ = d3.sample_depth_weighted(depth, valid, (20.0, 20.0),
+                                      weight_map=None, radius_px=8,
+                                      max_spread_mm=100.0,
+                                      discontinuity_mm=100.0)
+    assert z_w is not None and z_u is not None
+    assert z_w < z_u, "the weighted sample must follow the believed surface"

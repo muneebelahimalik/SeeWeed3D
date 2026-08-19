@@ -106,6 +106,32 @@ def _warp(src, tf, interp, border_value=0):
                           borderValue=border_value)
 
 
+def heatmap_to_full(heatmap, tf, frame_shape):
+    """An ROI-space LEP heatmap resampled back to full-frame coordinates.
+
+    The inverse of the warp `extract_roi` applied, using the SAME transform, so
+    the confidence at a full-frame pixel is the confidence the network assigned
+    to the ROI pixel that pixel became. Anything outside the ROI is 0.
+
+    Exists so the 3D sampler can weight depth by where the network actually
+    believes the crown is. `sample_depth_weighted` has always taken a
+    `weight_map` - its docstring calls it "the LEP heatmap resampled to
+    full-frame" - but nothing produced one, so every pixel in the sampling
+    window counted equally and a pixel several px off the peak, potentially on
+    a different leaf at a different depth, carried the same weight as the peak
+    itself.
+
+    Bilinear, because a heatmap is a smooth confidence field rather than a
+    label image, and float32 so the weights stay a continuous quantity."""
+    src = np.asarray(heatmap, np.float32)
+    h, w = int(frame_shape[0]), int(frame_shape[1])
+    M = np.array([[tf.scale, 0.0, -tf.x0 * tf.scale + tf.pad_x],
+                  [0.0, tf.scale, -tf.y0 * tf.scale + tf.pad_y]], np.float64)
+    return cv2.warpAffine(src, M, (w, h), flags=cv2.INTER_LINEAR |
+                          cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_CONSTANT,
+                          borderValue=0.0)
+
+
 def extract_roi(bgr, mask, tf, depth_mm=None, pad_value=0):
     """Crop RGB, the owning mask and (optionally) depth under one transform.
 
