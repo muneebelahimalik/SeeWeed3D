@@ -98,7 +98,13 @@ CONFIG = dict(
     # lesson in principle; at 2 instances out of 1446 it is noise either way,
     # and a class the metrics cannot measure is worse. Remove this the first
     # round that brings real cluster examples in.
-    DROP_CLASSES=["weed_cluster"],
+    #
+    # wild_radish has ZERO instances here. A class with no examples still gets
+    # a head, still costs capacity, and can never be predicted - and preflight
+    # lists it as 0/0 rather than flagging it, because "not in this build at
+    # all" is a legitimate state it declines to complain about. Dropping it
+    # makes the model 3 classes instead of 4.
+    DROP_CLASSES=["weed_cluster", "wild_radish"],
 
     # HAND CORRECTED - unlike the onion build. Change to "mixed" as soon as a
     # round merges frames that were accepted rather than corrected.
