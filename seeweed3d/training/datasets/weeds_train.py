@@ -21,11 +21,12 @@ step that adds data means the improvement cannot be attributed - and attributing
 it is the only reason to run the loop rather than annotate everything at random.
 Settle the settings once, on round 0, then leave them alone.
 """
+import ntpath
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from training.datasets import common as loc  # noqa: E402
+from training.datasets.weeds import OUT_DIR as WEEDS_OUT_DIR  # noqa: E402
 from training.train_model_rfdetr import CONFIG as BASE, main  # noqa: E402
 
 # #############################################################################
@@ -35,10 +36,17 @@ from training.train_model_rfdetr import CONFIG as BASE, main  # noqa: E402
 #: Bump this each round. Round 0 is the model trained on what you have today.
 ROUND = 0
 
+#: WHERE RUNS ARE WRITTEN. One folder per round - reusing one overwrites the
+#: checkpoint you would have compared against, and the comparison is the point.
+RUNS_ROOT = r"E:\Dataset_Vidalia\runs"
+
 CONFIG = dict(
     BASE,
-    DATASET_DIR=str(loc.out("weeds_v1")),
-    RUN_DIR=str(loc.runs(f"weeds_r{ROUND}")),
+    # Read straight from the build's own setting: a DATASET_DIR that has drifted
+    # from the OUT_DIR that produced it is the mismatch that has killed a run
+    # twice, and importing it is the only way it cannot drift.
+    DATASET_DIR=WEEDS_OUT_DIR,
+    RUN_DIR=ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
 
     DEVICE="cuda",            # one GPU on this machine
 

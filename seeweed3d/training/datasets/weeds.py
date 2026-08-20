@@ -41,7 +41,6 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from training.datasets import common as loc  # noqa: E402
 from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 
 # #############################################################################
@@ -57,8 +56,14 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: With one session, name it directly - the `sessions` form only earns its keep
 #: once there are several under one parent.
 WEED_SESSIONS = [
-    r"D:\LaserWeeding Research (Muneeb. E Malik)\Dataset_Vidalia\Weeds_3_good\sessions\vid2_20260108_122731",
+    r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
 ]
+
+#: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
+#: Keep it on the same drive as the images unless you have a reason not to -
+#: the manifest records absolute paths, so a dataset and its images that live
+#: on different drives are two things to keep in step instead of one.
+OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v1"
 
 #: Sessions active learning must NEVER mine, and that never enter training.
 #:
@@ -76,7 +81,7 @@ CONFIG = dict(
     BASE,
     SOURCES=[{"DATUMARO_ROOT": p, "IMAGES_ROOT": p} for p in WEED_SESSIONS],
 
-    OUT_DIR=str(loc.out("weeds_v1")),
+    OUT_DIR=OUT_DIR,
 
     # Every weed class, and NOT onion_plant. A weed-only drive has no crop in
     # it, so an onion_plant instance here is a mislabel worth seeing rather
