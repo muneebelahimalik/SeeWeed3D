@@ -83,7 +83,17 @@ CONFIG = dict(
     # than training on.
     KEEP_CLASSES=["cutleaf_evening_primrose", "wild_radish", "grass_weed",
                   "weed_cluster", "other_weed"],
-    DROP_CLASSES=[],
+
+    # weed_cluster has TWO instances in this build. A class in single digits
+    # reports an AP near zero and drags the mean down for a reason that has
+    # nothing to do with the model, so it is dropped from THIS build - the
+    # ontology is untouched and it returns the moment there are examples.
+    #
+    # The cost is that those two clusters become background, which is the wrong
+    # lesson in principle; at 2 instances out of 1446 it is noise either way,
+    # and a class the metrics cannot measure is worse. Remove this the first
+    # round that brings real cluster examples in.
+    DROP_CLASSES=["weed_cluster"],
 
     # HAND CORRECTED - unlike the onion build. Change to "mixed" as soon as a
     # round merges frames that were accepted rather than corrected.
@@ -99,10 +109,24 @@ CONFIG = dict(
     SPLIT_GRANULARITY="auto",
     HOLDOUT_TEST_SESSIONS=HOLDOUT_TEST,
 
-    VAL_FRACTION=0.15,
-    TEST_FRACTION=0.15,
-    BLOCKS_PER_SESSION=3,
-    GAP_FRAMES=12,
+    # SIZED FOR 60 FRAMES, NOT FOR THE ONION BUILD'S 1647.
+    #
+    # Carrying those settings over (3 blocks, 12-frame gap, 15/15) spent 24 of
+    # 60 frames on buffers and produced val=5 test=5 - two splits too small for
+    # any number computed on them to mean anything, and a training set of 26.
+    # One block has two seams instead of six, which is the whole difference.
+    #
+    # TEST_FRACTION IS 0 ON PURPOSE. A 9-frame test set has error bars wider
+    # than the number it reports, so it is not a weaker measurement - it is a
+    # misleading one. Val does double duty for now: it selects the checkpoint
+    # AND tracks round-to-round change, which is what the loop needs. It is
+    # optimistic as an absolute score and consistent as a relative one.
+    #
+    # Cut a real test set from a SECOND weed session the moment you have one.
+    VAL_FRACTION=0.20,
+    TEST_FRACTION=0.0,
+    BLOCKS_PER_SESSION=1,
+    GAP_FRAMES=8,
 
     # NEVER change this between rounds. The split is deterministic for a seed,
     # so a session that was in test stays in test as the dataset grows - and a
