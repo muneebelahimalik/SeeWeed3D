@@ -39,6 +39,7 @@ seeweed3d/
                 safety.py                  treatment-candidate decision (can only ABSTAIN)
                 schema.py                  structured WeedTarget / FrameResult output
   training/     make_dataset.py            config-block runner: CVAT exports -> training dataset
+                datasets/                  one runner per dataset (weeds, ...), so several coexist
                 train_model.py             config-block runner: Stage A on Mask R-CNN (default)
                 train_model_rfdetr.py      config-block runner: Stage A on RF-DETR-Seg
                 datumaro_multitask.py      CVAT Datumaro 1.0 -> masks + grouped LEPs + report
@@ -131,6 +132,8 @@ why instance identity — not boundary quality — is the bottleneck)**,
 architecture swap today would measure the teacher)**,
 **`docs/new_machine_setup.md` (standing up a second training machine — and why
 you copy the sessions, not the built dataset)**,
+**`docs/weed_active_learning.md` (the round-by-round loop, and why you annotate
+the frames the model gets WRONG)**,
 `docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
 `docs/capture_changelog.md` (capture rationale, v1→v2).
 
