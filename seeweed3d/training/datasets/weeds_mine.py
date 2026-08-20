@@ -38,13 +38,16 @@ seen, so mining a test session does not merely leak it - it leaks it in the
 most flattering possible direction. HOLDOUT_SESSIONS below and
 HOLDOUT_TEST_SESSIONS in weeds.py must name the same sessions.
 """
+import ntpath
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from annotation.mine_pool import CONFIG as BASE, mine  # noqa: E402
-from training.datasets import common as loc  # noqa: E402
-from training.datasets.weeds import HOLDOUT_TEST, WEED_SESSIONS  # noqa: E402
+from training.datasets.weeds import (HOLDOUT_TEST,  # noqa: E402
+                                     OUT_DIR as WEEDS_OUT_DIR,
+                                     WEED_SESSIONS)
+from training.datasets.weeds_train import RUNS_ROOT  # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
@@ -54,10 +57,20 @@ from training.datasets.weeds import HOLDOUT_TEST, WEED_SESSIONS  # noqa: E402
 #: batch is never overwritten by the next one.
 ROUND = 1
 
+#: WHERE A MINED BATCH IS WRITTEN, one folder per round so an unfinished batch
+#: is never overwritten by the next one. Upload this folder to CVAT.
+BATCHES_ROOT = r"E:\Dataset_Vidalia\batches"
+
+#: THE POOL TO MINE - the `sessions` folder holding unlabelled weed sessions
+#: alongside the annotated one. With only the annotated session under it there
+#: is nothing new to find, so this wants a second recording before round 1.
+POOL_ROOT = r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions"
+
 #: The checkpoint doing the ranking - the model trained on what you have so far.
 #: rfdetr writes checkpoint_best_total.pth; use _total, never _ema (rfdetr keeps
 #: three files and _total is copied from whichever actually won).
-CHECKPOINT = str(loc.runs("weeds_r0") / "checkpoint_best_total.pth")
+CHECKPOINT = ntpath.join(RUNS_ROOT, "weeds_r0",
+                         "checkpoint_best_total.pth")
 
 CONFIG = dict(
     BASE,
@@ -67,20 +80,19 @@ CONFIG = dict(
 
     # What is already labelled: skips those frames, and counts class
     # frequencies so a scarce class scores higher.
-    DATASET_DIR=str(loc.out("weeds_v1")),
+    DATASET_DIR=WEEDS_OUT_DIR,
 
-    # The pool to mine: the PARENT of the annotated session(s), so unlabelled
-    # sessions beside them are in scope. Mining its own already-labelled frames
-    # is harmless - they are skipped - but a pool of one session has nothing
-    # new in it to find.
-    SESSIONS_ROOT=str(Path(WEED_SESSIONS[0]).parent),
+    # The pool to mine: the SESSIONS folder, so unlabelled sessions beside the
+    # annotated one are in scope. Its own labelled frames are skipped, but a
+    # pool containing only them has nothing new to find.
+    SESSIONS_ROOT=POOL_ROOT,
     ONLY_SESSIONS=[],
 
     # Must match weeds.py. Checked independently on purpose - one list being
     # right does not make the other right.
     HOLDOUT_SESSIONS=list(HOLDOUT_TEST),
 
-    OUT_DIR=str(loc.out("batches") / f"weeds_round{ROUND}"),
+    OUT_DIR=ntpath.join(BATCHES_ROOT, f"weeds_round{ROUND}"),
 
     # Lower than you would deploy at: a spurious mask costs one delete, a
     # MISSING one costs the annotator noticing an absence, which is far harder.

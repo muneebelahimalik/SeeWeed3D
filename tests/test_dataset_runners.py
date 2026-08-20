@@ -146,3 +146,20 @@ def test_a_single_session_build_cannot_pin_a_holdout():
     if len(weeds.WEED_SESSIONS) < 2:
         assert weeds.HOLDOUT_TEST == [], (
             "with one session a holdout would empty the training set")
+
+
+def test_every_configured_path_is_absolute():
+    """A relative path here silently writes beside the working directory, and
+    the working directory is wherever the terminal happened to be. It bit once
+    already: Path(<windows path>).parent evaluated on posix returns '.', so a
+    batch destined for E:\\...\\batches became './batches'."""
+    import ntpath
+    paths = [weeds.CONFIG["OUT_DIR"],
+             weeds_train.CONFIG["DATASET_DIR"], weeds_train.CONFIG["RUN_DIR"],
+             weeds_mine.CONFIG["DATASET_DIR"], weeds_mine.CONFIG["OUT_DIR"],
+             weeds_mine.CONFIG["CHECKPOINT"], weeds_mine.CONFIG["SESSIONS_ROOT"]]
+    paths += [s["DATUMARO_ROOT"] for s in weeds.CONFIG["SOURCES"]]
+    for p in paths:
+        # Checked as a WINDOWS path regardless of the host running the tests:
+        # these configs name drives, and posixpath calls "E:\\x" relative.
+        assert ntpath.isabs(p), f"not an absolute path: {p!r}"

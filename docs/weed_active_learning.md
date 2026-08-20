@@ -65,6 +65,38 @@ WEED_SESSIONS = [
 With a single session, name it directly. The `sessions` form only earns its
 keep once several sit under one parent.
 
+### At 60 frames the split settings are not the ones a big build uses
+
+Carrying the onion build's settings over (3 blocks, a 12-frame gap, 15/15) spent
+**24 of 60 frames on buffers** and produced `val=5 test=5` — two splits too
+small for any number computed on them to mean anything, and a training set of
+26. One block has two seams instead of six, and that is the whole difference:
+
+| blocks | gap | test | train | val | test | binned |
+|---|---|---|---|---|---|---|
+| 3 | 12 | 0.15 | 26 | 5 | 5 | **24** |
+| 1 | 8 | 0.0 | **42** | **10** | 0 | **8** |
+
+**`TEST_FRACTION` is 0 on purpose.** A 9-frame test set has error bars wider
+than the number it reports — not a weaker measurement, a misleading one. Val
+does double duty: it selects the checkpoint *and* tracks round-to-round change,
+which is what the loop needs. Optimistic as an absolute score, consistent as a
+relative one.
+
+### The separation floor is unreachable here, and that is worth knowing
+
+The build warns when a val frame sits closer than 60 video frames to a training
+frame. On this session it reports **25** at a 12-frame gap, because this pool
+was curated at roughly stride 2 — so one pool frame is about two video frames.
+
+Reaching 60 would need `GAP_FRAMES` near 30, which is **half the dataset**. It
+is not a setting to tune; it is a consequence of having 60 frames from one
+drive.
+
+So read the val score as *"training is working"*, never as *"this is how it
+performs"*. The fix is a second weed session, not a bigger gap — which is one
+more reason the first mining round matters.
+
 ### With one session, expect a frame-block split
 
 A session-level split needs at least two sessions, so the build falls back to
