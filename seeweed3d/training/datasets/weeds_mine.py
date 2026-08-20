@@ -44,7 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from annotation.mine_pool import CONFIG as BASE, mine  # noqa: E402
 from training.datasets import common as loc  # noqa: E402
-from training.datasets.weeds import HOLDOUT_TEST, WEED_CAMPAIGNS  # noqa: E402
+from training.datasets.weeds import HOLDOUT_TEST, WEED_SESSIONS  # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
@@ -63,14 +63,17 @@ CONFIG = dict(
     BASE,
     CHECKPOINT=CHECKPOINT,
     BACKEND="rfdetr",
-    DEVICE="cuda:1",
+    DEVICE="cuda",
 
     # What is already labelled: skips those frames, and counts class
     # frequencies so a scarce class scores higher.
     DATASET_DIR=str(loc.out("weeds_v1")),
 
-    # The pool to mine. One campaign for now; add more as they are recorded.
-    SESSIONS_ROOT=str(loc.campaign(WEED_CAMPAIGNS[0])),
+    # The pool to mine: the PARENT of the annotated session(s), so unlabelled
+    # sessions beside them are in scope. Mining its own already-labelled frames
+    # is harmless - they are skipped - but a pool of one session has nothing
+    # new in it to find.
+    SESSIONS_ROOT=str(Path(WEED_SESSIONS[0]).parent),
     ONLY_SESSIONS=[],
 
     # Must match weeds.py. Checked independently on purpose - one list being
