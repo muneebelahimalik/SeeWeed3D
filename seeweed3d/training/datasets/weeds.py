@@ -48,24 +48,33 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
 # #############################################################################
 
-#: Campaign folders holding the weed recordings. One entry per campaign,
-#: pointed at its `sessions` folder - every session under it is discovered.
-WEED_CAMPAIGNS = [
-    "Weeds_3_good",
+#: WHERE YOUR ANNOTATED WEED FRAMES ARE. Full paths, one per entry.
+#:
+#: Either form works, and both are found the same way:
+#:   ...\sessions\<session>   ONE session folder holding annotations/ + rgb/
+#:   ...\sessions             a folder whose CHILDREN are session folders
+#:
+#: With one session, name it directly - the `sessions` form only earns its keep
+#: once there are several under one parent.
+WEED_SESSIONS = [
+    r"D:\LaserWeeding Research (Muneeb. E Malik)\Dataset_Vidalia\Weeds_3_good\sessions\vid2_20260108_122731",
 ]
 
 #: Sessions active learning must NEVER mine, and that never enter training.
-#: Leave [] only if you accept that no number this dataset produces can be
-#: compared across rounds. See the module docstring.
+#:
+#: WITH ONE SESSION THIS MUST STAY EMPTY - holding out your only session leaves
+#: nothing to train on. The build then splits within the session by contiguous
+#: frame blocks and says so. That is the honest fallback, and its scores are an
+#: upper bound: val and test share the session's light, soil and growth stage.
+#:
+#: Fill it in the moment you have a second weed session. Until then this is a
+#: known limitation rather than an oversight.
 HOLDOUT_TEST = [
-    # "vid2_20260108_122731",
 ]
 
 CONFIG = dict(
     BASE,
-    SOURCES=[{"DATUMARO_ROOT": str(loc.campaign(c)),
-              "IMAGES_ROOT": str(loc.campaign(c))}
-             for c in WEED_CAMPAIGNS],
+    SOURCES=[{"DATUMARO_ROOT": p, "IMAGES_ROOT": p} for p in WEED_SESSIONS],
 
     OUT_DIR=str(loc.out("weeds_v1")),
 

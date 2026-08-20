@@ -42,9 +42,46 @@ person first.
 
 ---
 
+## What you edit, and what you can ignore for now
+
+| File | Edit | Needed for round 0 |
+|---|---|---|
+| `datasets/weeds.py` | `WEED_SESSIONS` — full path(s) to your annotated session folder(s) | **yes** |
+| `datasets/weeds_train.py` | `ROUND` | **yes** |
+| `datasets/weeds_mine.py` | `ROUND`, `CHECKPOINT` | no — round 1+ |
+| `datasets/common.py` | `DATA_ROOT`, or set `SEEWEED3D_DATA_ROOT` | only decides where builds and runs are written |
+
+`WEED_SESSIONS` takes either form, and both are found the same way:
+
+```python
+WEED_SESSIONS = [
+    # ONE session folder holding annotations/ + rgb/ + depth/ + meta/
+    r"D:\...\sessions\vid2_20260108_122731",
+    # or a folder whose CHILDREN are session folders - every one is discovered
+    # r"D:\...\sessions",
+]
+```
+
+With a single session, name it directly. The `sessions` form only earns its
+keep once several sit under one parent.
+
+### With one session, expect a frame-block split
+
+A session-level split needs at least two sessions, so the build falls back to
+contiguous blocks *within* the one you have, and says so. That is the honest
+fallback and its scores are an **upper bound**: val and test share the
+session's light, soil and growth stage.
+
+`HOLDOUT_TEST` must stay empty until you have a second weed session — holding
+out your only one leaves nothing to train on. A test asserts that, so it cannot
+be set by accident.
+
+---
+
 ## Before round 0: pin a holdout
 
-Name one or two sessions in **both** places, and never annotate them:
+**Once you have two or more weed sessions**, name one in `HOLDOUT_TEST` and
+never annotate it:
 
 ```python
 # training/datasets/weeds.py
@@ -143,7 +180,7 @@ python -m seeweed3d.training.datasets.weeds_train
 ```powershell
 python -m seeweed3d.evaluation.eval_seg --backend rfdetr `
     --checkpoint <runs>/weeds_rN/checkpoint_best_total.pth `
-    --dataset <weeds_v1> --split test --device cuda:1 --sweep
+    --dataset <weeds_v1> --split test --device cuda --sweep
 
 python -m seeweed3d.training.al_round metrics --dataset <weeds_v1> --round N ...
 python -m seeweed3d.training.al_round status  --dataset <weeds_v1>

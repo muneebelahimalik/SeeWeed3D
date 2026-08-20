@@ -40,15 +40,24 @@ CONFIG = dict(
     DATASET_DIR=str(loc.out("weeds_v1")),
     RUN_DIR=str(loc.runs(f"weeds_r{ROUND}")),
 
-    DEVICE="cuda:1",          # GPU 0 drives the display
+    DEVICE="cuda",            # one GPU on this machine
 
-    # 48 GB is a great deal more than these defaults assume. Resolution first:
-    # it has bought more than capacity on this data every time. Must be a
-    # multiple of 24 for the medium/large variants.
-    RESOLUTION=1344,
+    # Sized for a 24 GB RTX 4090 with the desktop already holding ~2.3 GB, so
+    # roughly 22 GB to work with. VRAM grows with the SQUARE of resolution, and
+    # an OOM eight hours into an overnight run costs the night.
+    #
+    # Resolution first when there is room: it has bought more than capacity on
+    # this data every time, which is why the batch is small and GRAD_ACCUM
+    # carries the effective batch instead. Must be a multiple of 24 for the
+    # medium/large variants.
+    #
+    # Check nvidia-smi after the first epoch. With several GB spare, either
+    # RESOLUTION=1248 or BATCH=4/GRAD_ACCUM=4 is the next step - one of them,
+    # not both, so you can tell which did anything.
+    RESOLUTION=1008,
     VARIANT="medium",
-    BATCH=8,
-    GRAD_ACCUM=2,             # BATCH x GRAD_ACCUM stays near 16
+    BATCH=2,
+    GRAD_ACCUM=8,             # BATCH x GRAD_ACCUM stays near 16
 
     # 0 for the first run on Windows: a lightning dataloader worker that fails
     # to start kills the process after the model-summary table with no

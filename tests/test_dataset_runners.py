@@ -129,10 +129,20 @@ def test_the_data_root_is_overridable_by_environment(monkeypatch):
     importlib.reload(loc)
 
 
-def test_campaign_points_at_a_sessions_folder_not_a_session():
-    """Campaign-level roots discover every session under them, so a seventh
-    recording is not another path to edit - the per-session form broke when a
-    campaign folder was renamed."""
+def test_each_source_uses_one_path_for_both_roots():
+    """The annotations live INSIDE the session folder, beside rgb/, so one path
+    serves as both: DATUMARO_ROOT finds annotations/default.json under it, and
+    IMAGES_ROOT resolves the frames. Two different paths here is a typo, not a
+    configuration."""
+    assert weeds.CONFIG["SOURCES"], "at least one source is required"
     for src in weeds.CONFIG["SOURCES"]:
-        assert src["DATUMARO_ROOT"].replace("\\", "/").endswith("/sessions")
         assert src["IMAGES_ROOT"] == src["DATUMARO_ROOT"]
+
+
+def test_a_single_session_build_cannot_pin_a_holdout():
+    """Holding out your only session leaves nothing to train on. The build
+    falls back to frame blocks within the session and says so - an upper bound,
+    not generalisation, and a known limitation rather than an oversight."""
+    if len(weeds.WEED_SESSIONS) < 2:
+        assert weeds.HOLDOUT_TEST == [], (
+            "with one session a holdout would empty the training set")
