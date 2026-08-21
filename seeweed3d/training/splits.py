@@ -557,6 +557,22 @@ MIN_INSTANCES_FOR_BALANCE = 20
 CLASS_BALANCE_TOLERANCE = 1.5
 
 
+#: How much worse it is for a class to be CONCENTRATED in val than THIN in it.
+#:
+#: The two directions are not symmetric, and this project already refuses to
+#: average asymmetric errors elsewhere (onion-called-weed is never averaged with
+#: weed-called-onion). Over-representation does two harms at once: the class is
+#: starved in training AND it dominates the score, so its AP is both genuinely
+#: worse and counted more heavily. Under-representation does one: the class
+#: trains on nearly everything and its val AP is merely noisy.
+#:
+#: Round 0 is the two directions side by side. `other_weed` at 34% of a 19% val
+#: split had 145 training instances and reported AP 0.214. At 8% it has 199 and
+#: is measured on 18 instances - a worse ESTIMATE of a better-trained class,
+#: which is the trade worth making.
+OVER_REPRESENTATION_PENALTY = 2.0
+
+
 def _worst_class_skew(parts, class_counts_by_frame):
     """The most badly represented class in this layout, as a share difference.
 
@@ -569,6 +585,10 @@ def _worst_class_skew(parts, class_counts_by_frame):
     mean AP means: `other_weed` at 34% of val on a 19% val split reports a low
     AP for a reason that has nothing to do with the model, then drags the mean
     down with it.
+
+    AND THE DIRECTION COUNTS. Being over-represented in val is weighted heavier
+    than being under-represented by OVER_REPRESENTATION_PENALTY, because it
+    costs training data as well as measurement quality.
     """
     per = {s: Counter() for s in SPLITS}
     for split in SPLITS:
@@ -589,7 +609,9 @@ def _worst_class_skew(parts, class_counts_by_frame):
         for cls, n in totals.items():
             if n < MIN_INSTANCES_FOR_BALANCE:
                 continue
-            worst = max(worst, abs(per[split][cls] / n - target))
+            drift = per[split][cls] / n - target
+            worst = max(worst, drift * OVER_REPRESENTATION_PENALTY
+                        if drift > 0 else -drift)
     return worst
 
 

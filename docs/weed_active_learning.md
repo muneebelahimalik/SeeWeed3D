@@ -142,23 +142,53 @@ the dataset on buffers instead — which is exactly the mistake the 3/12 setting
 made the first time.
 
 **Here that trade is nearly free**, for the reason in the next section: the
-60-frame separation floor is out of reach at any affordable gap on this
-session, so gap frames are not buying independence and can be spent on balance,
-which *is* achievable.
+separation floor is cleared at a very small gap on this session, so gap frames
+past about 3 buy nothing and can be spent on blocks instead.
 
-### The separation floor is unreachable here, and that is worth knowing
+The real build, at 3 blocks and a 3-frame gap, came out:
 
-The build warns when a val frame sits closer than 60 video frames to a training
-frame. On this session it reports **25** at a 12-frame gap, because this pool
-was curated at roughly stride 2 — so one pool frame is about two video frames.
+| class | train | val | val share |
+|---|---|---|---|
+| cutleaf_evening_primrose | 604 | 92 | 13% |
+| grass_weed | 232 | 63 | **21%** |
+| other_weed | **199** | 18 | 8% |
+| *frames* | *39* | *9* | ***19%*** |
 
-Reaching 60 would need `GAP_FRAMES` near 30, which is **half the dataset**. It
-is not a setting to tune; it is a consequence of having 60 frames from one
-drive.
+`grass_weed` is now balanced, `other_weed` moved from 34% *over* to 8% *under*,
+and — the part that matters — its training instances went from **145 to 199**.
+That is the trade the layout is built to make: a worse *estimate* of a
+better-trained class beats the reverse.
 
-So read the val score as *"training is working"*, never as *"this is how it
-performs"*. The fix is a second weed session, not a bigger gap — which is one
-more reason the first mining round matters.
+### The two directions of skew are not equally bad
+
+A class **concentrated** in val is starved in training *and* over-weighted in
+the score. A class **thin** in val trains on nearly everything and merely gets a
+noisy AP. So `OVER_REPRESENTATION_PENALTY` weights the first direction 2× when
+the layout is chosen, and the build's warning names which one it hit.
+
+This is the same rule the project already applies to crop safety: an asymmetric
+pair of errors is never averaged into one number.
+
+### The separation floor, and a stride estimate that was wrong
+
+The build warns when a val frame sits closer than 60 **video** frames to a
+training frame. Measured on this session:
+
+| `GAP_FRAMES` | nearest train frame |
+|---|---|
+| 8 | 240 |
+| 3 | **95** |
+
+That is ~30 video frames per pool frame, so `GAP_FRAMES=2` already clears the
+floor. An earlier note here estimated the curation stride at ~2 and concluded
+the floor was unreachable without spending half the dataset — that was wrong,
+and the measured numbers above replace it. Gap frames are **cheap** on this
+pool, which is why 3 blocks at gap 3 costs only 12 buffered frames.
+
+Clearing the floor still only means val is not the *same photograph* as train.
+It shares the session's light, soil and growth stage regardless. So read the val
+score as *"training is working"*, never as *"this is how it performs"* — the fix
+for that is a second weed session, not a bigger gap.
 
 ### With one session, expect a frame-block split
 
