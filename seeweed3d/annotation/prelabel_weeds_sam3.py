@@ -307,7 +307,7 @@ CONFIG = {
     # A fixed refinement band lands on exactly that asymmetry - 2 px is a large
     # fraction of a 30 px seedling and cosmetic on a 200 px rosette - and it is
     # pure CPU, so it costs nothing per frame.
-    "BOUNDARY_REFINE_BAND_PX": 0,
+    "BOUNDARY_REFINE_BAND_PX": 2,
     "BOUNDARY_REFINE_VEG_MIN": 0.5,   # plant likelihood needed to keep a band pixel
 
     # Only refine instances at or below this area; 0 refines every instance.
