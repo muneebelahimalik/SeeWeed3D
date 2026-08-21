@@ -82,6 +82,18 @@ class Detections:
     def class_name(self, i):
         return self.names[int(self.classes[i])]
 
+    def select(self, idx):
+        """A new Detections holding only `idx`, in the order given.
+
+        Every array moves together. Filtering the instance list a caller
+        exports while leaving `masks` alone is how an overlay ends up drawing
+        detections that the JSON beside it does not contain."""
+        i = np.asarray(list(idx), dtype=int)
+        return Detections(masks=self.masks[i], boxes=self.boxes[i],
+                          classes=self.classes[i], scores=self.scores[i],
+                          width=self.width, height=self.height,
+                          names=list(self.names))
+
     def crop_index(self):
         """Index of the crop class IN THIS MODEL'S class list, or None.
 
@@ -594,6 +606,30 @@ DEFAULT_BACKEND = "maskrcnn"
 # would have raised "unknown backend" on something the docs advertised.
 PERMISSIVE_BACKENDS = tuple(k for k, (_, lic) in BACKENDS.items()
                             if "AGPL" not in lic and "GPL" not in lic)
+
+
+def dedup_detections(det, iou=None):
+    """Drop detections that duplicate a higher-scoring one. Returns (det, dropped).
+
+    RF-DETR is a set-prediction model: every query proposes independently, and
+    nothing makes two queries that found the same plant agree on what it is. So
+    the same mask comes back under two class labels at two scores - observed on
+    a real weed session in 6 of 16 frames, at box IoU 1.000. A laser weeder then
+    fires twice at one plant, and every per-instance count is inflated.
+
+    See common/dedup.py for why suppression is class-agnostic and why the
+    default threshold is deliberately high."""
+    from common.dedup import DEFAULT_DEDUP_IOU, suppress_duplicates
+    thresh = DEFAULT_DEDUP_IOU if iou is None else float(iou)
+    if thresh <= 0 or len(det) < 2:
+        return det, []
+    items = [{"i": i, "score": float(det.scores[i]), "bbox": det.boxes[i],
+              "mask": det.masks[i], "class_name": det.class_name(i)}
+             for i in range(len(det))]
+    kept, dropped = suppress_duplicates(items, thresh)
+    if not dropped:
+        return det, []
+    return det.select([d["i"] for d in kept]), dropped
 
 
 def build_segmenter(backend=DEFAULT_BACKEND, weights=None, **kw):
