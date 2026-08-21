@@ -65,6 +65,7 @@ from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                white_balance)
 from common.progress import Progress  # noqa: E402
 from common.masks import describe_mask_encoding, to_bool  # noqa: E402
+from common.sam_env import sam_import_error  # noqa: E402
 from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
                              WEED_CLASSES, coco_categories, cvat_labels)
 from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
@@ -432,8 +433,17 @@ def weed_cvat_labels():
 # --------------------------------------------------------------------------- #
 def load_sam3(cfg):
     import torch
-    from sam3.model_builder import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor
+    try:
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+    except ModuleNotFoundError as e:
+        # A bare "No module named 'sam3'" reads as "SAM is not installed", so
+        # the obvious response is to install it - into whichever environment is
+        # active, which is usually the one that should not have it. Say which
+        # environment IS active instead. See common/sam_env.py.
+        if e.name and e.name.split(".")[0] != "sam3":
+            raise
+        raise sam_import_error(e) from None
 
     want = cfg["DEVICE"]
     device = "cuda" if (want.startswith("cuda") and torch.cuda.is_available()) else "cpu"

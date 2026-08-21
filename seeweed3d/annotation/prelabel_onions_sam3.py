@@ -53,6 +53,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.masks import describe_mask_encoding, to_bool  # noqa: E402
+from common.sam_env import sam_import_error  # noqa: E402
 from common.ontology import CROP_CLASS  # noqa: E402
 from common.progress import Progress  # noqa: E402
 from common.vegetation import component_boxes, remove_small  # noqa: E402
@@ -242,8 +243,17 @@ ONION_LABEL = CROP_CLASS     # from common/ontology.py (single source of truth)
 def load_sam3(cfg):
     """Load SAM 3 / 3.1 via the official sam3 package. Returns a handle dict."""
     import torch
-    from sam3.model_builder import build_sam3_image_model
-    from sam3.model.sam3_image_processor import Sam3Processor
+    try:
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+    except ModuleNotFoundError as e:
+        # A bare "No module named 'sam3'" reads as "SAM is not installed", so
+        # the obvious response is to install it - into whichever environment is
+        # active, which is usually the one that should not have it. Say which
+        # environment IS active instead. See common/sam_env.py.
+        if e.name and e.name.split(".")[0] != "sam3":
+            raise
+        raise sam_import_error(e) from None
 
     want = cfg["DEVICE"]
     device = "cuda" if (want.startswith("cuda") and torch.cuda.is_available()) else "cpu"

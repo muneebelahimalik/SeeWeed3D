@@ -38,7 +38,7 @@ ROUND = 0
 
 #: WHERE RUNS ARE WRITTEN. One folder per round - reusing one overwrites the
 #: checkpoint you would have compared against, and the comparison is the point.
-RUNS_ROOT = r"E:\Dataset_Vidalia\runs"
+RUNS_ROOT = r"E:\Dataset_Vidalia\runs_1_only_weeds"
 
 CONFIG = dict(
     BASE,
