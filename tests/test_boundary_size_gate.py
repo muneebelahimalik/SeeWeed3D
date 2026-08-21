@@ -115,10 +115,23 @@ def test_zero_disables_the_gate_and_refines_everything():
     assert not np.array_equal(out, sam)
 
 
-def test_snapping_stays_off_by_default():
-    """#29: the field is the arbiter. This ships available and unarmed, so
-    turning it on is a decision someone made and can compare against."""
-    assert CONFIG["BOUNDARY_REFINE_BAND_PX"] == 0
+def test_snapping_is_never_armed_without_the_gate():
+    """Snapping shipped off and was turned on deliberately after field
+    judgement that small weeds need help and big ones do not.
+
+    What must never happen is snapping ON with the gate OFF: that is free rein
+    over the boundaries that are already right, which is #29's failure exactly.
+    So this pins the PAIR rather than either value - it stays true whether
+    snapping is on or off, and fails only on the combination that is unsafe."""
+    if CONFIG["BOUNDARY_REFINE_BAND_PX"]:
+        assert CONFIG["BOUNDARY_REFINE_MAX_AREA_PX"] > 0
+
+
+def test_the_band_stays_narrow():
+    """The band is re-decided from a colour index, and colour indices
+    false-positive on green-tinted mineral (#24). A wide band turns that from a
+    rim into a takeover - and on a small weed the band IS most of the plant."""
+    assert CONFIG["BOUNDARY_REFINE_BAND_PX"] <= 3
 
 
 def test_the_gate_does_nothing_while_snapping_is_off():

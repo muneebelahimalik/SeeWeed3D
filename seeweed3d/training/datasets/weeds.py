@@ -65,15 +65,27 @@ WEED_SESSIONS = [
 #: on different drives are two things to keep in step instead of one.
 OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v2"
 
+#: THE UNLABELLED POOL - the `sessions` folder holding weed recordings that are
+#: not yet corrected. Mining reads it, and weeds_look.py runs the model over a
+#: session from it to see whether the masks still land on plants.
+#:
+#: This is a DIFFERENT campaign from WEED_SESSIONS above, and that is the point:
+#: a pool containing only the session you trained on has nothing new to find.
+WEED_POOL_ROOT = r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions"
+
 #: Sessions active learning must NEVER mine, and that never enter training.
 #:
-#: WITH ONE SESSION THIS MUST STAY EMPTY - holding out your only session leaves
-#: nothing to train on. The build then splits within the session by contiguous
-#: frame blocks and says so. That is the honest fallback, and its scores are an
-#: upper bound: val and test share the session's light, soil and growth stage.
+#: WITH ONE ANNOTATED SESSION THIS MUST STAY EMPTY - holding out your only
+#: session leaves nothing to train on. The build then splits within the session
+#: by contiguous frame blocks and says so. That is the honest fallback, and its
+#: scores are an upper bound: val and test share the session's light, soil and
+#: growth stage.
 #:
-#: Fill it in the moment you have a second weed session. Until then this is a
-#: known limitation rather than an oversight.
+#: THE MOMENT A SECOND SESSION IS CORRECTED, name it here. Pick the one you will
+#: NOT correct for training - see docs/weed_active_learning.md. Mining reads the
+#: same list and a test asserts they agree, because mining selects the frames
+#: the model finds hardest and those are exactly the frames it would most
+#: benefit from having seen.
 HOLDOUT_TEST = [
 ]
 

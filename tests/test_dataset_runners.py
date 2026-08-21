@@ -163,3 +163,56 @@ def test_every_configured_path_is_absolute():
         # Checked as a WINDOWS path regardless of the host running the tests:
         # these configs name drives, and posixpath calls "E:\\x" relative.
         assert ntpath.isabs(p), f"not an absolute path: {p!r}"
+
+
+# --------------------------------------------------------------------------- #
+# Looking at a session the model never saw
+# --------------------------------------------------------------------------- #
+def test_looking_and_mining_read_the_same_pool():
+    """Pointing these at different campaigns is how you inspect one session and
+    mine another without noticing - and then conclude the model transfers based
+    on frames from the wrong drive."""
+    from training.datasets import weeds_look
+    assert weeds_mine.CONFIG["SESSIONS_ROOT"] == weeds.WEED_POOL_ROOT
+    assert weeds_look.CONFIG["IMAGES"].startswith(weeds.WEED_POOL_ROOT)
+
+
+def test_the_pool_is_not_the_training_campaign():
+    """A pool containing only the session you trained on has nothing new to
+    find, and every frame it returns is one the model has already seen."""
+    for src in weeds.CONFIG["SOURCES"]:
+        assert not src["DATUMARO_ROOT"].startswith(weeds.WEED_POOL_ROOT)
+
+
+def test_looking_uses_the_same_backend_the_training_run_writes():
+    """rfdetr weights loaded as maskrcnn fail deep inside the backend, and a
+    dropped --backend has cost this project a run before."""
+    from training.datasets import weeds_look
+    assert weeds_look.CONFIG["BACKEND"] == "rfdetr"
+    assert weeds_look.CONFIG["CHECKPOINT"].endswith("checkpoint_best_total.pth")
+
+
+def test_looking_defaults_to_the_round_being_trained():
+    from training.datasets import weeds_look
+    assert f"weeds_r{weeds_train.ROUND}" in weeds_look.CONFIG["CHECKPOINT"]
+
+
+def test_looking_strides_rather_than_taking_the_first_n_frames():
+    """Consecutive ZED frames are near-identical, so LIMIT alone gives you 40
+    pictures of the same plant and no evidence about the drive."""
+    from training.datasets import weeds_look
+    assert weeds_look.CONFIG["STRIDE"] > 1
+
+
+def test_looking_is_rgb_only():
+    """Stage A is what is being judged; 'full' folds depth, LEP and the safety
+    decision into the picture and three more failure modes with them."""
+    from training.datasets import weeds_look
+    assert weeds_look.CONFIG["MODE"] == "segmentation"
+
+
+def test_look_paths_are_absolute():
+    from training.datasets import weeds_look
+    import ntpath
+    for key in ("IMAGES", "CHECKPOINT", "OUT_DIR"):
+        assert ntpath.isabs(weeds_look.CONFIG[key]), key
