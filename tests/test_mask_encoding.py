@@ -216,3 +216,20 @@ def test_state_masks_still_handles_missing_and_odd_shapes(module):
     # [N,1,H,W] squeezes to [N,H,W]; a bare [H,W] gains a batch dim.
     assert len(fn({"masks": np.ones((3, 1, 6, 6), bool)})) == 3
     assert len(fn({"masks": np.ones((6, 6), bool)})) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The cluster-rate guard
+# --------------------------------------------------------------------------- #
+def test_the_cluster_warning_fires_on_a_prelabel_run_and_not_on_corrected_data():
+    """`weed_cluster` means "no separable single LEP", so every one is a plant
+    that never gets targeted individually - and a prelabel arriving already
+    marked as a cluster biases the annotator toward accepting it. The threshold
+    has to separate the observed regimes, not read tidily.
+
+    Measured: the hand-corrected session carries 2 clusters in 1,444 instances;
+    the two SAM prelabel runs proposed 800 in 11,816 and 380 in 9,592."""
+    from annotation.prelabel_weeds_sam3 import CLUSTER_SHARE_WARN
+    assert 800 / 11816 >= CLUSTER_SHARE_WARN      # 6.8% - flagged
+    assert 380 / 9592 >= CLUSTER_SHARE_WARN       # 4.0% - flagged
+    assert 2 / 1444 < CLUSTER_SHARE_WARN          # 0.1% - silent
