@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from annotation.mine_pool import CONFIG as BASE, mine  # noqa: E402
 from training.datasets.weeds import (HOLDOUT_TEST,  # noqa: E402
                                      OUT_DIR as WEEDS_OUT_DIR,
-                                     WEED_SESSIONS)
+                                     WEED_POOL_ROOT, WEED_SESSIONS)
 from training.datasets.weeds_train import RUNS_ROOT  # noqa: E402
 
 # #############################################################################
@@ -61,10 +61,10 @@ ROUND = 1
 #: is never overwritten by the next one. Upload this folder to CVAT.
 BATCHES_ROOT = r"E:\Dataset_Vidalia\batches"
 
-#: THE POOL TO MINE - the `sessions` folder holding unlabelled weed sessions
-#: alongside the annotated one. With only the annotated session under it there
-#: is nothing new to find, so this wants a second recording before round 1.
-POOL_ROOT = r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions"
+#: THE POOL TO MINE. Read from weeds.py so it cannot drift from the pool
+#: weeds_look.py inspects - pointing these at different campaigns is how you
+#: look at one session and mine another without noticing.
+POOL_ROOT = WEED_POOL_ROOT
 
 #: The checkpoint doing the ranking - the model trained on what you have so far.
 #: rfdetr writes checkpoint_best_total.pth; use _total, never _ema (rfdetr keeps

@@ -228,6 +228,67 @@ cannot separate a better model from an easier test set.
 
 ---
 
+## Three sessions changes the plan
+
+Once a second campaign is prelabelled, the pool stops being empty and a real
+held-out test set becomes possible for the first time. Both were standing
+limitations through round 0.
+
+| session | frames | state | role |
+|---|---|---|---|
+| `vid2_20260108_122731` | 60 | hand-corrected | train + val (`weeds_v2`) |
+| `vid3_20260108_103135` | 391 | SAM prelabels | **correct from here** — training data |
+| `vid3_20260108_110444` | 393 | SAM prelabels | **hold out** — test set only |
+
+### Look before you mine
+
+```powershell
+python -m seeweed3d.training.datasets.weeds_look
+```
+
+Runs the current round's checkpoint over a session it never trained on and
+writes an overlay per frame. No ground truth needed, so it costs nothing.
+
+It answers *"do the masks still sit on plants at all on a different drive"* —
+which the val score cannot, because with one annotated session val is contiguous
+blocks *within* it and shares the light, the soil and often the individual
+plants.
+
+**It cannot tell you recall.** A frame with nothing drawn means "the model found
+nothing", indistinguishable from "there was nothing to find" — and missed weeds
+are this project's failure mode. It is a go/no-go, not a measurement.
+
+Look for: masks on bare soil, one plant split into several, several plants
+merged into one, whole plants absent where you can see green.
+
+> **Looking does not burn a holdout.** No threshold is tuned and no frame is
+> selected from what you see, so this is the one thing you may do with a test
+> session before it becomes one. Mining is the opposite — see below.
+
+### Why a 39-frame model is a poor miner
+
+Uncertainty ranking needs a model good enough for its uncertainty to mean
+something. Round 0 scored `mAP@50 = 0.70` on a val split that *shares its
+session*; on a different drive its ranking is much closer to noise.
+
+So for the first batch out of a new pool, lean on **coverage** — the diversity
+pass already spreads the selection — and start trusting the ranking from round
+2. Alternatively, skip ranking entirely for batch one and correct a strided
+sample; at this model size that is barely worse and much simpler.
+
+### SAM prelabels change the economics of correction
+
+Field judgement is that **big weeds already have correct boundaries and need no
+correction** — only small ones do. Boundaries were the expensive half of
+annotation, so correcting a prelabelled frame is now mostly *reclassifying*
+(`other_weed` → the real species) plus fixing small-weed outlines and clusters.
+
+That makes a large one-off correction pass competitive with several active
+learning rounds: 150 corrected frames is roughly 4× everything the model has
+today, and the per-frame cost is closer to clicking than to drawing.
+
+---
+
 ## Round 0 — the starting model
 
 ```powershell

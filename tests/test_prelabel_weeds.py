@@ -680,15 +680,28 @@ def test_prelabel_session_filters_low_confidence_exemplars(tmp_path):
 # --------------------------------------------------------------------------- #
 # PR #12 mask profile: post-processing added later is OFF by default
 # --------------------------------------------------------------------------- #
-def test_post_pr12_mask_processing_is_off_by_default():
+def test_the_pr12_profile_holds_except_where_it_was_deliberately_left():
     """Field comparison judged the PR #11/#12 masks best, so everything added
     after it is disabled by default. Pinned here because each of these silently
-    changes the exported training target if it drifts back on."""
+    changes the exported training target if it drifts back on.
+
+    SPLIT_TOUCHING_INSTANCES is the one that must never drift. #29 names it as
+    the actual cause of the failure that triggered the revert - one weed
+    exported as several instances - and the CHANGELOG is explicit that the rest
+    are independently re-enablable rather than condemned as a bundle.
+
+    Edge snapping is the deliberate exception, turned on after field judgement
+    that big weeds need no correction and small ones do. It is safe to leave on
+    only because of the size gate, so the two are asserted together: snapping
+    without a gate would be free rein over the masks that already work."""
     assert wd.CONFIG["SPLIT_TOUCHING_INSTANCES"] is False
-    assert wd.CONFIG["BOUNDARY_REFINE_BAND_PX"] == 0
     assert wd.CONFIG["BOUNDARY_SMOOTH_SIGMA_PX"] == 0
     assert wd.CONFIG["USE_FUSED_LEP"] is False
     assert wd.CONFIG["POLY_ALL_PARTS"] is False
+    if wd.CONFIG["BOUNDARY_REFINE_BAND_PX"]:
+        assert wd.CONFIG["BOUNDARY_REFINE_MAX_AREA_PX"] > 0, (
+            "edge snapping is on with no size gate, so it is free to move the "
+            "big-weed boundaries that field judgement says are already right")
 
 
 def test_one_plant_stays_one_instance_by_default():
