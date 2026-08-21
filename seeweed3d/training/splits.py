@@ -396,7 +396,8 @@ MIN_FRAMES_FOR_BLOCKS = 5
 
 def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
                                     test_fraction=0.2, gap_frames=2,
-                                    n_blocks=1, seed=1234, rotate=True):
+                                    n_blocks=1, seed=1234, rotate=True,
+                                    class_counts_by_frame=None):
     """Contiguous frame blocks WITHIN each session, merged across sessions.
 
     USE WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE OR HARMFUL. Splitting by whole
@@ -410,6 +411,12 @@ def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
     split. What it costs is stated plainly by the caller: val then shares each
     session's lighting, soil and often its individual plants, so the scores are
     a sanity check, not evidence of generalisation.
+
+    class_counts_by_frame ({frame_id: {class: n}}) lets each session pick the
+    block layout whose val/test class mix best matches the whole session's, in
+    place of the hashed rotation. See _chosen_order - it is the only lever a
+    contiguous split has left, and without it a class that clusters along the
+    drive lands wherever the hash happens to put it.
 
     Returns {split: [frame_id]} plus `_train_only_sessions`: sessions too short
     to block-split, which went wholly to train."""
@@ -425,7 +432,9 @@ def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
         # test set is not the same stretch of every drive.
         part = assign_frame_blocks(ids, val_fraction, test_fraction,
                                    gap_frames=gap_frames, n_blocks=n_blocks,
-                                   seed=seed, rotate=rotate, _key=sess)
+                                   seed=seed, rotate=rotate,
+                                   class_counts_by_frame=class_counts_by_frame,
+                                   _key=sess)
         for key in ("train", "val", "test", "_dropped_gap"):
             out[key].extend(part[key])
     return out
@@ -447,8 +456,78 @@ def missing_from_train(split_map, class_counts_by_session):
     return sorted(everywhere - in_train)
 
 
+def class_balance(split_frames, class_counts_by_frame):
+    """How each class is distributed across the splits, against the frame split.
+
+    THE NUMBER THAT MATTERS IS THE SHARE, NOT THE COUNT. A class holding 34% of
+    its instances in a val split that is 19% of the frames is nearly twice as
+    concentrated there as it should be - so it is both under-trained and
+    over-weighted in the score, and the AP it reports says more about the split
+    than about the model. That happened here: `other_weed` at 145 train / 74 val
+    reported AP 0.214 while the two well-balanced classes reported 0.56 and 0.46,
+    and the mean carried the difference.
+
+    Nothing about this is visible in a per-class AP table, which is why it is
+    computed at BUILD time, where it can still be fixed.
+
+    split_frames: {split: [frame_id]}. Returns
+    {"classes": {name: {"total", "train", "val", "test",
+                        "train_share", "val_share", "test_share"}},
+     "frame_share": {split: fraction}, "n_frames": {split: n}}."""
+    counts = {s: Counter() for s in SPLITS}
+    for split in SPLITS:
+        for fid in split_frames.get(split) or ():
+            counts[split].update(class_counts_by_frame.get(fid) or {})
+    n_frames = {s: len(split_frames.get(s) or ()) for s in SPLITS}
+    total_frames = sum(n_frames.values())
+
+    totals = Counter()
+    for split in SPLITS:
+        totals.update(counts[split])
+
+    rows = {}
+    for cls in sorted(totals):
+        n = totals[cls]
+        row = {"total": n}
+        for split in SPLITS:
+            row[split] = counts[split][cls]
+            row[f"{split}_share"] = counts[split][cls] / n if n else 0.0
+        rows[cls] = row
+    return {"classes": rows,
+            "frame_share": {s: (n_frames[s] / total_frames if total_frames
+                                else 0.0) for s in SPLITS},
+            "n_frames": n_frames}
+
+
+def class_balance_problems(balance, tolerance=None, min_instances=None):
+    """Classes whose share of val/test is far from that split's share of frames.
+
+    Returns [(split, class, got_share, want_share, n_total)], worst first.
+
+    Reported rather than raised. With contiguous blocks a badly clustered class
+    may have no layout that balances it, and refusing to build would leave the
+    user with nothing; knowing which class is skewed is enough to read the AP
+    table correctly, and to decide whether the fix is more annotation or a
+    different block count."""
+    tol = CLASS_BALANCE_TOLERANCE if tolerance is None else float(tolerance)
+    floor = (MIN_INSTANCES_FOR_BALANCE if min_instances is None
+             else int(min_instances))
+    bad = []
+    for cls, row in (balance.get("classes") or {}).items():
+        if row["total"] < floor:
+            continue
+        for split in ("val", "test"):
+            want = (balance.get("frame_share") or {}).get(split, 0.0)
+            if want <= 0:
+                continue
+            got = row[f"{split}_share"]
+            if got >= want * tol or got <= want / tol:
+                bad.append((split, cls, got, want, row["total"]))
+    return sorted(bad, key=lambda r: -abs(r[2] - r[3]))
+
+
 def _split_order(key, seed, rotate):
-    """Which split occupies which position along a block."""
+    """Which split occupies which position along a block, before class balance."""
     order = ["train", "val", "test"]
     if not rotate:
         return order
@@ -456,8 +535,100 @@ def _split_order(key, seed, rotate):
     return order[r:] + order[:r]
 
 
-def _edge_splits(chunk, val_fraction, test_fraction, seed, key, rotate):
-    """(first, last) split along this chunk, without laying it out.
+#: A class with fewer instances than this is not measured for balance. Its share
+#: of a small val split swings wildly on one frame either way, so flagging it
+#: would report noise, and steering the layout by it would trade a real class's
+#: balance for a rounding artefact.
+MIN_INSTANCES_FOR_BALANCE = 20
+
+#: How far a class's share of val/test may drift from that split's share of the
+#: FRAMES before it is reported. 1.5 means "half again, or two thirds, as
+#: concentrated".
+#:
+#: SET FROM THE CASE THAT MOTIVATED IT, not from taste. The round-0 weed build
+#: put 34% of `other_weed` into a val split holding 19% of the frames - a ratio
+#: of 1.79, badly wrong and entirely invisible in the AP table. A tolerance of
+#: 2.0 reads better and would have said nothing about it.
+#:
+#: Skew is zero-sum, so one over-represented class necessarily leaves others
+#: under-represented and several rows can be flagged at once. That is the truth
+#: of the split rather than duplicate reporting, and the list is ordered worst
+#: first so the class actually driving it reads first.
+CLASS_BALANCE_TOLERANCE = 1.5
+
+
+def _worst_class_skew(parts, class_counts_by_frame):
+    """The most badly represented class in this layout, as a share difference.
+
+    For each class, its share of the instances that landed in val (or test) is
+    compared with that split's share of the FRAMES. A class matching the frame
+    share is neither concentrated in val nor absent from it.
+
+    THE WORST CLASS, NOT THE AVERAGE. Averaging lets two well-placed classes
+    hide the one that is ruined, and it is the ruined one that decides what the
+    mean AP means: `other_weed` at 34% of val on a 19% val split reports a low
+    AP for a reason that has nothing to do with the model, then drags the mean
+    down with it.
+    """
+    per = {s: Counter() for s in SPLITS}
+    for split in SPLITS:
+        for fid in parts.get(split) or ():
+            per[split].update(class_counts_by_frame.get(fid) or {})
+    n_frames = sum(len(parts.get(s) or ()) for s in SPLITS)
+    if not n_frames:
+        return 0.0
+    totals = Counter()
+    for split in SPLITS:
+        totals.update(per[split])
+    worst = 0.0
+    for split in ("val", "test"):
+        held = len(parts.get(split) or ())
+        if not held:
+            continue
+        target = held / n_frames
+        for cls, n in totals.items():
+            if n < MIN_INSTANCES_FOR_BALANCE:
+                continue
+            worst = max(worst, abs(per[split][cls] / n - target))
+    return worst
+
+
+def _chosen_order(ids, val_fraction, test_fraction, gap_frames, seed, key,
+                  rotate, class_counts_by_frame=None):
+    """Which split occupies which position along this block.
+
+    Without class counts this is the deterministic rotation and nothing more.
+
+    With them, all three rotations are laid out and the one whose val/test
+    instances best match its share of the frames wins. Only GROUND-TRUTH label
+    counts are consulted - never a model, never a score - so this is ordinary
+    stratification, applied to the one axis a contiguous split still has free.
+    It makes val more representative, which can only make it harder to look good
+    on.
+
+    Ties keep the rotation the seed would have picked, so a build where balance
+    cannot distinguish the layouts splits exactly as it did before."""
+    base = _split_order(key, seed, rotate)
+    if not class_counts_by_frame or not rotate:
+        return base
+    try:
+        sizes, gap = _block_sizes(len(ids), val_fraction, test_fraction,
+                                  gap_frames)
+    except SplitError:
+        return base
+    best, best_skew = base, None
+    for r in range(3):
+        cand = base[r:] + base[:r]
+        skew = _worst_class_skew(_lay_out(ids, sizes, gap, cand),
+                                 class_counts_by_frame)
+        if best_skew is None or skew < best_skew:
+            best, best_skew = cand, skew
+    return best
+
+
+def _edge_splits(chunk, val_fraction, test_fraction, gap_frames, seed, key,
+                 rotate, class_counts_by_frame=None):
+    """(first, last, order) along this chunk, without committing to a layout.
 
     Derived from the layout rather than read back from the result: the result
     is a dict of frame lists, and recovering position from it would depend on
@@ -466,17 +637,25 @@ def _edge_splits(chunk, val_fraction, test_fraction, seed, key, rotate):
     key is worse still: callers sum the dict to account for every frame, and a
     list of split names in there is silently counted as frames.
 
+    The ORDER is returned so the caller can hand it back to the layout. It used
+    to be recomputed there from the same key, which agreed by construction -
+    but a class-balanced order is chosen from the chunk's CONTENTS, and the
+    caller may trim a gap off the front before laying it out. Recomputing would
+    then pick a different rotation than the seam decision assumed, and the
+    buffer would separate the wrong pair.
+
     A chunk too short to block-split goes wholly to train."""
     n = len(chunk)
     if n < MIN_FRAMES_FOR_BLOCKS:
-        return "train", "train"
+        return "train", "train", None
     sizes = {"val": int(round(val_fraction * n)),
              "test": int(round(test_fraction * n))}
-    order = _split_order(key, seed, rotate)
+    order = _chosen_order(chunk, val_fraction, test_fraction, gap_frames, seed,
+                          key, rotate, class_counts_by_frame)
     present = [s for s in order if s == "train" or sizes.get(s, 0) > 0]
     if not present:
-        return "train", "train"
-    return present[0], present[-1]
+        return "train", "train", order
+    return present[0], present[-1], order
 
 
 def _rotation(key, seed):
@@ -486,7 +665,7 @@ def _rotation(key, seed):
 
 def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
                         gap_frames=2, n_blocks=1, seed=1234, rotate=True,
-                        _key=""):
+                        class_counts_by_frame=None, _key="", _order=None):
     """Split ONE session into contiguous frame blocks, with a discarded buffer.
 
     USE ONLY WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE (a single recording). It
@@ -558,8 +737,9 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
             # split, and dropping frames to separate train from train buys
             # nothing. At five blocks and a twelve-frame gap this was throwing
             # away a third of every session.
-            nxt, this_last = _edge_splits(chunk, val_fraction, test_fraction,
-                                          seed, f"{_key}#{j}", rotate)
+            nxt, this_last, order = _edge_splits(
+                chunk, val_fraction, test_fraction, gap_frames, seed,
+                f"{_key}#{j}", rotate, class_counts_by_frame)
             if j and gap and len(chunk) > gap and prev_last != nxt:
                 out["_dropped_gap"].extend(chunk[:gap])
                 chunk = chunk[gap:]
@@ -567,30 +747,65 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
                 out["train"].extend(chunk)
                 prev_last = "train"
                 continue
+            # The order is handed DOWN rather than recomputed. A class-balanced
+            # order is chosen from the chunk's contents, and the chunk it is
+            # laid out on may have had a gap trimmed off the front - so
+            # recomputing could pick a different rotation than the seam decision
+            # above assumed, and the buffer would separate the wrong pair.
             part = assign_frame_blocks(chunk, val_fraction, test_fraction,
                                        gap_frames, n_blocks=1, seed=seed,
-                                       rotate=rotate, _key=f"{_key}#{j}")
+                                       rotate=rotate,
+                                       class_counts_by_frame=class_counts_by_frame,
+                                       _key=f"{_key}#{j}", _order=order)
             for key in out:
                 out[key].extend(part[key])
             prev_last = this_last
         return out
 
-    gap = max(0, int(gap_frames))
+    sizes, gap = _block_sizes(n, val_fraction, test_fraction, gap_frames)
 
-    # THE GAP IS CHARGED TO THE WHOLE BLOCK, NOT TO TRAIN.
+    # WHICH SPLIT SITS WHERE ALONG THE DRIVE IS ROTATED PER BLOCK.
     #
-    # `n_train = n - n_val - n_test - gaps` sizes val and test from the raw
-    # block and lets training absorb every buffered frame. A requested
-    # 70/15/15 then came out 56/22/22 - the fractions describe what was asked
-    # for and not what was built, and the shortfall lands entirely on the split
-    # that needed the frames most.
+    # The layout is still [ a | gap | b | gap | c ] - contiguous, buffered, no
+    # frame shared - but which of train/val/test is `a` rotates deterministically
+    # with the block. Fixing the order put val in the middle of every stretch of
+    # every session and test at the end of every one, so the test set was made
+    # entirely of block-ends: later in the pass, further along the bed, often
+    # the headland where the rig turns. A test set of drive-ends measures
+    # drive-ends.
     #
-    # So the buffers come off first, and the fractions apply to what survives.
+    # Rotating costs nothing - the same three segment sizes, the same two seams
+    # - and buys a test set drawn from beginnings, middles and ends. It is NOT
+    # a random frame shuffle: that would put a frame and its near-duplicate on
+    # opposite sides of the boundary, which is the failure blocks exist to
+    # prevent.
     #
-    # A gap is spent only where a REAL boundary exists. With test_fraction=0
-    # there is no train|val|test seam to buffer, only train|val, and charging
-    # for the absent one would discard annotated frames to separate a block
-    # from nothing.
+    # WITH CLASS COUNTS the rotation is chosen rather than hashed - see
+    # _chosen_order. Three layouts, and nothing was picking the balanced one.
+    order = _order or _chosen_order(ids, val_fraction, test_fraction,
+                                    gap_frames, seed, _key, rotate,
+                                    class_counts_by_frame)
+    return _lay_out(ids, sizes, gap, order)
+
+
+def _block_sizes(n, val_fraction, test_fraction, gap_frames):
+    """How many frames each split gets from a block of n, and the gap to use.
+
+    THE GAP IS CHARGED TO THE WHOLE BLOCK, NOT TO TRAIN.
+
+    `n_train = n - n_val - n_test - gaps` sizes val and test from the raw block
+    and lets training absorb every buffered frame. A requested 70/15/15 then
+    came out 56/22/22 - the fractions describe what was asked for and not what
+    was built, and the shortfall lands entirely on the split that needed the
+    frames most.
+
+    So the buffers come off first, and the fractions apply to what survives.
+
+    A gap is spent only where a REAL boundary exists. With test_fraction=0
+    there is no train|val|test seam to buffer, only train|val, and charging for
+    the absent one would discard annotated frames to separate a block from
+    nothing."""
+    gap = max(0, int(gap_frames))
     n_gaps = (1 if val_fraction > 0 else 0) + (1 if test_fraction > 0 else 0)
     for _ in range(2):
         # Twice: a fraction can round to zero frames on a short block, which
@@ -614,25 +829,11 @@ def assign_frame_blocks(frame_ids, val_fraction=0.2, test_fraction=0.2,
             f"{n} frames cannot be split into train/val/test at "
             f"val={val_fraction}, test={test_fraction} with a {gap}-frame gap. "
             f"Lower the fractions, lower the gap, or annotate more frames.")
-    sizes = {"train": n_train, "val": n_val, "test": n_test}
+    return {"train": n_train, "val": n_val, "test": n_test}, gap
 
-    # WHICH SPLIT SITS WHERE ALONG THE DRIVE IS ROTATED PER BLOCK.
-    #
-    # The layout is still [ a | gap | b | gap | c ] - contiguous, buffered, no
-    # frame shared - but which of train/val/test is `a` rotates deterministically
-    # with the block. Fixing the order put val in the middle of every stretch of
-    # every session and test at the end of every one, so the test set was made
-    # entirely of block-ends: later in the pass, further along the bed, often
-    # the headland where the rig turns. A test set of drive-ends measures
-    # drive-ends.
-    #
-    # Rotating costs nothing - the same three segment sizes, the same two seams
-    # - and buys a test set drawn from beginnings, middles and ends. It is NOT
-    # a random frame shuffle: that would put a frame and its near-duplicate on
-    # opposite sides of the boundary, which is the failure blocks exist to
-    # prevent.
-    order = _split_order(_key, seed, rotate)
 
+def _lay_out(ids, sizes, gap, order):
+    """[ a | gap | b | gap | c ] along `ids`, in the given split order."""
     parts, i = {}, 0
     for j, name in enumerate(order):
         k = sizes[name]
