@@ -295,9 +295,29 @@ CONFIG = {
     # re-evaluate, rather than flipping the whole block back at once.
 
     # Edge snapping: re-decide a narrow band around each boundary using the
-    # continuous vegetation score. Set BAND to a small integer (3) to enable.
+    # continuous vegetation score. Set BAND to a small integer (2-3) to enable.
+    #
+    # WHY YOU MIGHT WANT THIS NOW. Field judgement on the weed prelabels is that
+    # BIG weeds already have correct boundaries and need no correction, while
+    # SMALL ones do not. That is a pixels-per-plant problem: SAM decodes masks
+    # on a fixed grid spread over the whole frame, so a big rosette gets many
+    # cells across it and a seedling gets a handful, and the seedling's outline
+    # is quantised to those few cells before anything else runs.
+    #
+    # A fixed refinement band lands on exactly that asymmetry - 2 px is a large
+    # fraction of a 30 px seedling and cosmetic on a 200 px rosette - and it is
+    # pure CPU, so it costs nothing per frame.
     "BOUNDARY_REFINE_BAND_PX": 0,
     "BOUNDARY_REFINE_VEG_MIN": 0.5,   # plant likelihood needed to keep a band pixel
+
+    # Only refine instances at or below this area; 0 refines every instance.
+    # 1500 px is the project's own definition of a small weed (eval_seg.py), so
+    # the prelabeler and the metric agree on what "small" means.
+    #
+    # DO NOT RAISE THIS TO "improve" the big weeds. They are the half that
+    # already works, and #29 is the case where a boundary pipeline that improved
+    # every number produced worse masks in the field.
+    "BOUNDARY_REFINE_MAX_AREA_PX": 1500,
     "VEG_SCORE_SOFTNESS": 0.04,       # ExG ramp width for the soft score
 
     # Anti-aliasing: blur-and-rethreshold to remove single-pixel staircase
@@ -820,10 +840,22 @@ def refine_boundary(mask, veg_score, cfg):
     where it ends. The interior and the overall shape are never touched.
 
     Added pixels must stay connected to the original core, so refinement cannot
-    absorb a neighbouring plant."""
+    absorb a neighbouring plant.
+
+    SIZE-GATED. BOUNDARY_REFINE_MAX_AREA_PX skips instances larger than it, and
+    that is the whole reason this is usable at all: a fixed band is a large
+    fraction of a 30 px seedling and cosmetic on a 200 px rosette, so its effect
+    already scales inversely with plant size - which is exactly where the error
+    is. Field judgement on this data is that BIG weeds are already correct and
+    need no correction, so touching them can only lose. The gate makes "leave
+    what works alone" a guarantee rather than a hope, and #29 is the standing
+    reminder of what happens without one."""
     band = cfg.get("BOUNDARY_REFINE_BAND_PX", 0)
     if band <= 0 or not mask.any():
         return mask
+    cap = cfg.get("BOUNDARY_REFINE_MAX_AREA_PX", 0)
+    if cap and int(mask.sum()) > cap:
+        return mask                     # big and already right: do not touch
     win = _bbox_window(mask, band + 2)
     if win is None:
         return mask
@@ -1148,7 +1180,12 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
 
     refined = []
     for m, src in zip(list(masks) + recovered, sources):
+        # Kept per instance so the session summary can say how many masks
+        # snapping actually moved and by how much. A refinement nobody can
+        # quantify is one nobody can judge, and judging it is the whole point.
+        before = int(m.sum())
         m = refine_boundary(m, score, cfg)
+        delta = int(m.sum()) - before
         # Anti-alias BEFORE the peaks that seed the split, so a jagged boundary
         # cannot manufacture a spurious extra growth point, and before the LEP
         # estimator, whose skeleton evidence is sensitive to boundary noise.
@@ -1163,10 +1200,10 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
         seed_peaks = (growth_peaks(m, cfg)
                       if cfg.get("SPLIT_TOUCHING_INSTANCES", True) else [])
         for part in split_touching_instances(m, seed_peaks, cfg):
-            refined.append((part, src))
+            refined.append((part, src, before, delta))
 
     instances = []
-    for m, src in refined:
+    for m, src, before, delta in refined:
         f = shape_features(m)
         if f is None:
             continue
@@ -1175,6 +1212,9 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, estimator=None):
         is_cluster = cls == "weed_cluster"
         inst = {
             "mask": m, "cls": cls, "cls_confidence": conf, "source": src,
+            # Signed pixel change from edge snapping, 0 when it was skipped by
+            # the size gate or disabled. Travels into instances.csv.
+            "refine_delta_px": delta, "pre_refine_area_px": before,
             "features": f, "points": treatment_points(m), "peaks": peaks,
             # A cluster has several growth points, so no single LEP applies.
             "lep_valid": not is_cluster,
@@ -1325,6 +1365,11 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                 # "sam" or "vegetation" (recall backstop) - keeps the two
                 # populations separable when auditing or weighting the data.
                 "source": inst.get("source", "sam"),
+                # Signed pixel change from edge snapping and the area it acted
+                # on. 0 when snapping is off or the size gate skipped it, so a
+                # non-zero value marks exactly the instances it touched.
+                "refine_delta_px": inst.get("refine_delta_px", 0),
+                "pre_refine_area_px": inst.get("pre_refine_area_px", 0),
                 "growth_stage": inst["growth_stage"],
                 "n_growth_peaks": len(inst.get("peaks", [])),
                 "lep_valid": int(inst.get("lep_valid", True)),
@@ -1420,6 +1465,32 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                   f"CLUSTER_MIN_AREA_PX and re-run - it is far cheaper than "
                   f"un-clustering them by hand in CVAT, and far cheaper than "
                   f"training a model that clusters by default.")
+
+    # WHAT EDGE SNAPPING ACTUALLY DID. Off by default, so this prints only when
+    # it is on - and then it reports the size of the change rather than
+    # asserting the change was good. Whether it was good is a question about the
+    # previews; #29 is the case where every number improved and the field masks
+    # got worse.
+    moved = [r for r in rows if r.get("refine_delta_px")]
+    if cfg.get("BOUNDARY_REFINE_BAND_PX", 0) > 0 and rows:
+        cap = cfg.get("BOUNDARY_REFINE_MAX_AREA_PX", 0)
+        eligible = [r for r in rows
+                    if not cap or (r.get("pre_refine_area_px") or 0) <= cap]
+        print(f"      edge snapping (band {cfg['BOUNDARY_REFINE_BAND_PX']} px, "
+              f"instances <= {cap or 'any'} px): {len(moved)} of "
+              f"{len(eligible)} eligible instance(s) changed")
+        if moved:
+            rel = sorted(r["refine_delta_px"] / max(1, r["pre_refine_area_px"])
+                         for r in moved)
+            mid = rel[len(rel) // 2]
+            print(f"        median area change {mid:+.1%} | "
+                  f"{sum(1 for v in rel if v < 0)} shrank, "
+                  f"{sum(1 for v in rel if v > 0)} grew")
+            print(f"      COMPARE THE PREVIEWS against a run with "
+                  f"BOUNDARY_REFINE_BAND_PX = 0 before keeping this. Small "
+                  f"weeds on pale, mottled soil are where the colour prior "
+                  f"false-positives (#24), so a mask that GREW a lot there is "
+                  f"the case to look at first.")
 
     # POOL AND FOLDER DISAGREE. Named, not just skipped - the only trace used to
     # be OpenCV's own warning and a frame count that quietly failed to match.
