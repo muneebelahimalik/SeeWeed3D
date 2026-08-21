@@ -479,7 +479,13 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # check existence up front, with an error naming which root is missing.
     # Validated first, before any export is parsed: a typo here should cost a
     # second, not a full load of every annotation file.
-    PROVENANCE = ("hand_corrected", "prelabel_unreviewed", "mixed")
+    # `pseudo_label` is a FOURTH kind and not a synonym for prelabel_unreviewed.
+    # A SAM prelabel comes from a different model with a different prior, so it
+    # is at least independent evidence; a pseudo-label is this model's own
+    # output fed back to it, and a val score computed against it measures
+    # self-consistency. The two must stay distinguishable months later.
+    PROVENANCE = ("hand_corrected", "prelabel_unreviewed", "pseudo_label",
+                  "mixed")
     if label_provenance not in PROVENANCE:
         raise SystemExit(
             f"ERROR: label_provenance must be one of {list(PROVENANCE)}; got "
