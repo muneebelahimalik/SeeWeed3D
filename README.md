@@ -131,6 +131,9 @@ off)**, `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 `docs/dataset_growth.md` (active learning, and how to grow the dataset well),
 **`docs/mixed_dataset_strategy.md` (how the mixed-scene dataset gets built, and
 why instance identity — not boundary quality — is the bottleneck)**,
+**`docs/training.md` (the complete record of Stage A training - which model,
+every setting changed from its default and why, and the defects that only
+appeared by running it)**,
 **`docs/stage_a_improvements.md` (what actually improves Stage A, and why an
 architecture swap today would measure the teacher)**,
 **`docs/new_machine_setup.md` (standing up a second training machine — and why
