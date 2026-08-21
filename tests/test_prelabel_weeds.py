@@ -319,8 +319,13 @@ def test_boundary_refinement_snaps_to_plant_evidence():
     score = vegetation_score(bgr, wd.CONFIG["EXG_THRESHOLD"],
                              wd.CONFIG["VEG_MIN_SATURATION"])
     # Edge snapping is off by default (PR #12 profile); opt in to test it.
-    refined = wd.refine_boundary(bloated, score, dict(wd.CONFIG,
-                                                     BOUNDARY_REFINE_BAND_PX=3))
+    # BOUNDARY_REFINE_MAX_AREA_PX=0 also opts OUT of the size gate: this plant is
+    # ~4,000 px, well above the 1500 px default, so the gate would skip it and
+    # this would be testing the gate rather than the snapping. The gate has its
+    # own tests in test_boundary_size_gate.py.
+    refined = wd.refine_boundary(bloated, score,
+                                 dict(wd.CONFIG, BOUNDARY_REFINE_BAND_PX=3,
+                                      BOUNDARY_REFINE_MAX_AREA_PX=0))
     # Closer to the true plant than the bloated input was.
     before = np.logical_xor(bloated, true_plant).sum()
     after = np.logical_xor(refined, true_plant).sum()
