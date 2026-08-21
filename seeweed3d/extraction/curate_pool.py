@@ -69,7 +69,7 @@ from common.progress import Progress  # noqa: E402
 # ##  DRY_RUN       -  True = report only, write nothing. Run this first.    ##
 # #############################################################################
 
-DATASET_ROOT = r"E:\Dataset_Vidalia\Vidalia_visit_1_2025_all_sessions"
+DATASET_ROOT = r"E:\Dataset_Vidalia\Weeds_20260108_1"
 DRY_RUN = False
 
 CONFIG = {

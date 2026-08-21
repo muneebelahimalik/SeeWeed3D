@@ -63,7 +63,7 @@ WEED_SESSIONS = [
 #: Keep it on the same drive as the images unless you have a reason not to -
 #: the manifest records absolute paths, so a dataset and its images that live
 #: on different drives are two things to keep in step instead of one.
-OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v1"
+OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v2"
 
 #: Sessions active learning must NEVER mine, and that never enter training.
 #:
@@ -136,8 +136,8 @@ CONFIG = dict(
     # Cut a real test set from a SECOND weed session the moment you have one.
     VAL_FRACTION=0.20,
     TEST_FRACTION=0.0,
-    BLOCKS_PER_SESSION=1,
-    GAP_FRAMES=8,
+    BLOCKS_PER_SESSION=3,
+    GAP_FRAMES=3,
 
     # NEVER change this between rounds. The split is deterministic for a seed,
     # so a session that was in test stays in test as the dataset grows - and a
