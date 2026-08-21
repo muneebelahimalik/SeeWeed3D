@@ -124,7 +124,10 @@ Other guides: `docs/extraction_quality.md` (**extraction fidelity — the
 lossless guarantees, what was measured, and what is not claimed**),
 `docs/dataset_pipeline.md` (extraction and selection),
 `docs/onion_prelabeling.md` and `docs/weed_prelabeling.md` (the SAM 3
-workflows), `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
+workflows), **`docs/sam_prelabeling.md` (the complete record of the prelabeling
+pipeline — every technique, its config key, its current value, and the
+measurement behind it, including everything that was built and then turned
+off)**, `docs/mixed_prelabeling.md` (scenes with both, and the mask logic),
 `docs/dataset_growth.md` (active learning, and how to grow the dataset well),
 **`docs/mixed_dataset_strategy.md` (how the mixed-scene dataset gets built, and
 why instance identity — not boundary quality — is the bottleneck)**,
