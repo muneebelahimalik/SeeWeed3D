@@ -64,6 +64,7 @@ from common.vegetation import (component_boxes, remove_small,  # noqa: E402
                                vegetation_mask, vegetation_score,
                                white_balance)
 from common.progress import Progress  # noqa: E402
+from common.masks import describe_mask_encoding, to_bool  # noqa: E402
 from common.ontology import (CLASS_COLORS_BGR, LEP_LABEL,  # noqa: E402
                              WEED_CLASSES, coco_categories, cvat_labels)
 from perception.lep import LEPEstimator, LEPResult, crop_context  # noqa: E402
@@ -430,7 +431,13 @@ def load_sam3(cfg):
 
 
 def _state_masks(state):
-    """Binary instance masks (original resolution) from a processor state."""
+    """Binary instance masks (original resolution) from a processor state.
+
+    The threshold is CHOSEN from what the array actually holds, not assumed.
+    `astype(bool)` alone keeps every non-zero value, so a probability or logit
+    mask inflates outward through its own soft edge - a boundary that sits
+    outside the plant in every direction, which nothing raises an error about.
+    See common/masks.py; the encoding is printed once per run."""
     masks = state.get("masks") if isinstance(state, dict) else None
     if masks is None:
         return []
@@ -440,7 +447,10 @@ def _state_masks(state):
         arr = arr[None]
     if arr.ndim != 3:
         return []
-    return [arr[i].astype(bool) for i in range(arr.shape[0]) if arr[i].ndim == 2]
+    note = describe_mask_encoding(arr, "SAM 3 (weeds)")
+    if note:
+        print(note)
+    return [to_bool(arr[i]) for i in range(arr.shape[0]) if arr[i].ndim == 2]
 
 
 def sam3_instances(predictor, image, cfg, exemplars=None):
