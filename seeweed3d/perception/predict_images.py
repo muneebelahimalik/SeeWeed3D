@@ -112,6 +112,13 @@ CONFIG = {
     # genuinely adjacent plants in a dense frame reach 0.5-0.6 and merging THOSE
     # costs a real weed its own treatment point. See common/dedup.py.
     "DEDUP_IOU": DEFAULT_DEDUP_IOU,
+
+    # Also write the predictions as COCO 1.0 beside predictions.json.
+    # evaluation/bench_mixed.py consumes it, so the model can be compared
+    # against the SAM prelabels on the same frames - and CVAT imports it
+    # directly, so a promising frame can be corrected with no second pass.
+    # Segmentation mode only; "full" mode's records are a different shape.
+    "WRITE_COCO": True,
 }
 
 # #############################################################################
@@ -330,6 +337,7 @@ def predict(cfg=None):
 
     records, counts, n_conflict = [], {}, 0
     n_dup, dup_labels = 0, {}
+    coco_frames = []
     for path in frames:
         bgr = cv2.imread(str(path))
         if bgr is None:
@@ -372,6 +380,11 @@ def predict(cfg=None):
                     "conf": c["CONF"], "mode": mode, "frames": records},
                    indent=2), encoding="utf-8")
 
+    if coco_frames:
+        n_poly = _write_coco(coco_frames, out_dir, str(ckpt), c["CONF"])
+        print(f"\n-> {out_dir / 'instances_default.json'}  "
+              f"({n_poly} instance(s), COCO 1.0)")
+
     print(f"\n  detections per class over {len(records)} frames:")
     for k in sorted(counts):
         print(f"    {k:<28}{counts[k]:>6}")
@@ -395,6 +408,59 @@ def predict(cfg=None):
           "NOT 'nothing was there'.\nFor recall, annotate a held-out session "
           "and run evaluation/eval_seg.py.")
     return records
+
+
+def _write_coco(frames, out_dir, checkpoint, conf):
+    """The model's own predictions as COCO, beside predictions.json.
+
+    TWO USES, AND THEY PULL THE SAME WAY. It is what evaluation/bench_mixed.py
+    consumes, so the model can be compared against the SAM prelabels on the same
+    frames; and it imports straight into CVAT, so a promising frame can be
+    corrected without a second inference pass.
+
+    `info.description` says these are MODEL PREDICTIONS. Every prelabeler here
+    stamps its own provenance for the same reason: six months on, a COCO file
+    with no provenance is indistinguishable from ground truth, and this project
+    has already had one silently treated as a different thing than it was."""
+    from annotation.mine_pool import mask_to_polygons
+    from common.ontology import coco_categories
+    from datetime import datetime, timezone
+
+    # The MODEL's class list, not the classes it happened to predict on these
+    # frames. A category absent because nothing triggered it still exists in the
+    # model's vocabulary, and a COCO whose categories change with the sample is
+    # not comparable with the next run's.
+    cats = coco_categories(list(frames[0][3].names))
+    cat_id = {c["name"]: c["id"] for c in cats}
+
+    images, anns, ann_id, n_inst = [], [], 1, 0
+    for img_id, (name, h, w, det) in enumerate(frames, start=1):
+        images.append({"id": img_id, "file_name": name, "height": int(h),
+                       "width": int(w)})
+        for i in range(len(det)):
+            cls = det.class_name(i)
+            if cls not in cat_id:
+                continue
+            polys = mask_to_polygons(det.masks[i])
+            if not polys:
+                continue
+            xs = [v for p in polys for v in p[0::2]]
+            ys = [v for p in polys for v in p[1::2]]
+            anns.append({
+                "id": ann_id, "image_id": img_id, "category_id": cat_id[cls],
+                "segmentation": polys, "iscrowd": 0,
+                "bbox": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
+                "area": float(np.count_nonzero(det.masks[i])),
+                "score": float(det.scores[i])})
+            ann_id += 1
+            n_inst += 1
+    (Path(out_dir) / "instances_default.json").write_text(json.dumps({
+        "info": {"description": "SeeWeed3D MODEL PREDICTIONS - not ground truth",
+                 "checkpoint": str(checkpoint), "conf": float(conf),
+                 "date_created": datetime.now(timezone.utc).isoformat()},
+        "licenses": [], "images": images, "annotations": anns,
+        "categories": cats}, indent=2), encoding="utf-8")
+    return n_inst
 
 
 def _build_pipeline(c, seg, device):

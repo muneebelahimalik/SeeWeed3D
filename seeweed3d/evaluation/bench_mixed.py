@@ -114,6 +114,63 @@ def _from_coco(doc):
     return {files[i]: per[i] for i in files}
 
 
+#: Words in a COCO `info.description` that mark a side as machine-generated.
+#: Every producer in this repo stamps its own provenance, so this recognises
+#: our own files rather than guessing at arbitrary ones.
+UNREVIEWED_MARKERS = ("prelabel", "model predictions")
+
+
+def source_provenance(path):
+    """What KIND of labels a side holds: "", "prelabels" or "predictions".
+
+    Returns "" when the file carries no provenance, which is the honest answer
+    for a hand-corrected export - CVAT writes its own info block and cannot
+    know."""
+    p = Path(path)
+    cands = ([p] if p.is_file() else
+             sorted(p.glob("**/instances_default.json")))
+    for c in cands:
+        try:
+            doc = json.loads(Path(c).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        desc = str((doc.get("info") or {}).get("description", "")).lower()
+        if "model predictions" in desc:
+            return "predictions"
+        if "prelabel" in desc:
+            return "prelabels"
+    return ""
+
+
+def provenance_warning(truth_path, pred_path):
+    """The caveat that has to sit beside these numbers, or None.
+
+    THE WORD "TRUTH" DOES REAL DAMAGE HERE. Comparing a model against SAM
+    prelabels is a legitimate and useful thing to do - it is the only comparison
+    available before anything is hand-corrected - but what it measures is
+    AGREEMENT BETWEEN TWO PROPOSALS, and neither side is evidence for the other.
+    Both can be wrong the same way, and here they are correlated by
+    construction: the model was trained on corrected SAM prelabels, so it
+    inherits the prelabeler's biases through its training data.
+
+    Reported rather than refused. The alternative to an imperfect ruler is
+    judging masks by eye, which is how a boundary pipeline that improved every
+    number shipped worse masks in the field (CHANGELOG #29)."""
+    kind = source_provenance(truth_path)
+    if not kind:
+        return None
+    what = ("SAM prelabels" if kind == "prelabels" else "model predictions")
+    return (f"  [!] --truth is {what}, NOT hand-corrected ground truth.\n"
+            f"      Every number below is AGREEMENT BETWEEN TWO PROPOSALS. It "
+            f"cannot tell you which side is right, and a high score is also "
+            f"what two sources wrong in the SAME way produce.\n"
+            f"      If --pred is this project's model, the two are correlated "
+            f"by construction: it was trained on corrected SAM prelabels, so it "
+            f"inherits the prelabeler's biases. Read agreement as a FLOOR on "
+            f"disagreement, and use the per-frame worst rows to choose what to "
+            f"annotate.")
+
+
 def load_side(path):
     """A truth or prediction source, whichever of the two forms it is."""
     p = Path(path)
@@ -262,10 +319,19 @@ def main(argv=None):
             "paired by image FILE NAME; check both sides describe the same "
             "frames.")
     print(format_report(summary))
+    # AFTER the numbers, not before: a caveat printed first is scrolled past,
+    # and this one changes what every line above means.
+    warn = provenance_warning(a.truth, a.pred)
+    if warn:
+        print()
+        print(warn)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(
-            {"summary": summary, "frames": frames}, indent=2, default=float),
+            {"summary": summary, "frames": frames,
+             "truth_provenance": source_provenance(a.truth),
+             "pred_provenance": source_provenance(a.pred)},
+            indent=2, default=float),
             encoding="utf-8")
         print(f"\n  -> {a.out}")
     return 0
