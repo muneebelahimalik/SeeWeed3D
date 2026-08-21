@@ -195,10 +195,9 @@ def main(cfg=None):
     ds = Path(c["DATASET_DIR"])
     man = ds / "seg_manifest.json"
     if not man.exists():
-        raise SystemExit(
-            f"ERROR: {man} not found.\n"
-            f"Build the dataset first: edit and run "
-            f"seeweed3d/training/make_dataset.py")
+        from training.train_model import missing_dataset_hint
+        raise SystemExit(f"ERROR: {man} not found.\n"
+                         f"{missing_dataset_hint(ds)}")
 
     from training.train_model import _resolve_images_root
     images = _resolve_images_root(c, man)

@@ -189,13 +189,14 @@ def test_only_apache_licensed_variants_are_offered():
 # --------------------------------------------------------------------------- #
 # the config runner
 # --------------------------------------------------------------------------- #
-def test_the_config_runner_points_at_make_dataset_when_the_dataset_is_absent(
-        tmp_path):
+def test_the_config_runner_says_what_would_build_an_absent_dataset(tmp_path):
+    """Both trainers share the hint, so both must have stopped naming the
+    shared make_dataset.py runner."""
     tm = load_script("training/train_model_rfdetr.py")
     c = dict(tm.CONFIG)
     c.update({"DATASET_DIR": str(tmp_path / "nothing"),
               "IMAGES_ROOT": str(tmp_path)})
-    with pytest.raises(SystemExit, match="make_dataset"):
+    with pytest.raises(SystemExit, match="nothing will ever build it"):
         tm.main(c)
 
 

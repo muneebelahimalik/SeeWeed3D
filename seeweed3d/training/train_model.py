@@ -162,6 +162,72 @@ CONFIG = {
 # #############################################################################
 
 
+def _dataset_runners():
+    """{OUT_DIR: module name} for every runner under training/datasets/.
+
+    Read with the AST rather than by importing. Importing would execute config
+    modules to fetch one constant, and `weeds_train` imports the very module
+    that raises this error - a circular import triggered only on the error
+    path, which is the worst place to find one."""
+    import ast
+    out = {}
+    d = Path(__file__).resolve().parent / "datasets"
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.py")):
+        # The BUILD runners only. A `_train`/`_mine`/`_look` module reads
+        # OUT_DIR from its build rather than defining one.
+        if f.stem.startswith("_") or f.stem == "common":
+            continue
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if "OUT_DIR" in names and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                out[node.value.value] = f.stem
+    return out
+
+
+def _norm(p):
+    """Compare Windows and posix paths without caring which separator or case."""
+    return str(p).replace("\\", "/").rstrip("/").lower()
+
+
+def missing_dataset_hint(dataset_dir):
+    """What to run to build `dataset_dir`, named exactly.
+
+    The old message said "edit and run make_dataset.py". That is the SHARED
+    runner, and editing it to build one dataset overwrites the config of every
+    other - which is the reason training/datasets/ exists at all. Naming the
+    wrong script in an error is worse than naming none, because the error is
+    read at exactly the moment someone is willing to do what it says.
+
+    When nothing builds this path, that is the more interesting failure: a
+    DATASET_DIR matching no OUT_DIR is a typo or a stale edit, and listing the
+    ones that DO exist turns a dead end into a one-line fix."""
+    runners = _dataset_runners()
+    want = _norm(dataset_dir)
+    for out_dir, mod in runners.items():
+        if _norm(out_dir) == want:
+            return (f"Build it first:\n"
+                    f"    python -m seeweed3d.training.datasets.{mod}")
+    if runners:
+        known = "\n".join(f"    {m:<18} -> {o}"
+                           for o, m in sorted(runners.items(),
+                                              key=lambda kv: kv[1]))
+        return ("No dataset runner writes that path, so nothing will ever "
+                "build it.\nEither DATASET_DIR has drifted from the build "
+                "that produced it, or the\nrunner's OUT_DIR was changed and "
+                "not rebuilt. Known builds:\n" + known)
+    return ("Build the dataset first with a runner under "
+            "seeweed3d/training/datasets/.")
+
+
 def _resolve_images_root(c, manifest_path):
     """CONFIG['IMAGES_ROOT'] if set, else whatever make_dataset.py already
     recorded in seg_manifest.json - so a multi-source build does not need its
@@ -216,8 +282,7 @@ def main(cfg=None):
     if not man_path.exists():
         raise SystemExit(
             f"ERROR: {man_path} not found.\n"
-            f"Build the dataset first: edit and run "
-            f"seeweed3d/training/make_dataset.py")
+            f"{missing_dataset_hint(ds)}")
     images = _resolve_images_root(c, man_path)
 
     run = Path(c["RUN_DIR"])

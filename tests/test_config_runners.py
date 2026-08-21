@@ -255,11 +255,15 @@ def test_unreadable_json_is_skipped_not_fatal(tmp_path):
 # --------------------------------------------------------------------------- #
 # train_model guard rails
 # --------------------------------------------------------------------------- #
-def test_training_without_a_dataset_points_at_make_dataset(tmp_path):
+def test_training_without_a_dataset_says_what_would_build_it(tmp_path):
+    """It used to point at make_dataset.py - the SHARED runner, whose config
+    editing one dataset overwrites for every other. A tmp path is built by no
+    runner at all, so the error has to say that rather than name a script that
+    would not help."""
     c = dict(tm.CONFIG)
     c.update({"DATASET_DIR": str(tmp_path / "nothing"),
               "IMAGES_ROOT": str(tmp_path)})
-    with pytest.raises(SystemExit, match="make_dataset"):
+    with pytest.raises(SystemExit, match="nothing will ever build it"):
         tm.main(c)
 
 
