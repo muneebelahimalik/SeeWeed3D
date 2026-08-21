@@ -887,9 +887,23 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
               f"   {bal['frame_share']['val']:>6.0%}  <- the share to match")
         skewed = sp.class_balance_problems(bal)
         for split, cls, got, want, n in skewed:
+            held = bal["classes"][cls][split]
             print(f"  [!] {cls} holds {got:.0%} of its {n} instances in "
                   f"{split}, which is {len(by_split[split])} of "
                   f"{len(frames)} frames ({want:.0%}).")
+            # The two directions cost different things, and saying only "not
+            # 19%" invites the same fix for both. Over-representation is the
+            # expensive one: it takes the examples out of training as well.
+            if got > want:
+                print(f"      CONCENTRATED: the class is starved in training "
+                      f"AND over-weighted in the score, so a low AP here is "
+                      f"partly the split's doing. This is the costly "
+                      f"direction.")
+            else:
+                print(f"      THIN: training sees nearly all of it, but its AP "
+                      f"is measured on {held} instance(s) and will move between "
+                      f"rounds on noise. Cheaper than the reverse - a worse "
+                      f"estimate of a better-trained class.")
         if skewed:
             print(f"      The best-balanced of the {blocks_per_session}-block "
                   f"layouts was already chosen. A class confined to one stretch "

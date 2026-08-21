@@ -725,10 +725,26 @@ only test a threshold has to pass.
 
 A class confined to one stretch has no layout that fixes it, and the build says
 so rather than pretending: the lever is **more blocks paid for with a smaller
-gap**, since blocks cost one seam each. On this session that trade is nearly
-free, because the 60-frame separation floor is already unreachable at any
-affordable gap — so gap frames buy no independence here and can be spent on
-balance, which is achievable.
+gap**, since blocks cost one seam each.
+
+Rebuilt at 3 blocks and a 3-frame gap, `grass_weed` landed at 21% against a 19%
+target and `other_weed` moved from 34% *over* to 8% *under* — with its training
+instances up from **145 to 199**.
+
+That flip is the reason the objective is asymmetric. A class concentrated in val
+is starved in training *and* over-weighted in the score; a class thin in val
+trains on nearly everything and merely gets a noisy AP. So over-representation
+is weighted 2× when the layout is chosen, and the warning names which direction
+it hit. Same rule this project already applies to crop safety: an asymmetric
+pair of errors is never averaged into one number.
+
+**A stride estimate here was also wrong.** The docs had the pool curated at
+~stride 2, concluding the 60-video-frame separation floor was unreachable
+without spending half the dataset. Measured: gap 8 gives 240, gap 3 gives 95 —
+about 30 video frames per pool frame, so `GAP_FRAMES=2` already clears it. Gap
+frames are cheap on this pool, which is why 3 blocks at gap 3 costs only 12
+buffered frames. Clearing the floor still only means val is not the same
+photograph as train; it shares the session's light and soil regardless.
 
 [`docs/weed_active_learning.md`](docs/weed_active_learning.md) carries the
 numbers and the blocks-vs-gap table.

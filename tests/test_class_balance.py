@@ -272,3 +272,47 @@ def test_class_balance_survives_an_entirely_empty_dataset():
     bal = sp.class_balance({"train": [], "val": [], "test": []}, {})
     assert bal["classes"] == {}
     assert not sp.class_balance_problems(bal)
+
+
+# --------------------------------------------------------------------------- #
+# The two directions are not equally bad
+# --------------------------------------------------------------------------- #
+def test_over_representation_is_penalised_harder_than_under():
+    """Concentrated in val costs training data AND weights the score; thin in
+    val costs only measurement quality. Scoring them equally would let the
+    layout trade the expensive harm for the cheap one at par."""
+    ids = frames(50)
+    counts = {f: Counter({"w": 10}) for f in ids}
+    split = {"train": ids[:40], "val": ids[40:], "test": []}
+
+    over = dict(counts)
+    for i, f in enumerate(ids):
+        over[f] = Counter({"w": 30 if i >= 40 else 5})
+    under = dict(counts)
+    for i, f in enumerate(ids):
+        under[f] = Counter({"w": 1 if i >= 40 else 25})
+
+    # Both drift from the 20% frame share, in opposite directions.
+    over_share = sp.class_balance(split, over)["classes"]["w"]["val_share"]
+    under_share = sp.class_balance(split, under)["classes"]["w"]["val_share"]
+    assert over_share > 0.2 > under_share
+
+    a = sp._worst_class_skew(split, over)
+    b = sp._worst_class_skew(split, under)
+    assert a > b, ("an over-represented class must score worse than an "
+                   f"equally-drifted thin one: {a:.3f} vs {b:.3f}")
+
+
+def test_the_layout_prefers_thin_to_concentrated_when_it_must_choose():
+    """The real outcome on this session: other_weed moved from 34% of val
+    (145 train instances) to 8% (199). A worse estimate of a better-trained
+    class is the right trade, and the objective has to actually make it."""
+    ids = frames(60)
+    counts = clustered(ids)
+    out = sp.assign_frame_blocks(ids, 0.2, 0.0, gap_frames=8, n_blocks=1,
+                                 seed=1234, class_counts_by_frame=counts)
+    got, want = val_share(out, counts, "other_weed")
+    assert got < want, "the concentrated layout was available and was rejected"
+    bal = sp.class_balance({k: out[k] for k in sp.SPLITS}, counts)
+    assert bal["classes"]["other_weed"]["train"] > (
+        bal["classes"]["other_weed"]["val"])
