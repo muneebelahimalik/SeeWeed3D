@@ -100,4 +100,7 @@ CONFIG = dict(
 # #############################################################################
 
 if __name__ == "__main__":
-    raise SystemExit(predict(CONFIG))
+    # NOT `raise SystemExit(predict(...))`. predict() returns the per-frame
+    # records, and SystemExit prints a non-integer argument - so the whole
+    # prediction dump landed in the terminal on top of the summary.
+    predict(CONFIG)

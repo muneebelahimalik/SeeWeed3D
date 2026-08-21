@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np                                            # noqa: E402
+from common.dedup import DEFAULT_DEDUP_IOU                    # noqa: E402
 from common.ontology import CROP_CLASS                        # noqa: E402
 
 # #############################################################################
@@ -97,6 +98,20 @@ CONFIG = {
 
     # Colour key in the corner, so an overlay can be read on its own.
     "LEGEND": True,
+
+    # Drop a detection that duplicates a higher-scoring one at this mask IoU.
+    # 0 disables it and restores the raw model output.
+    #
+    # RF-DETR predicts a SET: every query proposes independently and nothing
+    # makes two queries that found the same plant agree on what it is, so the
+    # same mask comes back under two class labels at two scores. Seen on a real
+    # weed session in 6 of 16 frames, at box IoU 1.000. A laser weeder then
+    # fires twice at one plant and a weed elsewhere goes untreated.
+    #
+    # Deliberately HIGH: the observed duplicates are near-identical, while two
+    # genuinely adjacent plants in a dense frame reach 0.5-0.6 and merging THOSE
+    # costs a real weed its own treatment point. See common/dedup.py.
+    "DEDUP_IOU": DEFAULT_DEDUP_IOU,
 }
 
 # #############################################################################
@@ -290,7 +305,7 @@ def mask_overlap_conflicts(det):
 def predict(cfg=None):
     import cv2
     from common.torch_utils import require_device
-    from perception.segmenter import build_segmenter
+    from perception.segmenter import build_segmenter, dedup_detections
 
     c = dict(CONFIG if cfg is None else cfg)
     device = require_device(c["DEVICE"])
@@ -314,6 +329,7 @@ def predict(cfg=None):
           f"mode {mode}")
 
     records, counts, n_conflict = [], {}, 0
+    n_dup, dup_labels = 0, {}
     for path in frames:
         bgr = cv2.imread(str(path))
         if bgr is None:
@@ -324,6 +340,12 @@ def predict(cfg=None):
             rec, det, conflicts = _run_full(pipe, path, bgr)
         else:
             det = seg(bgr)
+            # BEFORE the conflict check and before the overlay, so the picture,
+            # the JSON and the counts all describe the same set of instances.
+            det, dup = dedup_detections(det, c.get("DEDUP_IOU"))
+            n_dup += len(dup)
+            for d in dup:
+                dup_labels[d["class_name"]] = dup_labels.get(d["class_name"], 0) + 1
             conflicts = mask_overlap_conflicts(det)
             rec = {"instances": [
                 {"class_name": det.class_name(i),
@@ -356,6 +378,18 @@ def predict(cfg=None):
     if not counts:
         print("    (nothing above the confidence threshold)")
     print(f"  weeds overlapping predicted onion: {n_conflict}")
+    if n_dup:
+        # RF-DETR is a set-prediction model: two queries can find the same plant
+        # and disagree about what it is, so the same mask comes back twice under
+        # two labels. Named because a class pair recurring here is a labelling
+        # question, not a threshold one.
+        total = n_dup + sum(counts.values())
+        body = ", ".join(f"{k}={v}" for k, v in
+                         sorted(dup_labels.items(), key=lambda kv: -kv[1])[:5])
+        print(f"  [i] suppressed {n_dup} duplicate detection(s) of {total} "
+              f"({n_dup / total:.0%}) at IoU >= "
+              f"{c.get('DEDUP_IOU') if c.get('DEDUP_IOU') is not None else DEFAULT_DEDUP_IOU}"
+              f" - dropped labels: {body}")
     print(f"\n-> {out_dir / 'overlays'}\n-> {out_dir / 'predictions.json'}")
     print("\nNo ground truth here, so an empty frame means 'found nothing', "
           "NOT 'nothing was there'.\nFor recall, annotate a held-out session "
