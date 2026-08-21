@@ -686,6 +686,55 @@ only route to output better than the masks trained on.
 
 ---
 
+## 18. Round 0 of the weed loop, and a low AP that was the split's fault
+
+The first weed model trained on 42 frames, early-stopped at epoch 73, and
+reported `mAP@50 = 0.701`, `mAP@50:95 = 0.410`, small-weed recall 0.767 at
+conf 0.25. Two classes scored 0.557 and 0.458; `other_weed` scored **0.214**.
+
+`other_weed` was not harder. It was in the wrong place:
+
+| class | train | val | val share of instances |
+|---|---|---|---|
+| cutleaf_evening_primrose | 642 | 73 | 10% |
+| grass_weed | 327 | 26 | 7% |
+| **other_weed** | **145** | **74** | **34%** |
+| *frames* | *42* | *10* | ***19%*** |
+
+The val block landed on an `other_weed`-dense stretch of the drive, so the
+class was **starved in training and over-weighted in the score at once**, and
+the mean AP carried the difference. Nothing in a per-class AP table can show
+this: the table reports the score, never the split that produced it.
+
+The cause was that the block layout is rotated by a CRC32 of the session key.
+With one block there are exactly three layouts and nothing was choosing the
+balanced one — the rotation existed to stop the test set being made entirely of
+drive-ends (#split rotation), and it solved that while staying blind to
+contents.
+
+`splits.py` now lays out all three rotations and keeps whichever puts each
+class's val share closest to that split's share of the frames, consulting
+ground-truth label counts only — never a model, never a score. Ties keep the
+layout the seed would have picked, so builds with nothing wrong with them do
+not silently re-draw. `prepare_dataset` prints the balance table beside the
+frame split and flags any class drifting more than 1.5×.
+
+**The tolerance came from the case, not from taste.** The skew above is a ratio
+of 1.79. A rounder-looking 2.0 would have said nothing about it, which is the
+only test a threshold has to pass.
+
+A class confined to one stretch has no layout that fixes it, and the build says
+so rather than pretending: the lever is **more blocks paid for with a smaller
+gap**, since blocks cost one seam each. On this session that trade is nearly
+free, because the 60-frame separation floor is already unreachable at any
+affordable gap — so gap frames buy no independence here and can be spent on
+balance, which is achievable.
+
+[`docs/weed_active_learning.md`](docs/weed_active_learning.md) carries the
+numbers and the blocks-vs-gap table.
+
+---
+
 ## Lessons this project paid for
 
 Each of these cost a run, a dataset, or a batch of annotation time.
@@ -730,3 +779,9 @@ Each of these cost a run, a dataset, or a batch of annotation time.
 9. **A pipeline that skips input silently is worse than one that crashes.**
    Seven of nine sessions vanished with no output at all, and the run looked
    like a success.
+
+10. **A low per-class AP accuses the model, and the split is often guilty.**
+    `other_weed` scored 0.214 while holding 34% of its instances in a 19% val
+    split — starved in training and over-weighted in the score at the same
+    time. An AP table reports the score and never the split that produced it,
+    so the check has to run at build time, where the split can still change.

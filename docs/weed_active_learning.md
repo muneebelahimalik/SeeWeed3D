@@ -83,6 +83,69 @@ does double duty: it selects the checkpoint *and* tracks round-to-round change,
 which is what the loop needs. Optimistic as an absolute score, consistent as a
 relative one.
 
+### A contiguous block takes whatever the drive put there
+
+Round 0 trained cleanly and reported a per-class table that looked like one
+weak class:
+
+| class | AP 50:95 | IoU |
+|---|---|---|
+| cutleaf_evening_primrose | 0.557 | 0.808 |
+| grass_weed | 0.458 | 0.795 |
+| **other_weed** | **0.214** | 0.707 |
+
+It was not one weak class. It was one badly placed one:
+
+| class | train | val | val share of instances |
+|---|---|---|---|
+| cutleaf_evening_primrose | 642 | 73 | 10% |
+| grass_weed | 327 | 26 | 7% |
+| **other_weed** | **145** | **74** | **34%** |
+| *frames* | *42* | *10* | ***19%*** |
+
+Val holds 19% of the frames and 34% of every `other_weed` instance in the
+dataset. The class is **starved in training and over-weighted in the score at
+the same time**, and the mean AP carries the difference.
+
+**None of this is visible in an AP table** — the table reports the score, never
+the split that produced it. So the build now prints the class balance next to
+the frame split, and flags any class whose share drifts by more than 1.5×.
+
+> The tolerance is set from this case, not from taste. The skew above is a
+> ratio of 1.79; a rounder-looking 2.0 would have said nothing about it.
+
+**The layout is now chosen rather than hashed.** With one block there are
+exactly three possible layouts, and the rotation used to be picked by a CRC32
+of the session key — blind to what was in the frames. It now lays out all three
+and keeps whichever puts each class's val share closest to the frame share.
+Only ground-truth label counts are consulted, never a model or a score, so this
+is ordinary stratification applied to the one axis a contiguous split still has
+free. Ties keep the layout the seed would have picked.
+
+### When balance and separation compete, balance wins here
+
+A class confined to one stretch of the drive has *no* layout that fixes it —
+three rotations cannot un-cluster it. The lever is **more blocks, paid for with
+a smaller gap**: each block samples a different stretch, so a clustered class
+stops being all-or-nothing.
+
+On a synthetic reproduction of this exact skew:
+
+| blocks | gap | train | val | binned | `other_weed` val share (want ~19%) |
+|---|---|---|---|---|---|
+| 1 | 8 | 42 | 10 | 8 | **4%** |
+| 2 | 4 | 39 | 9 | 12 | 4% |
+| 3 | 4 | 36 | 8 | 16 | **24%** |
+
+Blocks cost one seam each, so buying them without lowering `GAP_FRAMES` spends
+the dataset on buffers instead — which is exactly the mistake the 3/12 settings
+made the first time.
+
+**Here that trade is nearly free**, for the reason in the next section: the
+60-frame separation floor is out of reach at any affordable gap on this
+session, so gap frames are not buying independence and can be spent on balance,
+which *is* achievable.
+
 ### The separation floor is unreachable here, and that is worth knowing
 
 The build warns when a val frame sits closer than 60 video frames to a training

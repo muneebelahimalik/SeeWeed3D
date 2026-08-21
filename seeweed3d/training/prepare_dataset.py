@@ -820,9 +820,14 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         by_session = {}
         for f in sorted(frames, key=lambda f: f.item_id):
             by_session.setdefault(f.session_id, []).append(f.item_id)
+        # What each frame CONTAINS, so the block layout can be chosen for class
+        # balance instead of hashed. Ground truth only - no model is consulted.
+        counts_by_frame = {f.item_id: Counter(i.class_name for i in f.instances)
+                           for f in frames}
         frame_split = sp.assign_frame_blocks_per_session(
             by_session, val_fraction, test_fraction, gap_frames=gap_frames,
-            n_blocks=blocks_per_session, seed=seed)
+            n_blocks=blocks_per_session, seed=seed,
+            class_counts_by_frame=counts_by_frame)
         split_map = {"train": [i.session_id for i in infos], "val": [],
                      "test": []}
         where = {}
@@ -864,6 +869,43 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             print(f"      Raise GAP_FRAMES until this clears - the cost is a "
                   f"handful of annotated frames, which is far cheaper than a "
                   f"test score that is wrong in the optimistic direction.")
+
+        # WHICH CLASSES LANDED WHERE. A contiguous block takes whatever the
+        # drive put there, and a class that clusters along the pass ends up
+        # concentrated in one split - under-trained AND over-weighted in the
+        # score at the same time. That is invisible in a per-class AP table,
+        # which is why it is printed here, where the split can still be changed.
+        bal = sp.class_balance(by_split, counts_by_frame)
+        print(f"\n      Class balance (share of each class's instances):")
+        print(f"        {'class':<28}{'train':>7}{'val':>7}{'test':>7}"
+              f"   val share")
+        for cls, row in bal["classes"].items():
+            print(f"        {cls:<28}{row['train']:>7}{row['val']:>7}"
+                  f"{row['test']:>7}   {row['val_share']:>6.0%}")
+        print(f"        {'FRAMES':<28}{len(by_split['train']):>7}"
+              f"{len(by_split['val']):>7}{len(by_split['test']):>7}"
+              f"   {bal['frame_share']['val']:>6.0%}  <- the share to match")
+        skewed = sp.class_balance_problems(bal)
+        for split, cls, got, want, n in skewed:
+            print(f"  [!] {cls} holds {got:.0%} of its {n} instances in "
+                  f"{split}, which is {len(by_split[split])} of "
+                  f"{len(frames)} frames ({want:.0%}).")
+        if skewed:
+            print(f"      The best-balanced of the {blocks_per_session}-block "
+                  f"layouts was already chosen. A class confined to one stretch "
+                  f"of the drive has no layout that fixes it, so read its AP as "
+                  f"a statement about the split rather than about the model.")
+            print(f"      The lever is MORE BLOCKS, paid for with a SMALLER "
+                  f"GAP: each block samples a different stretch, so a clustered "
+                  f"class stops being all-or-nothing. Raise BLOCKS_PER_SESSION "
+                  f"and lower GAP_FRAMES together - blocks cost one seam each, "
+                  f"and buying them without lowering the gap spends the dataset "
+                  f"on buffers instead.")
+            if too_close:
+                print(f"      Here that trade is nearly free: the separation "
+                      f"floor above is already out of reach at this gap, so "
+                      f"the gap is not buying independence and can be spent on "
+                      f"balance, which is achievable.")
 
         print(f"      Every session contributes to every split, so no class is "
               f"missing from training and the test set is drawn from ALL of "
