@@ -390,6 +390,11 @@ CONFIG = {
 # proposes grass_weed, weed_cluster, or the DEFAULT_SPECIES_CLASS fallback.
 AUTO_CLASSES = {"grass_weed", "weed_cluster", "other_weed"}
 
+#: Cluster share above which the run says something. The one hand-corrected weed
+#: session carries 2 clusters in 1,444 instances (0.1%), so anything in whole
+#: percent is a different regime and worth a look before it becomes the dataset.
+CLUSTER_SHARE_WARN = 0.02
+
 # =============================================================================
 
 
@@ -1228,14 +1233,22 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
              # Recall bookkeeping: how much of the vegetation prior actually
              # ended up inside an exported instance, and how many instances
              # only exist because the backstop recovered them.
-             "recovered": 0, "veg_px": 0, "veg_covered_px": 0}
+             "recovered": 0, "veg_px": 0, "veg_covered_px": 0, "missing": 0}
     per_class = {c: 0 for c in WEED_CLASSES}
+    missing = []
 
     prog = Progress(len(frames), f"[{sid}]", unit="frames")
     for fn in frames:
         rgb_path = session_dir / "rgb" / fn
         bgr = cv2.imread(str(rgb_path))
         if bgr is None:
+            # COUNTED AND NAMED, not just skipped. pool.csv listing a frame
+            # whose image is absent means the pool and the folder disagree, and
+            # the only visible trace was OpenCV's own warning plus a frame count
+            # that quietly failed to match the pool size. A pipeline that skips
+            # input silently is worse than one that crashes.
+            stats["missing"] += 1
+            missing.append(fn)
             prog.update(note="missing frame")
             continue
         proc = white_balance(bgr, cfg["WB_CAST_RATIO"]) if cfg["WHITE_BALANCE"] else bgr
@@ -1381,6 +1394,44 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
     print(f"  [{sid}] {stats['frames']} frames | {stats['instances']} weed instances "
           f"| {stats['flagged']} flagged | {stats['empty']} with no instances")
     print(f"      provisional classes: {dist or 'none'}")
+
+    # THE CLUSTER RATE IS A POLICY NUMBER, NOT A STATISTIC.
+    #
+    # `weed_cluster` means "no separable single LEP", and every instance
+    # carrying it is a plant that will never be targeted individually. A
+    # prelabel arriving already marked as a cluster biases the annotator toward
+    # accepting it, so the rate the prelabeler proposes becomes the rate the
+    # dataset carries, which becomes the rate the trained model predicts at
+    # runtime. Systematic label bias is reproduced, not averaged out.
+    #
+    # Printed as a share because the raw count says nothing on its own: 800 is
+    # alarming in 1,400 instances and unremarkable in 100,000.
+    n_cluster = per_class.get("weed_cluster", 0)
+    if stats["instances"] and n_cluster:
+        share = n_cluster / stats["instances"]
+        print(f"      weed_cluster: {n_cluster} of {stats['instances']} "
+              f"instances ({share:.1%})")
+        if share >= CLUSTER_SHARE_WARN:
+            print(f"  [!] That is a high cluster rate. Each one is a plant that "
+                  f"gets no individual LEP, so check a few previews before "
+                  f"accepting them: a cluster is correct when weeds genuinely "
+                  f"cannot be separated, not when separating them is tedious.")
+            print(f"      If they look separable, raise CLUSTER_MIN_PEAKS or "
+                  f"CLUSTER_MIN_AREA_PX and re-run - it is far cheaper than "
+                  f"un-clustering them by hand in CVAT, and far cheaper than "
+                  f"training a model that clusters by default.")
+
+    # POOL AND FOLDER DISAGREE. Named, not just skipped - the only trace used to
+    # be OpenCV's own warning and a frame count that quietly failed to match.
+    if stats["missing"]:
+        shown = ", ".join(missing[:4]) + ("..." if len(missing) > 4 else "")
+        print(f"  [!] {stats['missing']} frame(s) in pool.csv could not be read "
+              f"from rgb/ and were skipped: {shown}")
+        print(f"      The pool lists frames the folder does not have. Re-run "
+              f"extraction, or re-curate, so the two agree - otherwise every "
+              f"later stage silently works on a smaller set than the pool "
+              f"claims.")
+
     # Recall readout. In a weed-only scene vegetation IS plants, so vegetation
     # left outside every exported instance is, to a first approximation, weeds
     # the annotator will never be shown. Watch this number, not the instance
