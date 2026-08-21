@@ -52,6 +52,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.masks import describe_mask_encoding, to_bool  # noqa: E402
 from common.ontology import CROP_CLASS  # noqa: E402
 from common.progress import Progress  # noqa: E402
 from common.vegetation import component_boxes, remove_small  # noqa: E402
@@ -267,27 +268,28 @@ def load_sam3(cfg):
     return {"model": model, "processor": processor, "device": device, "torch": torch}
 
 
-_SHAPE_LOGGED = False
 
 
 def _state_masks(state):
     """Pull binary masks out of a processor state dict as a list of 2-D bool
     arrays, whatever nesting SAM used ([N,H,W], [N,1,H,W], [H,W], ...)."""
-    global _SHAPE_LOGGED
     masks = state.get("masks") if isinstance(state, dict) else None
     if masks is None:
         return []
     arr = masks.detach().cpu().numpy() if hasattr(masks, "detach") else np.asarray(masks)
-    if not _SHAPE_LOGGED:
-        print(f"[DEBUG] SAM raw masks: shape={getattr(arr, 'shape', None)} "
-              f"dtype={getattr(arr, 'dtype', None)}")
-        _SHAPE_LOGGED = True
     arr = np.squeeze(arr)                 # drop singleton dims, e.g. [N,1,H,W]->[N,H,W]
     if arr.ndim == 2:                     # a single mask -> add batch dim
         arr = arr[None]
     if arr.ndim != 3:
         return []
-    return [arr[i].astype(bool) for i in range(arr.shape[0])
+    # Was a shape+dtype line, which could not answer the question it was there
+    # for: a float array says nothing about whether astype(bool) is the right
+    # cut. The RANGE does, so describe_mask_encoding reports that and the
+    # threshold it chose. See common/masks.py.
+    note = describe_mask_encoding(arr, "SAM 3 (onions)")
+    if note:
+        print(note)
+    return [to_bool(arr[i]) for i in range(arr.shape[0])
             if arr[i].ndim == 2 and arr[i].size > 0]
 
 
