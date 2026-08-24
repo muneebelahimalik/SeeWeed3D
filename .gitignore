@@ -14,15 +14,35 @@ batches/
 
 # Model weights (huge; download separately, keep out of git)
 *.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
 *.safetensors
 models/
+
+# Experiment output. ALL of it is regenerable from a run directory in one
+# command (evaluation/analyze_run.py), and none of it is reviewable in a diff.
+# mlruns/ reached a commit carrying a 3.8 MB report.html - the largest tracked
+# file in the repo - because tracking.py writes its store beside the run and
+# nothing here excluded it.
+mlruns/
+mlflow.db
+runs/
+tb/
+*.tfevents.*
+analysis/
 
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
 
-# Shell mishaps: a mistyped redirect creates a file named after the flags
-# ("tatus --short" from `git s > tatus --short`). One reached a commit.
+# Shell mishaps: a mistyped redirect creates a file named after whatever
+# followed it. Two kinds have happened here - a truncated subcommand
+# ("tatus --short" from `git s > tatus --short`), and a bare numeric ARGUMENT
+# VALUE ("0.85" from a `--conf > 0.85`). One of the first kind reached a commit.
 tatus*
 status*
+[0-9]
+[0-9].[0-9]*
