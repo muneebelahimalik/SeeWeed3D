@@ -206,3 +206,40 @@ def test_the_report_records_the_thresholds_it_used(run):
     assert rep["accept_threshold"] == pl.ACCEPT_SCORE
     assert rep["n_hand_corrected"] == 40
     assert rep["pseudo_budget"] == 80
+
+
+# --------------------------------------------------------------------------- #
+# The crash this cost a GPU pass to find
+# --------------------------------------------------------------------------- #
+def test_it_does_not_build_a_mask_per_instance(run):
+    """bench_mixed._from_coco materialises one FULL-FRAME mask per annotation.
+    That is right for a benchmark of a few frames and fatal here: a real weed
+    session came back with 79 frames and 2,840 instances, which at 1242x2208
+    bool is 7.8 GB held at once - and the process died AFTER the GPU pass had
+    already been paid for.
+
+    The scorer only ever needs the union per frame, so importing that helper is
+    the bug itself."""
+    src = (ROOT / "training" / "datasets" / "weeds_selftrain.py").read_text()
+    assert "_from_coco" not in src, (
+        "importing _from_coco rebuilds a full-frame mask per instance")
+    assert "fillPoly" in src, "the union has to be rasterised in one array"
+
+
+def test_a_frame_dense_with_instances_still_scores(run, tmp_path, monkeypatch):
+    """Peak memory is not directly assertable, but the shape of the failure is:
+    many instances on one frame. Under the old path this allocated one array
+    per instance."""
+    mod, out = run
+    pred = Path(mod.PREDICTIONS)
+    doc = json.loads((pred / "instances_default.json").read_text())
+    base = doc["annotations"][0]
+    nxt = max(a["id"] for a in doc["annotations"]) + 1
+    for i in range(300):
+        a = dict(base)
+        a["id"] = nxt + i
+        doc["annotations"].append(a)
+    (pred / "instances_default.json").write_text(json.dumps(doc))
+    assert mod.main() == 0
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    assert rep["summary"]["n_frames"] >= 7
