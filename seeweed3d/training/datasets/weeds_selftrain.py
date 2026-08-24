@@ -177,7 +177,6 @@ def _write_batch(frames, per_frame, out_dir, names, provenance, link=True):
 
 
 def main():
-    from evaluation.bench_mixed import _from_coco
     import cv2
 
     if SESSION in set(HOLDOUT_TEST):
@@ -219,31 +218,25 @@ def main():
         raise SystemExit(f"ERROR: inference wrote no {coco}.")
 
     doc = json.loads(coco.read_text(encoding="utf-8"))
-    by_file = _from_coco(doc)
     names = [c["name"] for c in doc.get("categories", [])]
-    scores_by_file = {}
-    polys_by_file = {}
-    for im in doc.get("images", []):
-        fn = Path(im["file_name"]).name
-        scores_by_file[fn] = []
-        polys_by_file[fn] = ([], [], [])
-    id_to_file = {im["id"]: Path(im["file_name"]).name
-                  for im in doc.get("images", [])}
     cat_name = {c["id"]: c["name"] for c in doc.get("categories", [])}
+
+    # Grouped by image, and NOTHING is rasterised yet. A mask per instance at
+    # full frame size is 2.7 MB, so a real session - 79 frames, 2,840 instances
+    # - is 7.8 GB held at once, and the process dies after the GPU pass has
+    # already been paid for. The scorer only ever needs the UNION per frame, so
+    # one frame's polygons are rasterised into one array and released.
+    anns_by_image = {}
     for a in doc.get("annotations", []):
-        fn = id_to_file.get(a["image_id"])
-        if fn is None:
-            continue
-        scores_by_file[fn].append(float(a.get("score", 1.0)))
-        seg = a.get("segmentation") or []
-        polys_by_file[fn][0].append(seg[0] if seg else [])
-        polys_by_file[fn][1].append(cat_name.get(a["category_id"], ""))
-        polys_by_file[fn][2].append(float(a.get("area", 0.0)))
+        anns_by_image.setdefault(a["image_id"], []).append(a)
 
     roots = [images_root, str(pred_dir), str(pred_dir / "cvat_ready")]
     qualities, per_frame, descriptors, order = [], {}, [], []
-    print(f"\n  scoring {len(by_file)} frame(s) from {SESSION}")
-    for fn, (masks, classes) in sorted(by_file.items()):
+    from training.active_learning import appearance_descriptor
+    print(f"\n  scoring {len(doc.get('images', []))} frame(s) from {SESSION}")
+
+    for im in sorted(doc.get("images", []), key=lambda i: i["file_name"]):
+        fn = Path(im["file_name"]).name
         img = _find_image(fn, roots)
         if img is None:
             print(f"  [skip] image not found for {fn}")
@@ -252,14 +245,29 @@ def main():
         if bgr is None:
             print(f"  [skip] unreadable: {img}")
             continue
-        q = pl.frame_quality(bgr, masks, scores_by_file.get(fn, []))
+
+        h, w = bgr.shape[:2]
+        union = np.zeros((h, w), np.uint8)
+        polys, classes, areas, scores = [], [], [], []
+        for a in anns_by_image.get(im["id"], []):
+            seg = a.get("segmentation") or []
+            poly = seg[0] if seg else []
+            if not poly:
+                continue
+            pts = np.asarray(poly, np.float64).reshape(-1, 2)
+            if len(pts) >= 3:
+                cv2.fillPoly(union, [np.round(pts).astype(np.int32)], 1)
+            polys.append(poly)
+            classes.append(cat_name.get(a["category_id"], ""))
+            areas.append(float(a.get("area", 0.0)))
+            scores.append(float(a.get("score", 1.0)))
+
+        q = pl.frame_quality(bgr, [union.astype(bool)], scores)
         q["frame"] = fn
         qualities.append(q)
-        p, c, ar = polys_by_file.get(fn, ([], [], []))
-        per_frame[fn] = {"image_path": str(img), "shape": bgr.shape[:2],
-                         "polys": p, "classes": c, "areas": ar,
+        per_frame[fn] = {"image_path": str(img), "shape": (h, w),
+                         "polys": polys, "classes": classes, "areas": areas,
                          "quality": q}
-        from training.active_learning import appearance_descriptor
         descriptors.append(appearance_descriptor(bgr))
         order.append(fn)
 
