@@ -243,3 +243,101 @@ def test_a_frame_dense_with_instances_still_scores(run, tmp_path, monkeypatch):
     assert mod.main() == 0
     rep = json.loads((out / "selftrain_report.json").read_text())
     assert rep["summary"]["n_frames"] >= 7
+
+
+# --------------------------------------------------------------------------- #
+# What CVAT needs, in the folder rather than in a chat message
+# --------------------------------------------------------------------------- #
+def test_each_batch_carries_the_cvat_label_schema(run):
+    """Without the schema there is nothing for the COCO's category NAMES to
+    match against, and CVAT matches by name."""
+    mod, out = run
+    mod.main()
+    for which in ("accept", "review"):
+        p = out / which / "weed_cvat_labels.json"
+        assert p.is_file(), which
+        assert json.loads(p.read_text()), which
+
+
+def test_the_schema_is_the_full_ontology_not_the_models_classes(run):
+    """The model predicts three classes. An annotator must be able to correct an
+    instance INTO one it cannot predict - and without onion_plant, someone who
+    finds crop in a weed-only frame is forced to call it a weed, which is the
+    one error this project cannot afford."""
+    mod, out = run
+    mod.main()
+    names = {l["name"] for l in
+             json.loads((out / "accept" / "weed_cvat_labels.json").read_text())}
+    predicted = {c["name"] for c in
+                 json.loads((out / "accept" / "instances_default.json").read_text())
+                 ["categories"]}
+    assert {"wild_radish", "weed_cluster", "onion_plant"} <= names
+    assert predicted < names, "the schema must be wider than what was predicted"
+
+
+def test_each_batch_carries_its_own_instructions(run):
+    """A batch opened three weeks later, or on another machine, has to say what
+    to do with itself - including that the schema goes in BEFORE the import."""
+    mod, out = run
+    mod.main()
+    txt = (out / "accept" / "README.txt").read_text()
+    assert "Raw label editor" in txt and "COCO 1.0" in txt
+    assert "Datumaro 1.0" in txt
+    assert "duplicate" in txt          # the silent failure the order prevents
+
+
+# --------------------------------------------------------------------------- #
+# Using the round you meant to use
+# --------------------------------------------------------------------------- #
+def test_newest_trained_round_ignores_a_round_with_no_checkpoint(tmp_path):
+    """An interrupted run leaves the directory and no weights. Calling that the
+    latest model points everything downstream at a file that is not there."""
+    import importlib
+    mod = importlib.import_module("training.datasets.weeds_selftrain")
+    for n, has_ckpt in ((0, True), (1, True), (2, False)):
+        d = tmp_path / f"weeds_r{n}"
+        d.mkdir()
+        if has_ckpt:
+            (d / "checkpoint_best_total.pth").write_bytes(b"x")
+    assert mod.newest_trained_round(tmp_path) == 1
+
+
+def test_no_runs_directory_is_not_an_error(tmp_path):
+    import importlib
+    mod = importlib.import_module("training.datasets.weeds_selftrain")
+    assert mod.newest_trained_round(tmp_path / "nope") is None
+    assert mod.stale_round_warning(tmp_path / "nope", 0) is None
+
+
+def test_a_newer_trained_round_is_reported(tmp_path):
+    import importlib
+    mod = importlib.import_module("training.datasets.weeds_selftrain")
+    for n in (0, 1, 2):
+        d = tmp_path / f"weeds_r{n}"
+        d.mkdir()
+        (d / "checkpoint_best_total.pth").write_bytes(b"x")
+    warn = mod.stale_round_warning(tmp_path, 0)
+    assert warn and "weeds_r2" in warn and "ROUND = 2" in warn
+
+
+def test_being_on_the_newest_round_is_silent(tmp_path):
+    """Firing when nothing is wrong is how a warning gets ignored."""
+    import importlib
+    mod = importlib.import_module("training.datasets.weeds_selftrain")
+    d = tmp_path / "weeds_r3"
+    d.mkdir()
+    (d / "checkpoint_best_total.pth").write_bytes(b"x")
+    assert mod.stale_round_warning(tmp_path, 3) is None
+    assert mod.stale_round_warning(tmp_path, 4) is None
+
+
+def test_the_warning_allows_a_deliberate_older_round(tmp_path):
+    """Comparing rounds means loading an old checkpoint on purpose, so this
+    reports and never refuses."""
+    import importlib
+    mod = importlib.import_module("training.datasets.weeds_selftrain")
+    for n in (0, 5):
+        d = tmp_path / f"weeds_r{n}"
+        d.mkdir()
+        (d / "checkpoint_best_total.pth").write_bytes(b"x")
+    assert "legitimate" in mod.stale_round_warning(tmp_path, 0)

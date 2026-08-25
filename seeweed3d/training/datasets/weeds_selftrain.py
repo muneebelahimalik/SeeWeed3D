@@ -37,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
-from common.ontology import coco_categories  # noqa: E402
+from common.ontology import coco_categories, cvat_labels  # noqa: E402
 from training import pseudo_label as pl  # noqa: E402
 from training.datasets.weeds import (HOLDOUT_TEST,  # noqa: E402
                                      OUT_DIR as WEEDS_OUT_DIR,
@@ -100,6 +100,85 @@ N_HAND = 0
 # #############################################################################
 
 IMG_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
+#: Written into every batch folder. A batch that travels to another machine, or
+#: is opened three weeks later, carries its own instructions - the round trip has
+#: four steps and getting the order wrong silently creates a DUPLICATE label in
+#: CVAT rather than filling the one the prelabels were meant to correct.
+CVAT_STEPS = """SeeWeed3D - {provenance}
+{n_images} frame(s), {n_inst} instance(s)
+
+CVAT ROUND TRIP
+---------------
+1. New task in CVAT. Upload the images from  cvat_ready/
+2. BEFORE importing anything: open the task's Raw label editor and paste the
+   whole contents of  weed_cvat_labels.json
+   The schema must exist FIRST. CVAT matches annotations to labels BY NAME, so
+   importing into a task with no matching label silently creates a duplicate
+   instead of filling the one you meant.
+3. Import  instances_default.json  as "COCO 1.0".
+4. Correct, then Export the task as "Datumaro 1.0" into the session's
+   annotations/ folder.
+
+WHAT TO CORRECT, IN ORDER OF VALUE
+----------------------------------
+* WHAT IS MISSING. A pre-labelled frame biases you toward accepting what is
+  drawn and not noticing what is absent, and a missed weed is this project's
+  failure mode. Sweep the frame for green with no outline on it first.
+* SPECIES. The model proposes only what it was trained on. cutleaf_evening_
+  primrose vs wild_radish is an appearance call it cannot make reliably.
+* CLUSTERS. weed_cluster means "no separable single LEP" - every one is a plant
+  that never gets targeted individually. Split it if separating is merely
+  tedious rather than impossible.
+* BOUNDARIES LAST. Big weeds are already accurate; small ones are where the
+  error is, and even there the crown matters more than the leaf margin.
+
+The class list here is the FULL ontology, not the three classes the model can
+predict. That is deliberate: you must be able to correct an instance into a
+class the model has never seen.
+"""
+
+
+
+def newest_trained_round(runs_root):
+    """The highest weeds_rN under `runs_root` that actually holds a checkpoint.
+
+    A directory alone is not a round: an interrupted run leaves weeds_r3/ with
+    tensorboard events and no weights, and treating that as "the latest model"
+    would send every later step at a checkpoint that does not exist."""
+    best = None
+    root = Path(runs_root)
+    if not root.is_dir():
+        return None
+    for d in root.glob("weeds_r*"):
+        if not (d / "checkpoint_best_total.pth").exists():
+            continue
+        try:
+            n = int(d.name.split("weeds_r", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        best = n if best is None else max(best, n)
+    return best
+
+
+def stale_round_warning(runs_root, round_in_use):
+    """A warning when a NEWER trained round exists than the one being used.
+
+    ROUND is edited by hand in weeds_train.py, and every other runner reads it
+    from there. Train round 2 and forget to bump it, and this scores round 1's
+    predictions while the report, the batch folder and the pseudo-labels are all
+    named for a model that is no longer the best one - silently, because a
+    checkpoint that exists loads fine."""
+    newest = newest_trained_round(runs_root)
+    if newest is None or newest <= int(round_in_use):
+        return None
+    return (f"  [!] ROUND is {round_in_use}, but weeds_r{newest} has a trained "
+            f"checkpoint.\n"
+            f"      This is about to use the OLDER model. If that is not "
+            f"deliberate, set ROUND = {newest} in weeds_train.py - every runner "
+            f"reads it from there.\n"
+            f"      Using an older model is legitimate when comparing rounds; "
+            f"it is a mistake when you meant 'the latest'.")
 
 
 def _hand_frame_count(dataset_dir):
@@ -173,11 +252,30 @@ def _write_batch(frames, per_frame, out_dir, names, provenance, link=True):
         "info": {"description": provenance},
         "licenses": [], "images": images, "annotations": anns,
         "categories": cats}, indent=2), encoding="utf-8")
+
+    # THE FULL ONTOLOGY, not this model's reduced class list. The model can
+    # only predict what it was trained on - three classes right now - but the
+    # annotator has to be able to correct an instance INTO a class it cannot
+    # predict. Without wild_radish in the schema there is no way to fix a
+    # misread one, and without onion_plant an annotator who finds crop in a
+    # weed-only frame is forced to call it a weed. That is the one error this
+    # project cannot afford.
+    (out / "weed_cvat_labels.json").write_text(
+        json.dumps(cvat_labels(), indent=2), encoding="utf-8")
+
+    (out / "README.txt").write_text(CVAT_STEPS.format(
+        provenance=provenance, n_images=len(images), n_inst=len(anns)),
+        encoding="utf-8")
     return len(images), len(anns)
 
 
 def main():
     import cv2
+
+    warn = stale_round_warning(RUNS_ROOT, ROUND)
+    if warn:
+        print()
+        print(warn)
 
     if SESSION in set(HOLDOUT_TEST):
         raise SystemExit(
