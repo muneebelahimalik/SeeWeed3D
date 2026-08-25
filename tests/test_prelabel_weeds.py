@@ -792,16 +792,26 @@ def test_outlines_are_red_by_default():
 
 
 def test_the_class_palette_can_be_restored():
+    """Asks the ontology what the colour IS rather than pinning a literal. The
+    value was incidental and changed once already - other_weed was #aaaaaa, the
+    same grey predict_images draws an UNKNOWN class in, so the most-predicted
+    class rendered as 'not in the ontology'."""
+    from common.ontology import CLASS_COLORS_BGR
     bgr = np.full((120, 120, 3), (60, 60, 60), np.uint8)
     cfg = dict(_PREVIEW_CFG, PREVIEW_OUTLINE_BGR=None)
-    assert (170, 170, 170) in _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
+    drawn = _drawn_colors(wd.overlay(bgr, _one_instance(), 1.0, cfg))
+    assert CLASS_COLORS_BGR["other_weed"] in drawn
 
 
 def test_the_preview_colour_does_not_touch_the_cvat_label_schema():
     """The whole point of the override: CVAT's colours come from the ontology,
     so recolouring a JPG must not recolour an annotation class."""
-    from common.ontology import CLASS_COLORS_BGR
-    assert CLASS_COLORS_BGR["other_weed"] == (170, 170, 170)
+    from common.ontology import CLASS_COLORS, CLASS_COLORS_BGR
+    # The preview's fixed outline is pure red. The schema must not carry it,
+    # and the BGR palette must stay the mirror of the hex one - the two are
+    # edited in the same block and drifted apart once.
+    b, g, r = CLASS_COLORS_BGR["other_weed"]
+    assert CLASS_COLORS["other_weed"].lower() == f"#{r:02x}{g:02x}{b:02x}"
     schema = json.dumps(wd.weed_cvat_labels())
     assert "#ff0000" not in schema.lower()
 

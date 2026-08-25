@@ -1,0 +1,17 @@
+[
+ {"name":"cutleaf_evening_primrose","id":33,"color":"#ff8c00","type":"polygon","attributes":[
+  {"id":105,"name":"growth_stage","input_type":"select","mutable":true,"values":["cotyledon","2-leaf","3-5-leaf","later","unknown"],"default_value":"unknown"},
+  {"id":106,"name":"lep_visibility","input_type":"select","mutable":true,"values":["visible","partially_occluded_inferable","not_visible"],"default_value":"visible"},
+  {"id":107,"name":"targetable","input_type":"select","mutable":true,"values":["yes","no","uncertain"],"default_value":"yes"},
+  {"id":108,"name":"difficulty","input_type":"select","mutable":true,"values":["normal","overlapping","blurred","shadowed","wet","truncated"],"default_value":"normal"},
+  {"id":109,"name":"species_note","input_type":"text","mutable":true,"values":[""],"default_value":""}]},
+ {"name":"wild_radish","id":34,"color":"#ff6037","type":"polygon","attributes":[]},
+ {"name":"grass_weed","id":35,"color":"#ffcc00","type":"polygon","attributes":[]},
+ {"name":"weed_cluster","id":36,"color":"#8a2be2","type":"polygon","attributes":[]},
+ {"name":"other_weed","id":37,"color":"#3d3df5","type":"polygon","attributes":[]},
+ {"name":"onion_plant","id":38,"color":"#33ddff","type":"polygon","attributes":[]},
+ {"name":"weed_LEP","id":39,"color":"#fffc00","type":"points","attributes":[
+  {"id":135,"name":"lep_visibility","input_type":"select","mutable":true,"values":["visible","partially_occluded_inferable"],"default_value":"partially_occluded_inferable"}]},
+ {"name":"ignore_region","id":40,"color":"#000000","type":"polygon","attributes":[
+  {"id":136,"name":"reason","input_type":"select","mutable":false,"values":["severe_blur","ambiguity","labeling_uncertainty","out_of_range"],"default_value":"ambiguity"}]}
+]
