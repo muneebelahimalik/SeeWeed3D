@@ -66,10 +66,19 @@ BATCHES_ROOT = r"E:\Dataset_Vidalia\batches"
 #: look at one session and mine another without noticing.
 POOL_ROOT = WEED_POOL_ROOT
 
-#: The checkpoint doing the ranking - the model trained on what you have so far.
+#: The checkpoint doing the ranking - the model trained on what you have so far,
+#: which is the PREVIOUS round: mining round N ranks with the model round N-1
+#: produced, because round N's model does not exist until this batch is
+#: corrected and trained on.
+#:
+#: Derived from ROUND rather than written out. It was hard-coded to weeds_r0,
+#: so bumping ROUND to 2 moved the output folder and left the ranking model at
+#: round 0 - a drift that produces a complete, plausible batch chosen by a model
+#: two rounds stale, and nothing about the run would have said so.
+#:
 #: rfdetr writes checkpoint_best_total.pth; use _total, never _ema (rfdetr keeps
 #: three files and _total is copied from whichever actually won).
-CHECKPOINT = ntpath.join(RUNS_ROOT, "weeds_r0",
+CHECKPOINT = ntpath.join(RUNS_ROOT, f"weeds_r{max(0, ROUND - 1)}",
                          "checkpoint_best_total.pth")
 
 CONFIG = dict(

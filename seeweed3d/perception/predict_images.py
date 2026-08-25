@@ -332,6 +332,16 @@ def predict(cfg=None):
     mode = c.get("MODE", "segmentation")
     pipe = _build_pipeline(c, seg, device) if mode == "full" else None
 
+    # THE CHECKPOINT, NAMED, WITH ITS DATE. "Which model just ran" is the first
+    # thing anyone asks of a prediction folder, and every path here is derived
+    # from a ROUND edited by hand three files away - so the run has to say it
+    # rather than leave it to be reconstructed. The mtime distinguishes two
+    # checkpoints that share a filename, which every round's does.
+    import datetime as _dt
+    st = ckpt.stat()
+    print(f"  model : {ckpt}")
+    print(f"          {st.st_size / 1e6:.0f} MB, trained "
+          f"{_dt.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M}")
     print(f"  {len(frames)} frames | {c['BACKEND']} | conf {c['CONF']} | "
           f"mode {mode}")
 

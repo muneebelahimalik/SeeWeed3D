@@ -216,3 +216,54 @@ def test_look_paths_are_absolute():
     import ntpath
     for key in ("IMAGES", "CHECKPOINT", "OUT_DIR"):
         assert ntpath.isabs(weeds_look.CONFIG[key]), key
+
+
+# --------------------------------------------------------------------------- #
+# Which model each runner loads
+# --------------------------------------------------------------------------- #
+def test_every_runner_derives_its_checkpoint_from_one_round():
+    """RUNS_ROOT and ROUND live in weeds_train.py and everything else imports
+    them, so bumping the round moves training, inference, mining and
+    self-training together. A path written out by hand in one of them is how
+    they drift."""
+    from training.datasets import weeds_look, weeds_selftrain
+    for path in (weeds_train.CONFIG["RUN_DIR"],
+                 weeds_look.CONFIG["CHECKPOINT"],
+                 weeds_mine.CONFIG["CHECKPOINT"],
+                 weeds_selftrain.PREDICTIONS):
+        assert path.startswith(weeds_train.RUNS_ROOT), path
+
+
+def test_mining_ranks_with_the_PREVIOUS_rounds_model():
+    """Round N's model does not exist until round N's batch is corrected and
+    trained on, so mining round N must rank with round N-1.
+
+    This was hard-coded to weeds_r0: bumping ROUND to 2 moved the output folder
+    and left the ranking model at round 0. The batch would still have been
+    complete and plausible - chosen by a model two rounds stale - and nothing
+    in the run would have said so."""
+    assert f"weeds_r{weeds_mine.ROUND - 1}" in weeds_mine.CONFIG["CHECKPOINT"]
+    assert f"weeds_round{weeds_mine.ROUND}" in weeds_mine.CONFIG["OUT_DIR"]
+
+
+def test_mining_at_round_zero_does_not_ask_for_round_minus_one():
+    import ntpath
+    assert ntpath.isabs(weeds_mine.CONFIG["CHECKPOINT"])
+    assert "weeds_r-1" not in weeds_mine.CONFIG["CHECKPOINT"]
+
+
+def test_every_runner_uses_the_total_checkpoint_not_the_ema():
+    """rfdetr keeps three files and _total is copied from whichever actually
+    won, so naming _ema silently scores the loser."""
+    from training.datasets import weeds_look
+    for path in (weeds_look.CONFIG["CHECKPOINT"], weeds_mine.CONFIG["CHECKPOINT"]):
+        assert path.endswith("checkpoint_best_total.pth"), path
+
+
+def test_the_run_names_the_model_it_loaded():
+    """"Which model just ran" is the first thing anyone asks of a prediction
+    folder, and every path is derived from a ROUND edited by hand three files
+    away. The run has to say it rather than leave it to be reconstructed."""
+    src = (ROOT / "perception" / "predict_images.py").read_text(encoding="utf-8")
+    assert 'print(f"  model : {ckpt}")' in src
+    assert "st_mtime" in src, "the date distinguishes two rounds' checkpoints"
