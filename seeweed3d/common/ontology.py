@@ -79,7 +79,12 @@ CLASS_COLORS = {
     "wild_radish":              "#ff6037",
     "grass_weed":               "#ffcc00",
     "weed_cluster":             "#8a2be2",
-    "other_weed":               "#aaaaaa",
+    # NOT #aaaaaa. That is the exact grey predict_images uses for "a class not
+    # in the ontology", so the model's MOST-predicted class was rendering as the
+    # unknown-class colour - and against dry soil, stubble and shadow it is the
+    # one colour that vanishes. This value is what the deployed CVAT tasks
+    # already use, so old and new tasks agree.
+    "other_weed":               "#3d3df5",
     "onion_plant":              "#33ddff",
 }
 
@@ -89,7 +94,7 @@ CLASS_COLORS_BGR = {
     "wild_radish":              (55, 96, 255),
     "grass_weed":               (0, 204, 255),
     "weed_cluster":             (226, 43, 138),
-    "other_weed":               (170, 170, 170),
+    "other_weed":               (245, 61, 61),      # BGR of #3d3df5
     "onion_plant":              (255, 221, 51),
 }
 
@@ -175,7 +180,12 @@ def cvat_labels(classes=None, include_lep=True, shape_type="polygon"):
             "attributes": [
                 {"name": "lep_visibility", "input_type": "select", "mutable": True,
                  "values": ["visible", "partially_occluded_inferable"],
-                 "default_value": "visible"}]})
+                 # The CAUTIOUS default, matching the deployed CVAT schema. An
+                 # annotator who drops a LEP point and moves on should leave
+                 # behind "I inferred this", not "I could see it": defaulting to
+                 # `visible` records a certainty nobody asserted, and every
+                 # untouched point then claims the crown was in view.
+                 "default_value": "partially_occluded_inferable"}]})
     labels.append({"name": IGNORE_LABEL, "type": shape_type, "color": "#000000",
                    "attributes": [
                        {"name": "reason", "input_type": "select", "mutable": False,
