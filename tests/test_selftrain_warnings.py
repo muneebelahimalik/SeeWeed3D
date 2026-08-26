@@ -171,6 +171,6 @@ def test_the_runner_prints_it_after_the_batch_counts():
     them rather than scrolled off above."""
     import inspect
     from training.datasets import weeds_selftrain as st
-    src = inspect.getsource(st.main)
+    src = inspect.getsource(st._emit)
     assert "stride_redundancy_warning" in src
     assert src.index("review/") < src.index("stride_redundancy_warning")
