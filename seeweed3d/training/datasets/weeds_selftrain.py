@@ -14,14 +14,22 @@ not exist yet, and writes one subfolder per session:
 
 plus a pooled selftrain_report.json and NEXT_STEPS.txt at the top.
 
-MORE SESSIONS, NOT A SMALLER STRIDE
------------------------------------
-One drive is a few hundred near-identical frames. Scoring it at stride 5 gives
-79 "frames" carrying about 6 frames of distinct ground - and unlike a split,
-where being too close only flatters a score, pseudo-labels get WEIGHTED, so an
-error on one plant enters the training set once per near-copy. So the stride
-defaults to the project's own separation floor and the way to get more data is
-to point this at more drives.
+LOOK AT EVERY FRAME, EXPORT A SEPARATED SUBSET
+----------------------------------------------
+Sampling and separation are different decisions, and one stride does the worse
+half of each. So INFER_STRIDE is 1 - a GPU pass over a drive is minutes and a
+frame the model never saw cannot be chosen even if it was the best one in its
+stretch - and MIN_FRAME_GAP separates at SELECTION time, keeping the
+best-scoring frame in each neighbourhood.
+
+The separation is not optional bookkeeping. Unlike a split, where frames that
+sit too close merely flatter a score, pseudo-labels get WEIGHTED: an error on
+one plant enters the training set once per near-copy. It applies to review/ too,
+where each near-copy is a person correcting the same plant a second time.
+
+One drive still cannot supply a round - 393 frames is thirteen seconds of
+driving - so the way to get more data is more drives, which is why this scores
+every eligible session by default.
 
 ONE SUBFOLDER PER SESSION, NOT ONE POOLED BATCH
 -----------------------------------------------
@@ -73,9 +81,9 @@ from training.splits import MIN_SEAM_SEPARATION  # noqa: E402
 
 #: THE SESSIONS TO SCORE. Empty = every session in the pool that is neither
 #: held out nor already in the training build. That default is the useful one:
-#: one drive is a few hundred near-identical frames and cannot supply a round
-#: on its own, so "as many frames as possible" means MORE SESSIONS, not a
-#: smaller stride within one.
+#: one drive is a few hundred frames covering seconds of driving, so "as many
+#: frames as possible" means MORE DRIVES - see MIN_FRAME_GAP for why it does
+#: not mean more frames from the same one.
 #:
 #: A session already in training is excluded automatically, read from the
 #: build's own manifest rather than from a list kept in step by hand.
@@ -87,16 +95,31 @@ SESSIONS = []
 IMAGES = ""
 
 #: Inference settings, used ONLY when predictions have to be generated.
-#: 0 = every frame found.
+#: 0 = every frame found, 1 = no stride. Look at EVERYTHING by default: a GPU
+#: pass over a drive is minutes, the overlays are worth having, and a frame the
+#: model never saw cannot be chosen even if it was the best one in its stretch.
 #:
-#: STRIDE IS THE SETTING THAT MATTERS, and it defaults to the project's own
-#: floor for two frames not being the same photograph. Consecutive ZED frames
-#: are near-identical, and unlike a split - where being too close only flatters
-#: a score - pseudo-labels get WEIGHTED, so an error on one plant enters the
-#: training set once per near-copy. At stride 5 a 393-frame drive yields 79
-#: frames carrying about 6 frames of distinct ground.
+#: This is NOT how near-duplicates are kept out of the training set - see
+#: MIN_FRAME_GAP. Sampling and separation are different decisions and a single
+#: stride does the worse half of each.
 INFER_LIMIT = 0
-INFER_STRIDE = MIN_SEAM_SEPARATION
+INFER_STRIDE = 1
+
+#: HOW FAR APART TWO EXPORTED FRAMES MUST BE, in video frames. Defaults to the
+#: project's own floor for two frames not being the same photograph.
+#:
+#: Applied when frames are SELECTED, not when they are sampled, so every frame
+#: is scored and the best one in each neighbourhood is the one kept. That is
+#: strictly better than a coarse stride, which cannot know that frame 31 was
+#: the good one because it never looked at it.
+#:
+#: It matters more for pseudo-labels than for a split. A split that is too
+#: close reports an optimistic score; pseudo-labels get WEIGHTED, so an error
+#: on one plant enters the training set once per near-copy. It matters for
+#: review/ too, where each near-copy is a human correcting the same plant again.
+#:
+#: 0 disables it - and the run says so, loudly, every time.
+MIN_FRAME_GAP = MIN_SEAM_SEPARATION
 
 #: Below a deployment threshold on purpose: a mask the model nearly drew is
 #: evidence about where it is unsure, and the scorer needs to see it to judge
@@ -110,8 +133,8 @@ INFER_CONF = 0.25
 #:
 #: Inside it, ONE SUBFOLDER PER SESSION. Pooling every session into a single
 #: batch would be one less CVAT task and would break the round trip: the build
-#: takes one session folder per source, and session identity is what the gap
-#: accounting and the split logic are computed from. A corrected export has to
+#: takes one session folder per source, and session identity is what the split
+#: logic and the seam accounting are computed from. A corrected export has to
 #: go back to the drive it came from.
 OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"), "selftrain")
 
@@ -214,36 +237,41 @@ def stale_round_warning(runs_root, round_in_use):
             f"it is a mistake when you meant 'the latest'.")
 
 
-def stride_redundancy_warning(stride, n_accepted, n_hand=None):
-    """A warning when the accepted frames are not as many frames as they look.
+def separation_warning(min_gap, n_accepted, n_hand=None):
+    """A warning when exported frames are allowed closer than the floor.
 
-    Consecutive ZED frames are near-identical, so a count of pseudo-label frames
-    is only a count of distinct ground if they are far enough apart. The project
-    already has a number for that - splits.MIN_SEAM_SEPARATION, the floor below
-    which two frames are treated as the same photograph - and INFER_STRIDE is
-    set independently of it, in a different file, with nothing connecting them.
+    This used to be about INFER_STRIDE, which was wrong once sampling and
+    separation became separate settings: inferring over every frame is good, and
+    a warning that fired on it would have to be ignored to get any work done -
+    at which point it stops being read at all.
 
-    This matters more here than in a split. A split that is too close reports an
-    optimistic score; pseudo-labels that are too close get WEIGHTED, so a
-    systematic error on one plant enters the training set once per near-copy and
-    the next round learns it that many times over."""
-    stride = int(stride or 1)
-    if stride >= MIN_SEAM_SEPARATION or n_accepted <= 0:
+    What actually matters is MIN_FRAME_GAP, because that is what governs the
+    frames that reach the training set. The project already has a number for it,
+    splits.MIN_SEAM_SEPARATION, and MIN_FRAME_GAP is set in a different file
+    with nothing connecting the two.
+
+    Lowering it is legitimate - a short drive cannot yield much at 60 - but it
+    has a cost that is invisible in the output: a split that is too close only
+    reports an optimistic score, while pseudo-labels get WEIGHTED, so an error
+    on one plant enters the training set once per near-copy."""
+    min_gap = int(min_gap or 0)
+    if min_gap >= MIN_SEAM_SEPARATION or n_accepted <= 0:
         return None
-    repeat = MIN_SEAM_SEPARATION / stride
-    distinct = max(1, round(n_accepted * stride / MIN_SEAM_SEPARATION))
-    tail = (f"\n      They will be weighted as {n_accepted} against {n_hand} "
-            f"hand-corrected frame(s)." if n_hand else "")
-    return (f"  [!] INFER_STRIDE is {stride}, but {MIN_SEAM_SEPARATION} video "
-            f"frames is this project's floor for two\n"
-            f"      frames not being the same photograph "
+    if min_gap <= 0:
+        return (f"  [!] MIN_FRAME_GAP is 0: no separation at all. These "
+                f"{n_accepted} frame(s) may be near-identical,\n"
+                f"      and each copy is weighted in training - one plant's "
+                f"error learned as many times over.")
+    repeat = MIN_SEAM_SEPARATION / min_gap
+    return (f"  [!] MIN_FRAME_GAP is {min_gap}, below the {MIN_SEAM_SEPARATION} "
+            f"video frames this project treats as\n"
+            f"      the floor for two frames not being the same photograph "
             f"(splits.MIN_SEAM_SEPARATION).\n"
-            f"      So these {n_accepted} accepted frame(s) carry roughly "
-            f"{distinct} frame(s) of distinct ground - the\n"
-            f"      same plant appears in about {repeat:.0f} of them, and every "
-            f"error in it repeats {repeat:.0f} times.{tail}\n"
-            f"      Raise INFER_STRIDE to {MIN_SEAM_SEPARATION} and re-run if "
-            f"you want the count to mean frames.")
+            f"      Up to {repeat:.0f} of these {n_accepted} frame(s) can be "
+            f"the same ground, and each copy is\n"
+            f"      weighted in training"
+            + (f" against {n_hand} hand-corrected frame(s)" if n_hand else "")
+            + ".")
 
 
 def trained_sessions(dataset_dir):
@@ -509,10 +537,28 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
     for q in qualities:
         buckets[pl.classify(q, ACCEPT, REVIEW)].append(q["frame"])
 
-    # Diversity BEFORE the budget cut, so the frames that survive are spread
-    # across the drive rather than clustered on one easy stretch.
+    # SEPARATION FIRST, on both halves. Everything was inferred and scored, so
+    # this is a choice among frames rather than a stride that never looked -
+    # and it applies to review/ as much as to accept/, because there each
+    # near-copy is a person correcting the same plant a second time.
+    order = scored["order"]
+    gap = max(0, int(MIN_FRAME_GAP) // max(1, int(INFER_STRIDE)))
+    def _score_of(f):
+        return per_frame[f]["quality"]["score"]
+    n_acc_raw, n_rev_raw = len(buckets["accept"]), len(buckets["review"])
+    buckets["accept"], dropped_acc = pl.select_spread(
+        order, buckets["accept"], _score_of, gap)
+    buckets["review"], dropped_rev = pl.select_spread(
+        order, buckets["review"], _score_of, gap)
+    print(pl.separation_note(n_acc_raw + n_rev_raw,
+                             len(buckets["accept"]) + len(buckets["review"]),
+                             MIN_FRAME_GAP, INFER_STRIDE))
+
+    # Appearance diversity BEFORE the budget cut, so the frames that survive
+    # are spread across the drive rather than clustered on one easy stretch.
+    # A different axis from the gap above: that one is position, this is looks.
     from training.active_learning import greedy_diverse
-    idx = {f: i for i, f in enumerate(scored["order"])}
+    idx = {f: i for i, f in enumerate(order)}
     accepted = buckets["accept"]
     if budget and len(accepted) > budget:
         sub = [scored["descriptors"][idx[f]] for f in accepted]
@@ -539,7 +585,7 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
 
     # After the counts, not before: the warning is about what those counts
     # actually mean, so it has to sit where they can be read together.
-    warn = stride_redundancy_warning(INFER_STRIDE, n_img, n_hand)
+    warn = separation_warning(MIN_FRAME_GAP, n_img, n_hand)
     if warn:
         print(warn)
 

@@ -204,6 +204,73 @@ def pseudo_budget(n_hand, n_pseudo_existing=0, ratio=MAX_PSEUDO_RATIO):
     return max(0, int(ratio * int(n_hand)) - int(n_pseudo_existing))
 
 
+def select_spread(order, chosen, score_of, min_gap):
+    """Keep the BEST frame in each neighbourhood, drop its near-copies.
+
+    Separation and sampling are two different decisions, and using one stride
+    for both gets the worse half of each. A stride of 60 never looks at 59 out
+    of every 60 frames, so it cannot know that frame 31 was the good one; a
+    stride of 1 looks at everything and then hands the training set twelve
+    copies of the same plant, each carrying the same error and each weighted.
+
+    So: infer over everything - it is cheap and the overlays are worth having -
+    and separate HERE, choosing by score rather than by position. Same number of
+    distinct frames, better frames.
+
+    `order` is every scored frame in capture order; `chosen` the subset under
+    consideration. `min_gap` is in positions within `order`, so a caller working
+    at stride N converts before calling. 0 disables it.
+
+    Highest score first, not first-come: the whole point is that the pick within
+    a neighbourhood is the good one."""
+    if min_gap <= 0:
+        return list(chosen), []
+    pos = {f: i for i, f in enumerate(order)}
+    cand = sorted((f for f in chosen if f in pos), key=lambda f: pos[f])
+    if not cand:
+        return [], []
+
+    # WINDOWS, not plain greedy-by-score. Taking the highest-scoring frame
+    # first and suppressing its neighbours is the obvious version and it costs
+    # yield: one early pick sitting a third of the way into its window pushes
+    # the next one past the following window's start, and a drive that could
+    # give four frames gives three. That trade would be worth making if the
+    # score separated frames - it does not. The observed spread on real data was
+    # p10 0.83 to p90 0.91, so sacrificing a whole frame buys a hundredth of a
+    # point. Walk the drive in order instead, take the best frame in each
+    # window that clears the last pick, and the count is as high as the gap
+    # allows while the choice within a neighbourhood is still made on score.
+    kept, last = [], None
+    for start in range(0, pos[cand[-1]] + 1, min_gap):
+        window = [f for f in cand
+                  if start <= pos[f] < start + min_gap
+                  and (last is None or pos[f] - last >= min_gap)]
+        if not window:
+            continue
+        best = max(window, key=lambda f: (float(score_of(f)), -pos[f]))
+        kept.append(best)
+        last = pos[best]
+    keptset = set(kept)
+    return kept, [f for f in cand if f not in keptset]
+
+
+def separation_note(n_before, n_after, min_gap, stride=1):
+    """What the separation step did, in one line, always printed.
+
+    A filter that only speaks when it is unhappy leaves you unable to tell
+    "nothing was redundant" from "the filter did not run"."""
+    if min_gap <= 0:
+        return ("  [!] separation is OFF (MIN_FRAME_GAP = 0). Near-identical "
+                "frames will each be weighted\n      in the training set, "
+                "carrying the same error once per copy.")
+    dropped = n_before - n_after
+    return (f"  separation: kept {n_after} of {n_before} frame(s), "
+            f"{dropped} dropped as near-copies\n"
+            f"              (at least {min_gap} video frame(s) apart; "
+            f"the best-scoring frame in each\n"
+            f"              neighbourhood is the one kept, not the first)")
+
+
 def balance_by_class(chosen, class_of, cap_frac=0.6):
     """Trim a selection so no single class takes more than `cap_frac` of it.
 
