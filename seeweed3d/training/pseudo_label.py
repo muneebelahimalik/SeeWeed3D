@@ -234,7 +234,11 @@ def summarise(qualities, accept=ACCEPT_SCORE, review=REVIEW_SCORE):
     for q in qualities:
         buckets[classify(q, accept, review)] += 1
 
-    gate_fails = {}
+    # EVERY gate, seeded at zero. A gate that never fires used to be absent
+    # from this dict, which reads as "not a problem" and is indistinguishable
+    # from "not being applied". A floor nothing has ever failed is not
+    # protecting anything, and that is worth seeing.
+    gate_fails = {g: 0 for g in GATES}
     for q in qualities:
         for g in q["gates_failed"]:
             gate_fails[g] = gate_fails.get(g, 0) + 1
@@ -253,7 +257,33 @@ def summarise(qualities, accept=ACCEPT_SCORE, review=REVIEW_SCORE):
             "gate_failures": gate_fails,
             "score_p10": round(pct(0.10), 4), "score_median": round(pct(0.50), 4),
             "score_p90": round(pct(0.90), 4),
-            "accept_sweep": sweep}
+            "accept_sweep": sweep, "flat_sweep": flat_sweep(sweep)}
+
+
+def flat_sweep(sweep, min_cuts=3):
+    """The widest run of cuts that all accept the SAME number, or None.
+
+    When 0.5, 0.6, 0.7 and 0.8 accept 68 frames each, ACCEPT is not selecting
+    anything - the hard gates are, and the threshold is decoration. That is
+    readable from the sweep, but only if you read four numbers and notice they
+    are equal, which nobody does at the end of a run. It matters because the
+    obvious response to "86% accepted" is to raise the threshold, and inside a
+    flat span raising it changes nothing at all.
+
+    Returns (lo, hi, n) for the widest run of at least `min_cuts` equal counts.
+    """
+    best = None
+    i = 0
+    while i < len(sweep):
+        j = i
+        while j + 1 < len(sweep) and sweep[j + 1][1] == sweep[i][1]:
+            j += 1
+        run = j - i + 1
+        if run >= min_cuts and sweep[i][1] > 0:
+            if best is None or run > best[3]:
+                best = (sweep[i][0], sweep[j][0], sweep[i][1], run)
+        i = j + 1
+    return best[:3] if best else None
 
 
 def format_report(summary, n_hand=None, budget=None):
@@ -268,6 +298,8 @@ def format_report(summary, n_hand=None, budget=None):
             why = {"veg_recall": "predictions miss vegetation - those plants "
                                  "would become BACKGROUND in the label",
                    "veg_precision": "predictions sit on soil"}.get(g, "")
+            if n == 0:
+                why = "never fired - this floor is not filtering anything"
             L.append(f"      {g:<16}{n:>5}   {why}")
     L.append(f"    score  p10 {summary['score_p10']:.3f}  "
              f"median {summary['score_median']:.3f}  "
@@ -276,6 +308,19 @@ def format_report(summary, n_hand=None, budget=None):
              "default):")
     for cut, n in summary["accept_sweep"]:
         L.append(f"      >= {cut:.2f}  {n:>5}")
+    flat = summary.get("flat_sweep")
+    if flat:
+        lo, hi, n = flat
+        L += [
+            f"    [!] THE THRESHOLD IS NOT SELECTING. Every cut from {lo:.2f} "
+            f"to {hi:.2f} accepts the same {n} frame(s),",
+            f"        so what decides accept-vs-review here is the hard gates, "
+            f"not ACCEPT. Raising ACCEPT",
+            f"        anywhere inside that span changes nothing. Judge the "
+            f"batch by the gates and by the",
+            f"        spot_check overlays; a number that does not move is not "
+            f"a filter you can tune.",
+        ]
     if n_hand is not None:
         L.append(f"    budget: {budget} new pseudo-label frame(s) allowed "
                  f"against {n_hand} hand-corrected")
