@@ -47,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np                                            # noqa: E402
 from common.dedup import DEFAULT_DEDUP_IOU                    # noqa: E402
-from common.ontology import CROP_CLASS                        # noqa: E402
+from common.ontology import CLASSES, CROP_CLASS               # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
@@ -347,7 +347,8 @@ def predict(cfg=None):
 
     records, counts, n_conflict = [], {}, 0
     n_dup, dup_labels = 0, {}
-    coco_frames = []
+    want_coco = bool(c.get("WRITE_COCO", True))
+    coco_frames, coco_names = [], None
     for path in frames:
         bgr = cv2.imread(str(path))
         if bgr is None:
@@ -385,13 +386,26 @@ def predict(cfg=None):
         rec.update({"image": str(path), "overlay": str(dst)})
         records.append(rec)
 
+        # POLYGONISE HERE, NOT AT THE END. The obvious version accumulates the
+        # Detections and converts once - but masks are full-frame (N, H, W)
+        # bool, so 79 ZED frames at ~40 instances each is 2.7 MB x 3000 = 8 GB
+        # held live. That exact shape already killed the self-training run once
+        # (bench_mixed rasterising one full mask per annotation). Polygons are
+        # a few hundred floats and the frame's masks are freed with the frame.
+        if want_coco:
+            if coco_names is None:
+                coco_names = list(det.names)
+            coco_frames.append((path.name, bgr.shape[0], bgr.shape[1],
+                                _coco_instances(det)))
+
     (out_dir / "predictions.json").write_text(
         json.dumps({"checkpoint": str(ckpt), "backend": c["BACKEND"],
                     "conf": c["CONF"], "mode": mode, "frames": records},
                    indent=2), encoding="utf-8")
 
-    if coco_frames:
-        n_poly = _write_coco(coco_frames, out_dir, str(ckpt), c["CONF"])
+    if want_coco:
+        n_poly = _write_coco(coco_frames, coco_names or list(CLASSES),
+                             out_dir, str(ckpt), c["CONF"])
         print(f"\n-> {out_dir / 'instances_default.json'}  "
               f"({n_poly} instance(s), COCO 1.0)")
 
@@ -420,7 +434,32 @@ def predict(cfg=None):
     return records
 
 
-def _write_coco(frames, out_dir, checkpoint, conf):
+def _coco_instances(det):
+    """One frame's Detections -> plain COCO-shaped dicts, masks dropped.
+
+    Called inside the prediction loop so the full-frame masks die with the
+    frame. Everything it returns is small enough to hold for a whole session."""
+    from annotation.mine_pool import mask_to_polygons
+
+    out = []
+    for i in range(len(det)):
+        polys = mask_to_polygons(det.masks[i])
+        if not polys:
+            # Below mask_to_polygons' min_area_px. Dropping it here rather than
+            # writing an empty segmentation is deliberate: CVAT renders a
+            # zero-vertex polygon as an invisible, unselectable annotation.
+            continue
+        xs = [v for p in polys for v in p[0::2]]
+        ys = [v for p in polys for v in p[1::2]]
+        out.append({"class_name": det.class_name(i), "segmentation": polys,
+                    "bbox": [min(xs), min(ys),
+                             max(xs) - min(xs), max(ys) - min(ys)],
+                    "area": float(np.count_nonzero(det.masks[i])),
+                    "score": float(det.scores[i])})
+    return out
+
+
+def _write_coco(frames, names, out_dir, checkpoint, conf):
     """The model's own predictions as COCO, beside predictions.json.
 
     TWO USES, AND THEY PULL THE SAME WAY. It is what evaluation/bench_mixed.py
@@ -432,7 +471,6 @@ def _write_coco(frames, out_dir, checkpoint, conf):
     stamps its own provenance for the same reason: six months on, a COCO file
     with no provenance is indistinguishable from ground truth, and this project
     has already had one silently treated as a different thing than it was."""
-    from annotation.mine_pool import mask_to_polygons
     from common.ontology import coco_categories
     from datetime import datetime, timezone
 
@@ -440,28 +478,22 @@ def _write_coco(frames, out_dir, checkpoint, conf):
     # frames. A category absent because nothing triggered it still exists in the
     # model's vocabulary, and a COCO whose categories change with the sample is
     # not comparable with the next run's.
-    cats = coco_categories(list(frames[0][3].names))
+    cats = coco_categories(list(names))
     cat_id = {c["name"]: c["id"] for c in cats}
 
     images, anns, ann_id, n_inst = [], [], 1, 0
-    for img_id, (name, h, w, det) in enumerate(frames, start=1):
+    for img_id, (name, h, w, insts) in enumerate(frames, start=1):
         images.append({"id": img_id, "file_name": name, "height": int(h),
                        "width": int(w)})
-        for i in range(len(det)):
-            cls = det.class_name(i)
-            if cls not in cat_id:
+        for inst in insts:
+            if inst["class_name"] not in cat_id:
                 continue
-            polys = mask_to_polygons(det.masks[i])
-            if not polys:
-                continue
-            xs = [v for p in polys for v in p[0::2]]
-            ys = [v for p in polys for v in p[1::2]]
             anns.append({
-                "id": ann_id, "image_id": img_id, "category_id": cat_id[cls],
-                "segmentation": polys, "iscrowd": 0,
-                "bbox": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
-                "area": float(np.count_nonzero(det.masks[i])),
-                "score": float(det.scores[i])})
+                "id": ann_id, "image_id": img_id,
+                "category_id": cat_id[inst["class_name"]],
+                "segmentation": inst["segmentation"], "iscrowd": 0,
+                "bbox": inst["bbox"], "area": inst["area"],
+                "score": inst["score"]})
             ann_id += 1
             n_inst += 1
     (Path(out_dir) / "instances_default.json").write_text(json.dumps({
