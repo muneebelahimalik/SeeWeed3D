@@ -40,7 +40,10 @@ def run(tmp_path, monkeypatch):
     pool = tmp_path / "pool"
     sess = pool / "vid_test"
     (sess / "rgb").mkdir(parents=True)
-    pred = tmp_path / "look"
+    # Named and placed the way the runner discovers them: a stamped look folder
+    # under the round directory. Handing it the path directly would test a
+    # wiring that no longer exists.
+    pred = tmp_path / "runs" / "weeds_r0" / "look_vid_test_20260101_0000"
     (pred / "overlays").mkdir(parents=True)
 
     boxes = [(20, 40, 20, 40), (20, 40, 50, 70)]
@@ -79,12 +82,16 @@ def run(tmp_path, monkeypatch):
     import importlib
     mod = importlib.import_module("training.datasets.weeds_selftrain")
     monkeypatch.setattr(mod, "WEED_POOL_ROOT", str(pool))
-    monkeypatch.setattr(mod, "SESSION", "vid_test")
-    monkeypatch.setattr(mod, "PREDICTIONS", str(pred))
+    monkeypatch.setattr(mod, "SESSIONS", ["vid_test"])
+    monkeypatch.setattr(mod, "IMAGES", "")
+    monkeypatch.setattr(mod, "RUNS_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setattr(mod, "ROUND", 0)
     monkeypatch.setattr(mod, "OUT_DIR", str(tmp_path / "out"))
     monkeypatch.setattr(mod, "HOLDOUT_TEST", [])
     monkeypatch.setattr(mod, "N_HAND", 40)
-    return mod, tmp_path / "out"
+    # The session's own folder: every per-session assertion below is about one
+    # batch, and the run folder now holds one of these per drive.
+    return mod, tmp_path / "out" / "vid_test"
 
 
 def batch(out, which):
@@ -151,24 +158,31 @@ def test_a_spot_check_sample_is_always_written(run):
 
 def test_it_refuses_to_pseudo_label_a_holdout(run, monkeypatch):
     """The model's own output in its own test set: every later round would
-    score against what it already believes."""
+    score against what it already believes.
+
+    Naming it in SESSIONS explicitly must NOT override this. An explicit list
+    is how someone says 'score these' without remembering which are held out,
+    which is exactly when the guardrail has to hold."""
     mod, out = run
     monkeypatch.setattr(mod, "HOLDOUT_TEST", ["vid_test"])
-    with pytest.raises(SystemExit, match="HOLDOUT_TEST"):
+    chosen, skipped = mod.session_plan("pool", "ds", ["vid_test"], ["vid_test"])
+    assert chosen == []
+    assert "held out" in skipped[0][1]
+    with pytest.raises(SystemExit, match="held out"):
         mod.main()
 
 
-def test_no_predictions_and_no_images_names_both(run, monkeypatch, tmp_path):
+def test_no_predictions_and_no_frames_names_both(run, monkeypatch, tmp_path):
     """It generates predictions itself when it can, so the only unrecoverable
     case is having neither. The error has to name both, or the reader fixes the
     wrong one."""
     mod, out = run
-    monkeypatch.setattr(mod, "PREDICTIONS", str(tmp_path / "nothing"))
     monkeypatch.setattr(mod, "IMAGES", str(tmp_path / "also-nothing"))
+    monkeypatch.setattr(mod, "RUNS_ROOT", str(tmp_path / "no-runs"))
     with pytest.raises(SystemExit) as e:
         mod.main()
     msg = str(e.value)
-    assert "no predictions at" in msg and "IMAGES does not exist" in msg
+    assert "no predictions at" in msg and "do not exist either" in msg
 
 
 def test_a_missing_checkpoint_names_the_trainer(run, monkeypatch, tmp_path):
@@ -179,7 +193,6 @@ def test_a_missing_checkpoint_names_the_trainer(run, monkeypatch, tmp_path):
     images = tmp_path / "frames"
     images.mkdir()
     (images / "a.png").write_bytes(b"")
-    monkeypatch.setattr(mod, "PREDICTIONS", str(tmp_path / "nothing"))
     monkeypatch.setattr(mod, "IMAGES", str(images))
     monkeypatch.setattr(mod, "RUNS_ROOT", str(tmp_path / "no-runs"))
     with pytest.raises(SystemExit, match="weeds_train"):
@@ -231,7 +244,7 @@ def test_a_frame_dense_with_instances_still_scores(run, tmp_path, monkeypatch):
     many instances on one frame. Under the old path this allocated one array
     per instance."""
     mod, out = run
-    pred = Path(mod.PREDICTIONS)
+    pred = Path(tmp_path / "runs" / "weeds_r0" / "look_vid_test_20260101_0000")
     doc = json.loads((pred / "instances_default.json").read_text())
     base = doc["annotations"][0]
     nxt = max(a["id"] for a in doc["annotations"]) + 1
@@ -341,3 +354,158 @@ def test_the_warning_allows_a_deliberate_older_round(tmp_path):
         d.mkdir()
         (d / "checkpoint_best_total.pth").write_bytes(b"x")
     assert "legitimate" in mod.stale_round_warning(tmp_path, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Which sessions get scored, and why the others do not
+# --------------------------------------------------------------------------- #
+def _pool(tmp_path, *names, empty=()):
+    root = tmp_path / "pool"
+    for n in names:
+        d = root / n / "rgb"
+        d.mkdir(parents=True)
+        if n not in empty:
+            cv2.imwrite(str(d / "f0.png"), soil())
+    return root
+
+
+def _manifest(tmp_path, sessions):
+    d = tmp_path / "ds"
+    d.mkdir(exist_ok=True)
+    (d / "seg_manifest.json").write_text(json.dumps({"sessions": sessions}))
+    return d
+
+
+def test_it_finds_every_session_in_the_pool(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    root = _pool(tmp_path, "vid1", "vid2", "vid3")
+    assert mod.discover_sessions(root) == ["vid1", "vid2", "vid3"]
+
+
+def test_an_aborted_recording_with_no_frames_is_not_a_session(tmp_path):
+    """An empty rgb/ would produce an empty batch folder that looks exactly
+    like a session someone forgot to correct."""
+    import training.datasets.weeds_selftrain as mod
+    root = _pool(tmp_path, "vid1", "vid2", empty=("vid2",))
+    assert mod.discover_sessions(root) == ["vid1"]
+
+
+def test_a_missing_pool_is_empty_not_an_exception(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    assert mod.discover_sessions(tmp_path / "nope") == []
+
+
+def test_a_trained_session_is_excluded_from_the_pool(tmp_path):
+    """THE case. Scoring a session the model trained on gives ceiling
+    agreement, which reads as a great batch and teaches nothing - and nothing
+    in the output would look wrong."""
+    import training.datasets.weeds_selftrain as mod
+    root = _pool(tmp_path, "vid1", "vid2")
+    ds = _manifest(tmp_path, ["vid2"])
+    chosen, skipped = mod.session_plan(root, ds, [])
+    assert chosen == ["vid1"]
+    assert skipped == [("vid2", skipped[0][1])]
+    assert "already in the training build" in skipped[0][1]
+
+
+def test_the_trained_list_comes_from_the_manifest_not_a_second_list(tmp_path):
+    """A hand-kept list of trained sessions is a thing to forget to update,
+    and forgetting it is silent."""
+    import training.datasets.weeds_selftrain as mod
+    assert mod.trained_sessions(_manifest(tmp_path, ["a", "b"])) == {"a", "b"}
+
+
+def test_no_manifest_yet_excludes_nothing(tmp_path):
+    """Before the first build there is no manifest, and that is an ordinary
+    state - not a reason to refuse to score anything."""
+    import training.datasets.weeds_selftrain as mod
+    assert mod.trained_sessions(tmp_path / "nothing") == set()
+
+
+def test_a_corrupt_manifest_does_not_take_the_run_down(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    d = tmp_path / "ds"
+    d.mkdir()
+    (d / "seg_manifest.json").write_text("{not json")
+    assert mod.trained_sessions(d) == set()
+
+
+def test_every_exclusion_carries_its_reason(tmp_path):
+    """A run that silently scores three of seven sessions is indistinguishable
+    from a run that found only three."""
+    import training.datasets.weeds_selftrain as mod
+    root = _pool(tmp_path, "vid1", "vid2", "vid3")
+    chosen, skipped = mod.session_plan(root, _manifest(tmp_path, ["vid2"]),
+                                       ["vid3"])
+    assert chosen == ["vid1"]
+    assert {s for s, _ in skipped} == {"vid2", "vid3"}
+    assert all(why for _, why in skipped)
+
+
+def test_naming_a_session_explicitly_does_not_override_the_holdout(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    root = _pool(tmp_path, "vid1")
+    chosen, _ = mod.session_plan(root, _manifest(tmp_path, []), ["vid1"],
+                                 ["vid1"])
+    assert chosen == []
+
+
+# --------------------------------------------------------------------------- #
+# One folder per session, and the instructions that go with them
+# --------------------------------------------------------------------------- #
+def test_each_session_gets_its_own_batch_folder(run, tmp_path):
+    """Pooling would be one less CVAT task and would break the round trip: the
+    build takes one session folder per source, and the gap accounting is
+    computed from session identity."""
+    mod, out = run
+    mod.main()
+    assert (tmp_path / "out" / "vid_test" / "accept").is_dir()
+    assert (tmp_path / "out" / "vid_test" / "review").is_dir()
+
+
+def test_the_run_writes_a_pooled_report_beside_the_sessions(run, tmp_path):
+    mod, out = run
+    mod.main()
+    doc = json.loads((tmp_path / "out" / "selftrain_report.json").read_text())
+    assert [s["session"] for s in doc["sessions"]] == ["vid_test"]
+    assert doc["infer_stride"] == mod.INFER_STRIDE
+
+
+def test_next_steps_is_written_into_the_run_folder(run, tmp_path):
+    """A batch outlives the terminal it was produced in."""
+    mod, out = run
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    assert "vid_test" in txt
+    assert "Raw" in txt and "COCO 1.0" in txt and "Datumaro 1.0" in txt
+
+
+def test_next_steps_names_where_each_export_must_land(run, tmp_path):
+    """The corrected frames have to go back to the drive they came from, or
+    the build cannot resolve their images and the split logic loses session
+    identity."""
+    mod, out = run
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    assert "annotations" in txt and "default.json" in txt
+    assert "WEED_SESSIONS" in txt
+    assert f"ROUND = {mod.ROUND + 1}" in txt
+
+
+def test_next_steps_says_to_change_the_provenance(run, tmp_path):
+    """It stops being 'hand_corrected' the first time it stops being true, and
+    every score computed later is read through that field."""
+    mod, out = run
+    mod.main()
+    assert "mixed" in (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+
+
+def test_pooling_past_the_budget_is_called_out(run, tmp_path, monkeypatch,
+                                               capsys):
+    """The budget is enforced per session, so several sessions can pass it
+    together. That is exactly how a mostly-pseudo dataset gets built without
+    anyone deciding to build one."""
+    mod, out = run
+    monkeypatch.setattr(mod, "N_HAND", 1)      # budget = 2
+    mod.main()
+    assert "exceeds the budget" in capsys.readouterr().out

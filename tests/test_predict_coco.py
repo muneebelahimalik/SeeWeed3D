@@ -255,7 +255,9 @@ def test_selftrain_reads_the_name_predict_writes(tmp_path, monkeypatch):
     are in different files with the string hard-coded in each."""
     import inspect
     from training.datasets import weeds_selftrain as st
-    assert "instances_default.json" in inspect.getsource(st.main)
+    # The whole module, not one function: which function opens it is a detail
+    # that has already moved once, and the contract is about the NAME.
+    assert "instances_default.json" in inspect.getsource(st)
     assert "instances_default.json" in inspect.getsource(pi._write_coco)
 
 

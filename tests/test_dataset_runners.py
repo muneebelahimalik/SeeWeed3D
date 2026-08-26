@@ -237,12 +237,10 @@ def test_every_runner_derives_its_checkpoint_from_one_round():
     # PREDICTIONS is the newest existing look folder, so it is legitimately ""
     # on a machine where this round has never run. Empty means "make one", and
     # the name it makes still has to come from the same two constants.
-    assert (weeds_selftrain.PREDICTIONS == ""
-            or weeds_selftrain.PREDICTIONS.startswith(weeds_train.RUNS_ROOT))
     import inspect
-    src = inspect.getsource(weeds_selftrain.main)
-    assert "PREDICTIONS or stamped(round_dir" in src, \
-        "the fallback must be derived, not written out by hand"
+    src = inspect.getsource(weeds_selftrain._predict)
+    assert 'newest(round_dir, f"look_{session}")' in src, \
+        "the prediction folder must be derived, not written out by hand"
 
 
 def test_mining_ranks_with_the_PREVIOUS_rounds_model():

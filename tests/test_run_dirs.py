@@ -232,4 +232,4 @@ def test_selftrain_still_reuses_predictions_rather_than_stamping_them():
 def test_selftrain_warns_before_scoring_reused_predictions():
     import inspect
     from training.datasets import weeds_selftrain as st
-    assert "stale_predictions_warning" in inspect.getsource(st.main)
+    assert "stale_predictions_warning" in inspect.getsource(st._predict)
