@@ -38,6 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 from common.ontology import coco_categories, cvat_labels  # noqa: E402
+from common.run_dirs import (newest, stale_predictions_warning,  # noqa: E402
+                             stamped)
 from training import pseudo_label as pl  # noqa: E402
 from training.datasets.weeds import (HOLDOUT_TEST,  # noqa: E402
                                      OUT_DIR as WEEDS_OUT_DIR,
@@ -64,7 +66,14 @@ IMAGES = ""
 
 #: Where predictions live, or will be written. Defaults to the folder
 #: weeds_look.py writes for this session.
-PREDICTIONS = ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}", f"look_{SESSION}")
+#: Defaults to the newest look folder for this session, or "" when there is
+#: none - in which case a fresh stamped one is made and inference runs into it.
+#: This is the ONE folder that is reused rather than stamped: re-scoring at a
+#: different ACCEPT threshold should not cost another GPU pass. Reuse is
+#: checked against the checkpoint's date, so an older model's predictions
+#: cannot be scored without saying so.
+PREDICTIONS = newest(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
+                     f"look_{SESSION}") or ""
 
 #: Inference settings, used ONLY when predictions have to be generated.
 #: 0 = every frame found. Consecutive ZED frames are near-identical, so the
@@ -78,9 +87,11 @@ INFER_STRIDE = 5
 #: that is the frame score, and it is mostly not made of confidence at all.
 INFER_CONF = 0.25
 
-#: Where the two batches are written. One folder per round, so an unfinished
-#: batch is never overwritten by the next one.
-OUT_DIR = ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}", f"selftrain_{SESSION}")
+#: Where the two batches are written. One folder per RUN, not per round: a
+#: batch is something you take away and spend hours correcting in CVAT, so a
+#: second run of the same round must not land on top of a half-finished one.
+OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
+                  f"selftrain_{SESSION}")
 
 #: Frames scoring at or above this become pseudo-labels. LOOK AT THE SWEEP the
 #: first run prints before trusting the default - it was chosen from synthetic
@@ -285,8 +296,18 @@ def main():
             f"already believes. Pick a session that is not held out.")
 
     images_root = IMAGES or ntpath.join(WEED_POOL_ROOT, SESSION)
-    pred_dir = Path(PREDICTIONS)
+    round_dir = ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}")
+    ckpt_path = ntpath.join(round_dir, "checkpoint_best_total.pth")
+    # Empty means no look folder existed at import. Make one now rather than
+    # writing predictions into a name that says nothing about when they ran.
+    pred_dir = Path(PREDICTIONS or stamped(round_dir, f"look_{SESSION}"))
     coco = pred_dir / "instances_default.json"
+
+    if coco.exists():
+        print(f"\n  reusing predictions in {pred_dir}")
+        warn = stale_predictions_warning(pred_dir, ckpt_path)
+        if warn:
+            print(warn)
 
     if not coco.exists():
         # Generate them rather than sending the user away and back. Reusing an
@@ -298,8 +319,7 @@ def main():
                 f"and IMAGES does not exist either: {images_root}\n"
                 f"Set IMAGES to a folder of frames, or SESSION to a session "
                 f"under {WEED_POOL_ROOT}.")
-        ckpt = ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}",
-                           "checkpoint_best_total.pth")
+        ckpt = ckpt_path
         if not Path(ckpt).exists():
             raise SystemExit(
                 f"ERROR: no checkpoint at {ckpt}.\n"
