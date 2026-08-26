@@ -45,6 +45,7 @@ from training.datasets.weeds import (HOLDOUT_TEST,  # noqa: E402
                                      OUT_DIR as WEEDS_OUT_DIR,
                                      WEED_POOL_ROOT)
 from training.datasets.weeds_train import ROUND, RUNS_ROOT  # noqa: E402
+from training.splits import MIN_SEAM_SEPARATION  # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
@@ -64,8 +65,7 @@ SESSION = "vid3_20260108_110444"
 #: different threshold free.
 IMAGES = ""
 
-#: Where predictions live, or will be written. Defaults to the folder
-#: weeds_look.py writes for this session.
+#: Where predictions live, or will be written.
 #: Defaults to the newest look folder for this session, or "" when there is
 #: none - in which case a fresh stamped one is made and inference runs into it.
 #: This is the ONE folder that is reused rather than stamped: re-scoring at a
@@ -77,7 +77,10 @@ PREDICTIONS = newest(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
 
 #: Inference settings, used ONLY when predictions have to be generated.
 #: 0 = every frame found. Consecutive ZED frames are near-identical, so the
-#: stride matters more than the count.
+#: stride matters more than the count - and it matters MORE here than anywhere
+#: else, because accepted frames get weighted: an error on one plant enters the
+#: training set once per near-copy. Below splits.MIN_SEAM_SEPARATION the run
+#: says so and gives the number of distinct frames you are really getting.
 INFER_LIMIT = 0
 INFER_STRIDE = 5
 
@@ -190,6 +193,38 @@ def stale_round_warning(runs_root, round_in_use):
             f"reads it from there.\n"
             f"      Using an older model is legitimate when comparing rounds; "
             f"it is a mistake when you meant 'the latest'.")
+
+
+def stride_redundancy_warning(stride, n_accepted, n_hand=None):
+    """A warning when the accepted frames are not as many frames as they look.
+
+    Consecutive ZED frames are near-identical, so a count of pseudo-label frames
+    is only a count of distinct ground if they are far enough apart. The project
+    already has a number for that - splits.MIN_SEAM_SEPARATION, the floor below
+    which two frames are treated as the same photograph - and INFER_STRIDE is
+    set independently of it, in a different file, with nothing connecting them.
+
+    This matters more here than in a split. A split that is too close reports an
+    optimistic score; pseudo-labels that are too close get WEIGHTED, so a
+    systematic error on one plant enters the training set once per near-copy and
+    the next round learns it that many times over."""
+    stride = int(stride or 1)
+    if stride >= MIN_SEAM_SEPARATION or n_accepted <= 0:
+        return None
+    repeat = MIN_SEAM_SEPARATION / stride
+    distinct = max(1, round(n_accepted * stride / MIN_SEAM_SEPARATION))
+    tail = (f"\n      They will be weighted as {n_accepted} against {n_hand} "
+            f"hand-corrected frame(s)." if n_hand else "")
+    return (f"  [!] INFER_STRIDE is {stride}, but {MIN_SEAM_SEPARATION} video "
+            f"frames is this project's floor for two\n"
+            f"      frames not being the same photograph "
+            f"(splits.MIN_SEAM_SEPARATION).\n"
+            f"      So these {n_accepted} accepted frame(s) carry roughly "
+            f"{distinct} frame(s) of distinct ground - the\n"
+            f"      same plant appears in about {repeat:.0f} of them, and every "
+            f"error in it repeats {repeat:.0f} times.{tail}\n"
+            f"      Raise INFER_STRIDE to {MIN_SEAM_SEPARATION} and re-run if "
+            f"you want the count to mean frames.")
 
 
 def _hand_frame_count(dataset_dir):
@@ -427,6 +462,12 @@ def main():
                                 "the model scored badly on these")
     print(f"  review/     {r_img} frame(s), {r_ann} instance(s)"
           f"  -> {out / 'review' / 'cvat_ready'}")
+
+    # After the counts, not before: the warning is about what those counts
+    # actually mean, so it has to sit where they can be read together.
+    warn = stride_redundancy_warning(INFER_STRIDE, n_img, n_hand)
+    if warn:
+        print(warn)
 
     # The spot check is not optional. Ten frames is minutes of work and it is
     # the only thing between a badly-chosen threshold and a poisoned dataset.
