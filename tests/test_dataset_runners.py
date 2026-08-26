@@ -229,9 +229,20 @@ def test_every_runner_derives_its_checkpoint_from_one_round():
     from training.datasets import weeds_look, weeds_selftrain
     for path in (weeds_train.CONFIG["RUN_DIR"],
                  weeds_look.CONFIG["CHECKPOINT"],
+                 weeds_look.CONFIG["OUT_DIR"],
                  weeds_mine.CONFIG["CHECKPOINT"],
-                 weeds_selftrain.PREDICTIONS):
+                 weeds_selftrain.OUT_DIR):
         assert path.startswith(weeds_train.RUNS_ROOT), path
+
+    # PREDICTIONS is the newest existing look folder, so it is legitimately ""
+    # on a machine where this round has never run. Empty means "make one", and
+    # the name it makes still has to come from the same two constants.
+    assert (weeds_selftrain.PREDICTIONS == ""
+            or weeds_selftrain.PREDICTIONS.startswith(weeds_train.RUNS_ROOT))
+    import inspect
+    src = inspect.getsource(weeds_selftrain.main)
+    assert "PREDICTIONS or stamped(round_dir" in src, \
+        "the fallback must be derived, not written out by hand"
 
 
 def test_mining_ranks_with_the_PREVIOUS_rounds_model():

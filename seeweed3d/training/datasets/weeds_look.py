@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common.run_dirs import stamped  # noqa: E402
 from perception.predict_images import CONFIG as BASE, predict  # noqa: E402
 from training.datasets.weeds import WEED_POOL_ROOT  # noqa: E402
 from training.datasets.weeds_train import ROUND, RUNS_ROOT  # noqa: E402
@@ -69,8 +70,11 @@ CONFIG = dict(
     BACKEND="rfdetr",
     DEVICE="cuda",
 
-    OUT_DIR=ntpath.join(RUNS_ROOT, f"weeds_r{LOOK_AT_ROUND}",
-                        f"look_{SESSION}"),
+    # Stamped, so looking twice at one session keeps both sets of overlays.
+    # Comparing this round against the last is the main reason to look at all,
+    # and that is impossible if the second run overwrites the first.
+    OUT_DIR=stamped(ntpath.join(RUNS_ROOT, f"weeds_r{LOOK_AT_ROUND}"),
+                    f"look_{SESSION}"),
 
     # 40 frames spread across the drive, not 40 pictures of one plant.
     # Consecutive ZED frames are near-identical, so the stride matters more
