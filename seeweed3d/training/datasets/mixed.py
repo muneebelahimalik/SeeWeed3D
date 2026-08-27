@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""
+SeeWeed3D - the MIXED dataset: weeds AND the crop. THE DEPLOYABLE BUILD.
+
+    python -m seeweed3d.training.datasets.mixed
+
+WHY THIS IS THE ONE THAT MATTERS
+--------------------------------
+A weed-only model is a Stage A model, not a system. The safety decision cannot
+approve a single target without a crop mask, and it will not accept the absence
+of one as evidence of absence - `SafetyConfig.allow_missing_crop_mask` defaults
+to False precisely so that "this model cannot see onions" is never read as
+"there are no onions here". So every candidate is rejected, the run completes,
+and the output is indistinguishable from a clean field.
+
+perception/preflight.py reports that as BLOCKING. This build is the fix: one
+model that predicts the crop and the weeds, which is what the laser needs before
+it can be pointed at anything.
+
+THE HONEST PART: THE LABELS ARE NOT ALL THE SAME KIND
+------------------------------------------------------
+The weed sessions are hand corrected. The onion sessions are SAM 3 prelabels
+nobody opened. Merging them does not average those into something in between -
+it produces a dataset where the weed classes are measured and the crop class is
+agreement with a prelabeler, and LABEL_PROVENANCE = "mixed" is the flag that
+keeps that recoverable six months from now.
+
+It matters asymmetrically. An unreviewed weed mask costs a slightly wrong
+boundary. An unreviewed CROP mask decides whether the laser fires, so the crop
+class is the one whose labels most deserve a human, and it is currently the one
+that has had the least. Correct crop frames before trusting a crop-safety
+number, not after.
+
+CLASS COUNTS DECIDE WHAT TO DROP, AND ONLY THE BUILD KNOWS THEM
+----------------------------------------------------------------
+weeds.py drops weed_cluster (2 instances) and wild_radish (0). Those numbers are
+properties of that build, not of the ontology, and merging sessions changes
+them. So DROP_CLASSES starts EMPTY here and the build's own class report is what
+should decide it - a class in single digits reports an AP near zero and drags
+the mean down for a reason that has nothing to do with the model, and a class
+with none at all still costs a head that can never fire.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common.ontology import CLASSES  # noqa: E402
+from training.datasets.onions import ONION_SESSIONS  # noqa: E402
+from training.datasets.weeds import WEED_SESSIONS  # noqa: E402
+from training.make_dataset import CONFIG as BASE, main  # noqa: E402
+
+# #############################################################################
+# ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
+# #############################################################################
+
+#: Imported from the two single-purpose builds rather than repeated, so a
+#: session added there reaches this build without a second edit - and the three
+#: builds cannot silently come to disagree about which drives exist.
+#:
+#: Add genuinely MIXED sessions here, the ones holding both onions and weeds in
+#: the same frame. Those are the most valuable frames in the project: they are
+#: the only ones that teach the model to tell the two apart at a boundary, which
+#: is the exact decision the laser depends on.
+MIXED_SESSIONS = [
+]
+
+SOURCES_ROOTS = list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
+
+#: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
+OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
+
+#: Sessions that must never enter training.
+#:
+#: THIS SHOULD NOT BE EMPTY IN A MIXED BUILD. With several sessions across two
+#: campaigns there is no excuse for splitting within a drive, and a held-out
+#: drive is the only thing that makes round N comparable with round N-1. Pin the
+#: same list in mine_pool's HOLDOUT_SESSIONS - a test asserts they agree.
+HOLDOUT_TEST = [
+]
+
+CONFIG = dict(
+    BASE,
+    SOURCES=[{"DATUMARO_ROOT": p, "IMAGES_ROOT": p} for p in SOURCES_ROOTS],
+    OUT_DIR=OUT_DIR,
+
+    # EVERYTHING the ontology defines. This is the build that has to cover the
+    # whole decision, so a class left out here is a class the deployed model
+    # scores as background.
+    KEEP_CLASSES=list(CLASSES),
+
+    # Empty ON PURPOSE - see the module docstring. Let the build's class report
+    # tell you which classes are too thin to train, then name them here.
+    DROP_CLASSES=[],
+
+    # Hand-corrected weeds beside unreviewed crop masks. Neither label answers
+    # for the other, and every score computed on this build is read through
+    # this field.
+    LABEL_PROVENANCE="mixed",
+
+    # Whole sessions where there are enough of them - and with two campaigns
+    # merged there are. The build says which granularity it used.
+    SPLIT_MODE="auto",
+    SPLIT_GRANULARITY="auto",
+    HOLDOUT_TEST_SESSIONS=HOLDOUT_TEST,
+
+    # Scene stratification earns its keep here and nowhere else: a split that
+    # put every onion frame in train and every weed frame in val would report a
+    # confident number about a model that had never been asked the question.
+    STRATIFY_BY_SCENE=True,
+
+    VAL_FRACTION=0.15,
+    TEST_FRACTION=0.15,
+
+    # NEVER change between rounds.
+    SEED=1234,
+)
+
+# #############################################################################
+# ##  Nothing below here needs editing                                       ##
+# #############################################################################
+
+if __name__ == "__main__":
+    main(CONFIG)

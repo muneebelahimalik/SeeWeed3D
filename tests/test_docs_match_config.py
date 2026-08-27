@@ -120,3 +120,69 @@ def test_the_training_record_keeps_the_checkpoint_warning():
     Naming _ema silently scores the loser, and it has happened once."""
     doc = TRAIN_DOC.read_text(encoding="utf-8")
     assert "checkpoint_best_total.pth" in doc and "_ema" in doc
+
+
+# --------------------------------------------------------------------------- #
+# The two records added for the whole-system picture
+# --------------------------------------------------------------------------- #
+READY_DOC = ROOT / "docs" / "system_readiness.md"
+SELFTRAIN_DOC = ROOT / "docs" / "self_training.md"
+
+
+def test_the_new_records_exist_and_are_linked_from_the_readme():
+    """An unlinked document is one nobody finds, which is the same as one that
+    does not exist - and worse, because it still drifts."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for doc in (READY_DOC, SELFTRAIN_DOC):
+        assert doc.is_file(), doc
+        assert f"docs/{doc.name}" in readme, doc.name
+
+
+def test_the_readiness_doc_states_the_crop_default_correctly():
+    """The whole point of that document is one default, and stating it
+    backwards would send someone to turn off a safety check."""
+    from training.config import SafetyConfig
+    text = READY_DOC.read_text(encoding="utf-8")
+    assert SafetyConfig().allow_missing_crop_mask is False
+    assert "allow_missing_crop_mask" in text
+    assert "`False`" in text or "defaults to `False`" in text
+    assert "every candidate is rejected" in text.lower()
+
+
+def test_the_readiness_doc_names_every_build():
+    from training.datasets import mixed, onions, weeds
+    text = READY_DOC.read_text(encoding="utf-8")
+    for mod, name in ((weeds, "weeds"), (onions, "onions"), (mixed, "mixed")):
+        assert f"datasets/{name}.py" in text, name
+        assert mod.CONFIG["LABEL_PROVENANCE"] in text, name
+
+
+def test_the_selftrain_doc_quotes_the_real_gates():
+    from training import pseudo_label as pl
+    text = SELFTRAIN_DOC.read_text(encoding="utf-8")
+    for k, v in pl.GATES.items():
+        assert k in text, k
+        assert str(v) in text, f"{k} = {v}"
+
+
+def test_the_selftrain_doc_quotes_the_real_weights():
+    from training import pseudo_label as pl
+    text = SELFTRAIN_DOC.read_text(encoding="utf-8")
+    for k, v in pl.WEIGHTS.items():
+        assert any(k in ln and str(v) in ln for ln in text.splitlines()), k
+
+
+def test_the_selftrain_doc_quotes_the_real_thresholds():
+    from training import pseudo_label as pl
+    text = SELFTRAIN_DOC.read_text(encoding="utf-8")
+    assert str(pl.ACCEPT_SCORE) in text
+    assert str(pl.REVIEW_SCORE) in text
+    assert f"{int(pl.BALANCE_CAP_FRAC * 100)}%" in text
+    assert f"{int(pl.MAX_PSEUDO_RATIO)} ×" in text or "2 ×" in text
+
+
+def test_the_selftrain_doc_quotes_the_real_separation_settings():
+    from training.datasets import weeds_selftrain as st
+    text = SELFTRAIN_DOC.read_text(encoding="utf-8")
+    assert f"INFER_STRIDE = {st.INFER_STRIDE}" in text
+    assert f"MIN_FRAME_GAP = {st.MIN_FRAME_GAP}" in text

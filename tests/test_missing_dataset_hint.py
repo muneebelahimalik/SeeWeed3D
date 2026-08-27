@@ -65,10 +65,13 @@ def test_case_does_not_decide_the_match():
 
 
 def test_train_and_mine_runners_are_not_offered_as_builders():
-    """weeds_train and weeds_mine READ an OUT_DIR from the build; they do not
-    define one. Offering them here would send someone to run a trainer to fix a
-    missing dataset."""
-    assert set(_dataset_runners().values()) == {"weeds"}
+    """weeds_train, mixed_train and weeds_mine READ an OUT_DIR from a build;
+    they do not define one. Offering them here would send someone to run a
+    trainer to fix a missing dataset."""
+    found = set(_dataset_runners().values())
+    assert found == {"weeds", "onions", "mixed"}
+    assert not any(n.endswith(("_train", "_mine", "_look", "_selftrain"))
+                   for n in found)
 
 
 def test_discovery_does_not_import_the_runners(monkeypatch):

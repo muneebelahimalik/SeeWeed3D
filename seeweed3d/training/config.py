@@ -237,6 +237,16 @@ class PipelineConfig:
     seg_iou: float = 0.60
     max_instances: int = 300
 
+    #: Mask-IoU above which two detections are the same plant found twice.
+    #: RF-DETR is a set-prediction model: two queries can lock onto one plant
+    #: and disagree about its class, and on real weed frames 14% of detections
+    #: came back as duplicates at 0.85. Downstream that is not cosmetic - each
+    #: copy becomes its own WeedTarget with its own LEP and its own 3D point, so
+    #: the laser is aimed twice at one plant; and a duplicate pair labelled
+    #: onion/weed puts the same pixels in the crop-safety mask AND on the target
+    #: list. None uses common.dedup.DEFAULT_DEDUP_IOU; 0 disables it.
+    dedup_iou: float | None = None
+
     def to_dict(self):
         return asdict(self)
 

@@ -276,3 +276,117 @@ def test_the_run_names_the_model_it_loaded():
     src = (ROOT / "perception" / "predict_images.py").read_text(encoding="utf-8")
     assert 'print(f"  model : {ckpt}")' in src
     assert "st_mtime" in src, "the date distinguishes two rounds' checkpoints"
+
+
+# --------------------------------------------------------------------------- #
+# Three builds, one shared base
+# --------------------------------------------------------------------------- #
+def _builds():
+    from training.datasets import mixed, onions
+    return {"weeds": weeds, "onions": onions, "mixed": mixed}
+
+
+def test_the_onion_build_is_a_runner_not_the_shared_base():
+    """It used to live IN make_dataset.py's CONFIG - the base weeds.py
+    overrides. One CONFIG edited back and forth between an onion build and a
+    weed build is how a stale DATASET_DIR reaches a training run, which is the
+    mistake the per-dataset runners exist to prevent."""
+    from training.datasets import onions
+    from common.ontology import CROP_CLASS
+    assert onions.CONFIG["KEEP_CLASSES"] == [CROP_CLASS]
+    assert onions.CONFIG["OUT_DIR"] != BASE["OUT_DIR"]
+
+
+def test_no_two_builds_write_to_the_same_place():
+    """A shared OUT_DIR silently rebuilds one dataset over another."""
+    outs = [m.CONFIG["OUT_DIR"] for m in _builds().values()]
+    assert len(set(outs)) == len(outs)
+
+
+def test_the_mixed_build_covers_the_whole_ontology():
+    """It is the build the deployed model comes from, so a class left out here
+    is a class the pipeline scores as background."""
+    from common.ontology import CLASSES
+    from training.datasets import mixed
+    assert set(mixed.CONFIG["KEEP_CLASSES"]) == set(CLASSES)
+
+
+def test_the_mixed_build_includes_the_crop():
+    """Without it the safety decision rejects every candidate - see
+    perception/preflight.py. That is the entire reason this build exists."""
+    from common.ontology import CROP_CLASS
+    from training.datasets import mixed
+    assert CROP_CLASS in mixed.CONFIG["KEEP_CLASSES"]
+
+
+def test_the_mixed_build_drops_nothing_by_default():
+    """weeds.py drops weed_cluster and wild_radish on counts that are
+    properties of THAT build. Merging sessions changes them, so carrying the
+    list over would drop classes that now have examples."""
+    from training.datasets import mixed
+    assert mixed.CONFIG["DROP_CLASSES"] == []
+
+
+def test_the_mixed_build_declares_mixed_provenance():
+    """Hand-corrected weeds beside unreviewed crop masks. Neither answers for
+    the other, and every score is read through this field."""
+    from training.datasets import mixed
+    assert mixed.CONFIG["LABEL_PROVENANCE"] == "mixed"
+
+
+def test_the_mixed_build_imports_its_sources_rather_than_repeating_them():
+    """A session added to the weed build must reach the mixed build without a
+    second edit, or the two silently come to disagree about which drives
+    exist."""
+    from training.datasets import mixed, onions
+    roots = [s["DATUMARO_ROOT"] for s in mixed.CONFIG["SOURCES"]]
+    for p in list(weeds.WEED_SESSIONS) + list(onions.ONION_SESSIONS):
+        assert p in roots, p
+
+
+def test_the_mixed_build_stratifies_by_scene():
+    """A split that put every onion frame in train and every weed frame in val
+    would report a confident number about a question the model was never
+    asked."""
+    from training.datasets import mixed
+    assert mixed.CONFIG["STRATIFY_BY_SCENE"] is True
+
+
+def test_every_build_shares_the_seed():
+    for name, m in _builds().items():
+        assert m.CONFIG["SEED"] == BASE["SEED"], name
+
+
+def test_the_mixed_trainer_reads_the_mixed_build():
+    from training.datasets import mixed, mixed_train
+    assert mixed_train.CONFIG["DATASET_DIR"] == mixed.CONFIG["OUT_DIR"]
+
+
+def test_the_mixed_trainer_does_not_overwrite_the_weed_runs():
+    """A mixed round landing in the weed runs root would overwrite the
+    checkpoint it is supposed to be compared against."""
+    from training.datasets import mixed_train
+    assert not mixed_train.CONFIG["RUN_DIR"].startswith(weeds_train.RUNS_ROOT)
+    assert f"mixed_r{mixed_train.ROUND}" in mixed_train.CONFIG["RUN_DIR"]
+
+
+def test_the_two_trainers_share_their_recipe():
+    """Changing the recipe in the same step that adds the crop class makes the
+    comparison between the two models uninterpretable - and that comparison is
+    how you learn whether adding onions cost you weed recall."""
+    from training.datasets import mixed_train
+    for k in ("RESOLUTION", "VARIANT", "BATCH", "GRAD_ACCUM", "EPOCHS",
+              "PATIENCE", "TVERSKY_ALPHA", "TVERSKY_BETA"):
+        assert mixed_train.CONFIG[k] == weeds_train.CONFIG[k], k
+
+
+def test_every_new_configured_path_is_absolute():
+    """Path(<windows path>).parent on posix returns '.', so a relative path
+    here writes beside the working directory."""
+    import ntpath
+    from training.datasets import mixed, mixed_train, onions
+    paths = [onions.CONFIG["OUT_DIR"], mixed.CONFIG["OUT_DIR"],
+             mixed_train.CONFIG["DATASET_DIR"], mixed_train.CONFIG["RUN_DIR"]]
+    paths += [s["DATUMARO_ROOT"] for s in mixed.CONFIG["SOURCES"]]
+    for p in paths:
+        assert ntpath.isabs(p), f"not an absolute path: {p!r}"
