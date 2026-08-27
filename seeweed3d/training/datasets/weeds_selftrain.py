@@ -608,7 +608,26 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
         accepted = [accepted[i] for i in pick]
     dominant = {f: (per_frame[f]["classes"][0] if per_frame[f]["classes"] else "")
                 for f in accepted}
+    n_pre_balance = len(accepted)
     accepted = pl.balance_by_class(accepted, dominant)
+    if len(accepted) != n_pre_balance:
+        # SAY IT. This has quietly removed a third of a batch: 6 frames in, 4
+        # out, with the printed accept count two lines above still reading 292.
+        # The cap is right - self-training concentrates on the class the model
+        # is already best at - but a cut nobody can see is a cut nobody can
+        # judge, and on a small batch it is the difference between a round and
+        # nothing.
+        gone = {}
+        for f in [f for f in buckets["accept"] if f not in set(accepted)]:
+            c = dominant.get(f) or "?"
+            gone[c] = gone.get(c, 0) + 1
+        body = ", ".join(f"{k}={v}" for k, v in
+                         sorted(gone.items(), key=lambda kv: -kv[1]))
+        print(f"  class balance: kept {len(accepted)} of {n_pre_balance} "
+              f"accepted frame(s), {n_pre_balance - len(accepted)} dropped "
+              f"over the\n"
+              f"                 {int(pl.BALANCE_CAP_FRAC * 100)}% per-class "
+              f"cap - {body}")
 
     names = scored["names"]
     n_img, n_ann = _write_batch(accepted, per_frame, out / "accept", names,
@@ -641,15 +660,47 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
             shutil.copy2(ov, sdir / ov.name)
     print(f"  spot_check/ {len(spot)} overlay(s)             -> {sdir}")
 
+    # `summary` counts what the CLASSIFIER decided; `written` counts what is in
+    # the folders. They are not the same number and the gap is large - 292
+    # classified as accept became 4 files after separation and the class cap -
+    # so every consumer of this report has to be able to tell them apart. The
+    # pooled totals and NEXT_STEPS.txt use `written`, because a document that
+    # tells you to upload 292 frames to CVAT and hands you 4 is worse than one
+    # that says nothing.
     report = {"session": session, "round": ROUND, "accept_threshold": ACCEPT,
               "review_threshold": REVIEW, "n_hand_corrected": n_hand,
-              "infer_stride": INFER_STRIDE, "pseudo_budget": budget,
-              "summary": summary, "accepted": sorted(accepted),
+              "infer_stride": INFER_STRIDE, "min_frame_gap": MIN_FRAME_GAP,
+              "pseudo_budget": budget,
+              "summary": summary,
+              "written": {"accept": n_img, "review": r_img,
+                          "accept_instances": n_ann, "review_instances": r_ann},
+              "accepted": sorted(accepted),
               "review": sorted(buckets["review"]),
               "per_frame": {f: per_frame[f]["quality"] for f in per_frame}}
     (out / "selftrain_report.json").write_text(
         json.dumps(report, indent=2, default=float), encoding="utf-8")
     return report
+
+
+def pooled_budget_warning(n_written, budget, n_hand):
+    """A warning when the sessions TOGETHER exceed the pseudo-label budget.
+
+    The budget is computed against the hand-corrected count, not the dataset
+    size, so a mostly-pseudo dataset cannot cite its own bulk to justify more.
+    It is enforced per session, though, and pooling several is exactly how it
+    gets passed without anyone deciding to pass it.
+
+    Counts files written, not frames classified. Against the classified count
+    this fired on a run that exported five frames against a budget of ninety-
+    six - a false alarm on the very number it exists to protect, which is the
+    fastest way to teach someone to ignore a warning."""
+    if not budget or n_written <= budget:
+        return None
+    return (f"  [!] {n_written} accepted across all sessions exceeds the budget "
+            f"of {budget} for {n_hand} hand-corrected frame(s).\n"
+            f"      The budget is enforced PER SESSION, so pooling can pass it. "
+            f"Correct more frames, or drop\n"
+            f"      whole sessions from the merge - do not merge all of them.")
 
 
 def next_steps(run_dir, pool_root, per_session):
@@ -658,17 +709,26 @@ def next_steps(run_dir, pool_root, per_session):
     Four steps, and getting step 2 wrong silently creates a DUPLICATE label in
     CVAT rather than filling the one the prelabels were meant to correct. It is
     written down because a batch outlives the terminal it was produced in."""
+    # THE COUNTS IN THE FOLDERS, not the classifier's. This document tells
+    # someone what to upload to CVAT, and 292 classified as accept is 4 files
+    # after separation and the class cap. Promising 292 and handing over 4 is
+    # worse than saying nothing.
     L = [f"SeeWeed3D - self-training round {ROUND}",
-         f"{len(per_session)} session(s), "
-         f"{sum(r['summary']['accept'] for r in per_session)} accepted, "
-         f"{sum(r['summary']['review'] for r in per_session)} for review",
+         f"{len(per_session)} session(s): "
+         f"{sum(r['written']['accept'] for r in per_session)} frame(s) in "
+         f"accept/, "
+         f"{sum(r['written']['review'] for r in per_session)} in review/",
          "",
          "PER SESSION",
-         "-----------"]
+         "-----------",
+         f"  {'session':<28} {'scored':>7} {'accept/':>8} {'review/':>8}"]
     for r in per_session:
-        s = r["summary"]
-        L.append(f"  {r['session']:<28} scored {s['n_frames']:>4}   "
-                 f"accept {s['accept']:>4}   review {s['review']:>4}")
+        L.append(f"  {r['session']:<28} {r['summary']['n_frames']:>7} "
+                 f"{r['written']['accept']:>8} {r['written']['review']:>8}")
+    L += ["",
+          "  'scored' is every frame the model ran on. The other two are what",
+          "  is actually in the folders, after near-copies were dropped and the",
+          "  per-class cap applied - see each session's selftrain_report.json"]
     L += [
         "",
         "1. CORRECT review/ FIRST, one CVAT task per session.",
@@ -777,28 +837,28 @@ def main():
     if not reports:
         raise SystemExit("ERROR: no frames could be scored in any session.")
 
-    n_acc = sum(r["summary"]["accept"] for r in reports)
-    n_rev = sum(r["summary"]["review"] for r in reports)
+    # WRITTEN, not classified. The two differ by a factor of fifty on a real
+    # drive, and this line is the one someone quotes.
+    n_acc = sum(r["written"]["accept"] for r in reports)
+    n_rev = sum(r["written"]["review"] for r in reports)
+    n_scored = sum(r["summary"]["n_frames"] for r in reports)
     (run_dir / "selftrain_report.json").write_text(json.dumps({
         "round": ROUND, "infer_stride": INFER_STRIDE,
+        "min_frame_gap": MIN_FRAME_GAP,
         "n_hand_corrected": n_hand, "pseudo_budget": budget,
         "accept_threshold": ACCEPT, "review_threshold": REVIEW,
+        "written": {"accept": n_acc, "review": n_rev},
+        "n_frames_scored": n_scored,
         "skipped": [{"session": s, "reason": w} for s, w in skipped],
         "sessions": reports,
     }, indent=2, default=float), encoding="utf-8")
 
     print(f"\n{'=' * 70}")
-    print(f"  {len(reports)} session(s): {n_acc} accepted, "
-          f"{n_rev} for review")
-    # The budget is computed against the HAND-corrected count, not the dataset
-    # size, so a mostly-pseudo dataset cannot use its own size to justify more.
-    # Pooling sessions is exactly how it gets exceeded without anyone noticing.
-    if budget and n_acc > budget:
-        print(f"  [!] {n_acc} accepted across all sessions exceeds the budget "
-              f"of {budget} for {n_hand} hand-corrected frame(s).")
-        print(f"      The budget is enforced PER SESSION, so pooling can pass "
-              f"it. Correct more frames, or drop whole sessions from the "
-              f"merge - do not merge all of them.")
+    print(f"  {len(reports)} session(s): {n_scored} frame(s) scored -> "
+          f"{n_acc} in accept/, {n_rev} in review/")
+    warn = pooled_budget_warning(n_acc, budget, n_hand)
+    if warn:
+        print(warn)
     print(f"  -> {run_dir}")
     print(next_steps(run_dir, WEED_POOL_ROOT, reports))
     return 0

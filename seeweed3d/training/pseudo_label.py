@@ -271,7 +271,13 @@ def separation_note(n_before, n_after, min_gap, stride=1):
             f"              neighbourhood is the one kept, not the first)")
 
 
-def balance_by_class(chosen, class_of, cap_frac=0.6):
+#: No single class may take more than this share of an accepted batch. Named
+#: rather than defaulted inline so the runner can print the number it enforced:
+#: this cap has silently removed a third of a small batch.
+BALANCE_CAP_FRAC = 0.6
+
+
+def balance_by_class(chosen, class_of, cap_frac=BALANCE_CAP_FRAC):
     """Trim a selection so no single class takes more than `cap_frac` of it.
 
     Without this the loop concentrates: the model predicts its dominant class
