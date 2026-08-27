@@ -500,15 +500,42 @@ def test_next_steps_says_to_change_the_provenance(run, tmp_path):
     assert "mixed" in (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
 
 
-def test_pooling_past_the_budget_is_called_out(run, tmp_path, monkeypatch,
-                                               capsys):
+def test_pooling_past_the_budget_is_called_out():
     """The budget is enforced per session, so several sessions can pass it
     together. That is exactly how a mostly-pseudo dataset gets built without
-    anyone deciding to build one."""
-    mod, out = run
-    monkeypatch.setattr(mod, "N_HAND", 1)      # budget = 2
-    mod.main()
-    assert "exceeds the budget" in capsys.readouterr().out
+    anyone deciding to build one.
+
+    Tested directly rather than through a run: with one session the per-session
+    budget already caps the write, so the pooled case is unreachable from a
+    single-session fixture - which is the guardrail working, not a gap."""
+    import training.datasets.weeds_selftrain as mod
+    w = mod.pooled_budget_warning(120, 96, 48)
+    assert w and "exceeds the budget of 96" in w
+    assert "PER SESSION" in w
+
+
+def test_a_pooled_total_within_budget_is_silent():
+    import training.datasets.weeds_selftrain as mod
+    assert mod.pooled_budget_warning(96, 96, 48) is None
+    assert mod.pooled_budget_warning(5, 96, 48) is None
+
+
+def test_no_budget_means_no_warning():
+    """pseudo_budget returns 0 when there are no hand-corrected frames, and
+    dividing by that opinion would be worse than staying quiet."""
+    import training.datasets.weeds_selftrain as mod
+    assert mod.pooled_budget_warning(50, 0, 0) is None
+
+
+def test_the_runner_uses_the_written_total_for_the_budget():
+    """Against the classified count this fired on a run that exported five
+    frames against a budget of ninety-six - a false alarm on the very number it
+    exists to protect."""
+    import inspect
+    import training.datasets.weeds_selftrain as mod
+    src = inspect.getsource(mod.main)
+    assert 'n_acc = sum(r["written"]["accept"]' in src
+    assert "pooled_budget_warning(n_acc" in src
 
 
 # --------------------------------------------------------------------------- #
@@ -607,3 +634,76 @@ def test_the_runner_checks_before_it_scores(tmp_path):
     import inspect
     import training.datasets.weeds_selftrain as mod
     assert "reuse_mismatch_warning" in inspect.getsource(mod._predict)
+
+
+# --------------------------------------------------------------------------- #
+# The counts the run reports must be the counts in the folders
+# --------------------------------------------------------------------------- #
+def test_the_pooled_total_counts_files_not_classifications(run, tmp_path):
+    """THE CASE. A real run classified 292 frames as accept and wrote 4, then
+    reported '360 accepted' and warned about a budget of 96. Separation and the
+    class cap sit between the two numbers and the gap is a factor of fifty."""
+    mod, out = run
+    mod.main()
+    doc = json.loads((tmp_path / "out" / "selftrain_report.json").read_text())
+    on_disk = len(list((out / "accept" / "cvat_ready").glob("*.png")))
+    assert doc["written"]["accept"] == on_disk
+
+
+def test_the_per_session_report_records_both_numbers(run):
+    """Both are worth having - one says what the model thought, the other what
+    you can upload - so the report keeps them side by side and named."""
+    mod, out = run
+    mod.main()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    assert "written" in rep and "summary" in rep
+    assert rep["written"]["accept"] == len(rep["accepted"])
+
+
+def test_next_steps_promises_what_the_folders_hold(run, tmp_path):
+    """This document tells someone what to upload to CVAT. Promising 292 and
+    handing over 4 is worse than saying nothing."""
+    mod, out = run
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    n = rep["written"]["accept"]
+    row = [l for l in txt.splitlines() if "vid_test" in l and "annotations" not in l]
+    assert row and str(n) in row[0]
+
+
+def test_next_steps_still_shows_how_many_were_scored(run, tmp_path):
+    """Dropping it would hide that a 391-frame drive yielded four frames, which
+    is the number that decides whether to lower MIN_FRAME_GAP."""
+    mod, out = run
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    assert "scored" in txt
+
+
+def test_the_budget_is_checked_against_what_was_written(run, tmp_path,
+                                                        monkeypatch, capsys):
+    """Checking the classified count fired on a run that exported five frames
+    against a budget of ninety-six."""
+    mod, out = run
+    monkeypatch.setattr(mod, "N_HAND", 40)     # budget 80, way above any write
+    mod.main()
+    assert "exceeds the budget" not in capsys.readouterr().out
+
+
+def test_the_class_cap_says_what_it_dropped(run, tmp_path, monkeypatch, capsys):
+    """It has quietly removed a third of a batch - 6 frames in, 4 out - while
+    the printed accept count two lines above still read 292."""
+    mod, out = run
+    monkeypatch.setattr(pl, "BALANCE_CAP_FRAC", 0.5)
+    monkeypatch.setattr(mod, "MIN_FRAME_GAP", 0)   # keep enough to hit the cap
+    mod.main()
+    txt = capsys.readouterr().out
+    assert "class balance" in txt and "per-class" in txt
+
+
+def test_a_batch_within_the_cap_prints_no_balance_line(run, capsys):
+    """A line on every run is a line nobody reads."""
+    mod, out = run
+    mod.main()
+    assert "class balance" not in capsys.readouterr().out
