@@ -63,7 +63,7 @@ WEED_SESSIONS = [
 #: Keep it on the same drive as the images unless you have a reason not to -
 #: the manifest records absolute paths, so a dataset and its images that live
 #: on different drives are two things to keep in step instead of one.
-OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v2"
+OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v3"
 
 #: THE UNLABELLED POOL - the `sessions` folder holding weed recordings that are
 #: not yet corrected. Mining reads it, and weeds_look.py runs the model over a

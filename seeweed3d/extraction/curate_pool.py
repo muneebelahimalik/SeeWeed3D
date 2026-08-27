@@ -124,7 +124,7 @@ CONFIG = {
     # -- Undo -----------------------------------------------------------------
     # True clears every drop in the selected sessions and writes nothing else.
     # Use it to start over; no image files were ever touched.
-    "RESTORE_ALL": True,
+    "RESTORE_ALL": False,
 }
 
 DROPPED_COL = "dropped"
