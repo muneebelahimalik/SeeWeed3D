@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
 """
-SeeWeed3D - the self-training round: score predictions, split, write two batches.
+SeeWeed3D - the self-training round: score every unseen session, write batches.
 
     python -m seeweed3d.training.datasets.weeds_selftrain
 
-Point IMAGES at a folder of frames. It runs inference if predictions for them do
-not exist yet, scores every frame against the vegetation prior, and writes:
+With no configuration it scores EVERY session in the weed pool that is neither
+held out nor already in the training build, runs inference where predictions do
+not exist yet, and writes one subfolder per session:
 
-    accept/      pseudo-labels, safe to merge into the next build
-    review/      the frames the model got WRONG - annotate these
-    spot_check/  a sample of `accept`, for a human to glance at
+    <session>/accept/      pseudo-labels, safe to merge into the next build
+    <session>/review/      the frames the model got WRONG - annotate these
+    <session>/spot_check/  a sample of `accept`, for a human to glance at
+
+plus a pooled selftrain_report.json and NEXT_STEPS.txt at the top.
+
+LOOK AT EVERY FRAME, EXPORT A SEPARATED SUBSET
+----------------------------------------------
+Sampling and separation are different decisions, and one stride does the worse
+half of each. So INFER_STRIDE is 1 - a GPU pass over a drive is minutes and a
+frame the model never saw cannot be chosen even if it was the best one in its
+stretch - and MIN_FRAME_GAP separates at SELECTION time, keeping the
+best-scoring frame in each neighbourhood.
+
+The separation is not optional bookkeeping. Unlike a split, where frames that
+sit too close merely flatter a score, pseudo-labels get WEIGHTED: an error on
+one plant enters the training set once per near-copy. It applies to review/ too,
+where each near-copy is a person correcting the same plant a second time.
+
+One drive still cannot supply a round - 393 frames is thirteen seconds of
+driving - so the way to get more data is more drives, which is why this scores
+every eligible session by default.
+
+ONE SUBFOLDER PER SESSION, NOT ONE POOLED BATCH
+-----------------------------------------------
+Pooling would be one less CVAT task and would break the round trip. The build
+takes one session folder per source, and the gap accounting and split logic are
+computed from session identity - so a corrected frame has to go back to the
+drive it came from.
 
 SCORING NEEDS NO GPU. Masks are re-derived from the prediction polygons, so
 once a folder has been predicted it can be re-scored at a different threshold in
-seconds without touching the model. Only the first run per (round, folder) puts
+seconds without touching the model. Only the first run per (round, session) puts
 anything on the GPU.
 
 READ pseudo_label.py FIRST
@@ -30,6 +57,7 @@ look like it is working right up until it stops.
 """
 import json
 import ntpath
+import os.path
 import shutil
 import sys
 from pathlib import Path
@@ -51,38 +79,47 @@ from training.splits import MIN_SEAM_SEPARATION  # noqa: E402
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
 # #############################################################################
 
-#: The session whose predictions are being scored. Must NOT be a holdout - a
-#: holdout that receives pseudo-labels has the model's own output in its own
-#: test set, and every later round then scores against what it already believes.
-SESSION = "vid3_20260108_110444"
-
-#: THE FRAMES TO SCORE. A session folder (its rgb/ is used), or any plain
-#: folder of images. Leave "" to score a session from the weed pool by name.
+#: THE SESSIONS TO SCORE. Empty = every session in the pool that is neither
+#: held out nor already in the training build. That default is the useful one:
+#: one drive is a few hundred frames covering seconds of driving, so "as many
+#: frames as possible" means MORE DRIVES - see MIN_FRAME_GAP for why it does
+#: not mean more frames from the same one.
 #:
-#: If no predictions exist for these frames yet, this runs the inference pass
-#: itself - so pointing at a folder and running once is the whole loop's input
-#: step. An existing prediction folder is reused, which makes re-scoring at a
-#: different threshold free.
-IMAGES = r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444"
+#: A session already in training is excluded automatically, read from the
+#: build's own manifest rather than from a list kept in step by hand.
+SESSIONS = []
 
-#: Where predictions live, or will be written.
-#: Defaults to the newest look folder for this session, or "" when there is
-#: none - in which case a fresh stamped one is made and inference runs into it.
-#: This is the ONE folder that is reused rather than stamped: re-scoring at a
-#: different ACCEPT threshold should not cost another GPU pass. Reuse is
-#: checked against the checkpoint's date, so an older model's predictions
-#: cannot be scored without saying so.
-PREDICTIONS = newest(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
-                     f"look_{SESSION}") or ""
+#: A plain folder of images to score instead of the pool. Set this and SESSIONS
+#: is ignored - it is the escape hatch for frames that are not laid out as a
+#: session at all.
+IMAGES = ""
 
 #: Inference settings, used ONLY when predictions have to be generated.
-#: 0 = every frame found. Consecutive ZED frames are near-identical, so the
-#: stride matters more than the count - and it matters MORE here than anywhere
-#: else, because accepted frames get weighted: an error on one plant enters the
-#: training set once per near-copy. Below splits.MIN_SEAM_SEPARATION the run
-#: says so and gives the number of distinct frames you are really getting.
+#: 0 = every frame found, 1 = no stride. Look at EVERYTHING by default: a GPU
+#: pass over a drive is minutes, the overlays are worth having, and a frame the
+#: model never saw cannot be chosen even if it was the best one in its stretch.
+#:
+#: This is NOT how near-duplicates are kept out of the training set - see
+#: MIN_FRAME_GAP. Sampling and separation are different decisions and a single
+#: stride does the worse half of each.
 INFER_LIMIT = 0
 INFER_STRIDE = 1
+
+#: HOW FAR APART TWO EXPORTED FRAMES MUST BE, in video frames. Defaults to the
+#: project's own floor for two frames not being the same photograph.
+#:
+#: Applied when frames are SELECTED, not when they are sampled, so every frame
+#: is scored and the best one in each neighbourhood is the one kept. That is
+#: strictly better than a coarse stride, which cannot know that frame 31 was
+#: the good one because it never looked at it.
+#:
+#: It matters more for pseudo-labels than for a split. A split that is too
+#: close reports an optimistic score; pseudo-labels get WEIGHTED, so an error
+#: on one plant enters the training set once per near-copy. It matters for
+#: review/ too, where each near-copy is a human correcting the same plant again.
+#:
+#: 0 disables it - and the run says so, loudly, every time.
+MIN_FRAME_GAP = MIN_SEAM_SEPARATION
 
 #: Below a deployment threshold on purpose: a mask the model nearly drew is
 #: evidence about where it is unsure, and the scorer needs to see it to judge
@@ -90,11 +127,16 @@ INFER_STRIDE = 1
 #: that is the frame score, and it is mostly not made of confidence at all.
 INFER_CONF = 0.25
 
-#: Where the two batches are written. One folder per RUN, not per round: a
-#: batch is something you take away and spend hours correcting in CVAT, so a
-#: second run of the same round must not land on top of a half-finished one.
-OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"),
-                  f"selftrain_{SESSION}")
+#: Where the run is written. One folder per RUN, not per round: a batch is
+#: something you take away and spend hours correcting in CVAT, so a second run
+#: of the same round must not land on top of a half-finished one.
+#:
+#: Inside it, ONE SUBFOLDER PER SESSION. Pooling every session into a single
+#: batch would be one less CVAT task and would break the round trip: the build
+#: takes one session folder per source, and session identity is what the split
+#: logic and the seam accounting are computed from. A corrected export has to
+#: go back to the drive it came from.
+OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}"), "selftrain")
 
 #: Frames scoring at or above this become pseudo-labels. LOOK AT THE SWEEP the
 #: first run prints before trusting the default - it was chosen from synthetic
@@ -195,36 +237,143 @@ def stale_round_warning(runs_root, round_in_use):
             f"it is a mistake when you meant 'the latest'.")
 
 
-def stride_redundancy_warning(stride, n_accepted, n_hand=None):
-    """A warning when the accepted frames are not as many frames as they look.
+def separation_warning(min_gap, n_accepted, n_hand=None):
+    """A warning when exported frames are allowed closer than the floor.
 
-    Consecutive ZED frames are near-identical, so a count of pseudo-label frames
-    is only a count of distinct ground if they are far enough apart. The project
-    already has a number for that - splits.MIN_SEAM_SEPARATION, the floor below
-    which two frames are treated as the same photograph - and INFER_STRIDE is
-    set independently of it, in a different file, with nothing connecting them.
+    This used to be about INFER_STRIDE, which was wrong once sampling and
+    separation became separate settings: inferring over every frame is good, and
+    a warning that fired on it would have to be ignored to get any work done -
+    at which point it stops being read at all.
 
-    This matters more here than in a split. A split that is too close reports an
-    optimistic score; pseudo-labels that are too close get WEIGHTED, so a
-    systematic error on one plant enters the training set once per near-copy and
-    the next round learns it that many times over."""
-    stride = int(stride or 1)
-    if stride >= MIN_SEAM_SEPARATION or n_accepted <= 0:
+    What actually matters is MIN_FRAME_GAP, because that is what governs the
+    frames that reach the training set. The project already has a number for it,
+    splits.MIN_SEAM_SEPARATION, and MIN_FRAME_GAP is set in a different file
+    with nothing connecting the two.
+
+    Lowering it is legitimate - a short drive cannot yield much at 60 - but it
+    has a cost that is invisible in the output: a split that is too close only
+    reports an optimistic score, while pseudo-labels get WEIGHTED, so an error
+    on one plant enters the training set once per near-copy."""
+    min_gap = int(min_gap or 0)
+    if min_gap >= MIN_SEAM_SEPARATION or n_accepted <= 0:
         return None
-    repeat = MIN_SEAM_SEPARATION / stride
-    distinct = max(1, round(n_accepted * stride / MIN_SEAM_SEPARATION))
-    tail = (f"\n      They will be weighted as {n_accepted} against {n_hand} "
-            f"hand-corrected frame(s)." if n_hand else "")
-    return (f"  [!] INFER_STRIDE is {stride}, but {MIN_SEAM_SEPARATION} video "
-            f"frames is this project's floor for two\n"
-            f"      frames not being the same photograph "
+    if min_gap <= 0:
+        return (f"  [!] MIN_FRAME_GAP is 0: no separation at all. These "
+                f"{n_accepted} frame(s) may be near-identical,\n"
+                f"      and each copy is weighted in training - one plant's "
+                f"error learned as many times over.")
+    repeat = MIN_SEAM_SEPARATION / min_gap
+    return (f"  [!] MIN_FRAME_GAP is {min_gap}, below the {MIN_SEAM_SEPARATION} "
+            f"video frames this project treats as\n"
+            f"      the floor for two frames not being the same photograph "
             f"(splits.MIN_SEAM_SEPARATION).\n"
-            f"      So these {n_accepted} accepted frame(s) carry roughly "
-            f"{distinct} frame(s) of distinct ground - the\n"
-            f"      same plant appears in about {repeat:.0f} of them, and every "
-            f"error in it repeats {repeat:.0f} times.{tail}\n"
-            f"      Raise INFER_STRIDE to {MIN_SEAM_SEPARATION} and re-run if "
-            f"you want the count to mean frames.")
+            f"      Up to {repeat:.0f} of these {n_accepted} frame(s) can be "
+            f"the same ground, and each copy is\n"
+            f"      weighted in training"
+            + (f" against {n_hand} hand-corrected frame(s)" if n_hand else "")
+            + ".")
+
+
+def reuse_mismatch_warning(coco_path, images_root, limit, stride):
+    """A warning when reused predictions do not cover the frames now asked for.
+
+    Reuse is deliberate - re-scoring at a different ACCEPT threshold must not
+    cost another GPU pass - and it has one sharp edge: a prediction folder
+    remembers the settings it was MADE with, not the ones in the config now.
+
+    This is not hypothetical. INFER_STRIDE was changed from 5 to 1 to score a
+    whole 393-frame drive, the run reused a folder built at stride 5, scored the
+    same 79 frames as before, and reported them without a word. The setting had
+    no effect and nothing in the output said so - the run looked entirely
+    normal, which is the only reason it took a second pair of eyes to catch.
+
+    Compares counts rather than settings, because the count is what the next
+    stage actually consumes and it catches every cause at once: a different
+    stride, a different limit, or frames added to the session since."""
+    try:
+        n_have = len(json.loads(Path(coco_path).read_text(encoding="utf-8"))
+                     .get("images", []))
+    except (ValueError, OSError):
+        return None
+    try:
+        from perception.predict_images import find_images
+        n_want = len(find_images(images_root, limit or 0, stride or 1))
+    except (SystemExit, OSError, ValueError):
+        return None
+    if not n_want or n_have == n_want:
+        return None
+    return (f"  [!] these predictions cover {n_have} frame(s), but the current "
+            f"settings select {n_want}.\n"
+            f"      They were generated with a different INFER_STRIDE or "
+            f"INFER_LIMIT, and reusing them means\n"
+            f"      your current settings had NO EFFECT on which frames were "
+            f"scored.\n"
+            f"      To run inference over all {n_want}: delete or rename\n"
+            f"        {Path(coco_path).parent}")
+
+
+def trained_sessions(dataset_dir):
+    """Sessions already in the training build, from its own manifest.
+
+    Read rather than listed by hand, because a session that is both trained on
+    and pseudo-labelled produces frames the model has effectively seen, scored
+    at ceiling, and fed back as if they were new - and nothing in the output
+    would look wrong. The manifest already records this; a second list would
+    just be a thing to forget to update."""
+    man = Path(dataset_dir) / "seg_manifest.json"
+    if not man.is_file():
+        return set()
+    try:
+        return set(json.loads(man.read_text(encoding="utf-8"))
+                   .get("sessions", []))
+    except (ValueError, OSError):
+        return set()
+
+
+def discover_sessions(pool_root, exclude=()):
+    """Every session folder under the pool that holds frames, minus `exclude`.
+
+    A session needs images to be worth scoring; a folder with an rgb/ that is
+    empty is an aborted recording, and including it would produce an empty
+    batch folder that looks like a session someone forgot to correct."""
+    root = Path(pool_root)
+    if not root.is_dir():
+        return []
+    out = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name in set(exclude):
+            continue
+        imgs = d / "rgb" if (d / "rgb").is_dir() else d
+        if any(p.suffix.lower() in IMG_SUFFIXES for p in imgs.iterdir()
+               if p.is_file()):
+            out.append(d.name)
+    return out
+
+
+def session_plan(pool_root, dataset_dir, holdout, requested=()):
+    """Which sessions will be scored, and why each excluded one was not.
+
+    The reasons are printed. A run that silently scores three of seven sessions
+    is indistinguishable from a run that found only three, and the difference
+    matters: one is the guardrail working and the other is a wrong path."""
+    trained = trained_sessions(dataset_dir)
+    held = set(holdout)
+    if requested:
+        found = list(requested)
+    else:
+        found = discover_sessions(pool_root)
+    chosen, skipped = [], []
+    for s in found:
+        if s in held:
+            skipped.append((s, "held out - a holdout that receives "
+                               "pseudo-labels tests the model on its own output"))
+        elif s in trained:
+            skipped.append((s, "already in the training build - the model has "
+                               "seen this ground, so it scores at ceiling and "
+                               "teaches nothing"))
+        else:
+            chosen.append(s)
+    return chosen, skipped
 
 
 def _hand_frame_count(dataset_dir):
@@ -315,78 +464,68 @@ def _write_batch(frames, per_frame, out_dir, names, provenance, link=True):
     return len(images), len(anns)
 
 
-def main():
-    import cv2
+def _predict(session, images_root, round_dir, ckpt_path):
+    """Predictions for one session, reused if a folder already has them.
 
-    warn = stale_round_warning(RUNS_ROOT, ROUND)
-    if warn:
-        print()
-        print(warn)
-
-    if SESSION in set(HOLDOUT_TEST):
-        raise SystemExit(
-            f"ERROR: {SESSION!r} is in HOLDOUT_TEST.\n"
-            f"Pseudo-labelling a holdout puts the model's own output into its "
-            f"own test set, and every later round then scores against what it "
-            f"already believes. Pick a session that is not held out.")
-
-    images_root = IMAGES or ntpath.join(WEED_POOL_ROOT, SESSION)
-    round_dir = ntpath.join(RUNS_ROOT, f"weeds_r{ROUND}")
-    ckpt_path = ntpath.join(round_dir, "checkpoint_best_total.pth")
-    # Empty means no look folder existed at import. Make one now rather than
-    # writing predictions into a name that says nothing about when they ran.
-    pred_dir = Path(PREDICTIONS or stamped(round_dir, f"look_{SESSION}"))
+    Reuse is what makes re-scoring at a different ACCEPT threshold free, and it
+    is also how an older model's output gets scored after a retrain - so the
+    reuse is checked against the checkpoint's date and says so."""
+    pred_dir = Path(newest(round_dir, f"look_{session}")
+                    or stamped(round_dir, f"look_{session}"))
     coco = pred_dir / "instances_default.json"
 
     if coco.exists():
-        print(f"\n  reusing predictions in {pred_dir}")
-        warn = stale_predictions_warning(pred_dir, ckpt_path)
-        if warn:
-            print(warn)
+        print(f"  reusing predictions in {pred_dir}")
+        for warn in (stale_predictions_warning(pred_dir, ckpt_path),
+                     reuse_mismatch_warning(coco, images_root,
+                                            INFER_LIMIT, INFER_STRIDE)):
+            if warn:
+                print(warn)
+        return pred_dir
 
-    if not coco.exists():
-        # Generate them rather than sending the user away and back. Reusing an
-        # existing prediction folder is what makes re-scoring at a different
-        # threshold free, so this only ever runs once per (round, session).
-        if not Path(images_root).exists():
-            raise SystemExit(
-                f"ERROR: no predictions at {coco},\n"
-                f"and IMAGES does not exist either: {images_root}\n"
-                f"Set IMAGES to a folder of frames, or SESSION to a session "
-                f"under {WEED_POOL_ROOT}.")
-        ckpt = ckpt_path
-        if not Path(ckpt).exists():
-            raise SystemExit(
-                f"ERROR: no checkpoint at {ckpt}.\n"
-                f"Train round {ROUND} first:\n"
-                f"    python -m seeweed3d.training.datasets.weeds_train")
-        print(f"\n  no predictions yet - running inference over {images_root}")
-        from perception.predict_images import CONFIG as PBASE, predict
-        predict(dict(PBASE, IMAGES=images_root, CHECKPOINT=ckpt,
-                     BACKEND="rfdetr", DEVICE="cuda", MODE="segmentation",
-                     OUT_DIR=str(pred_dir), CONF=INFER_CONF,
-                     LIMIT=INFER_LIMIT, STRIDE=INFER_STRIDE,
-                     OVERLAY_SCALE=0.5, WRITE_COCO=True))
+    if not Path(images_root).exists():
+        raise SystemExit(
+            f"ERROR: no predictions at {coco},\n"
+            f"and the frames do not exist either: {images_root}")
+    if not Path(ckpt_path).exists():
+        raise SystemExit(
+            f"ERROR: no checkpoint at {ckpt_path}.\n"
+            f"Train round {ROUND} first:\n"
+            f"    python -m seeweed3d.training.datasets.weeds_train")
+    print(f"  no predictions yet - running inference over {images_root}")
+    from perception.predict_images import CONFIG as PBASE, predict
+    predict(dict(PBASE, IMAGES=images_root, CHECKPOINT=ckpt_path,
+                 BACKEND="rfdetr", DEVICE="cuda", MODE="segmentation",
+                 OUT_DIR=str(pred_dir), CONF=INFER_CONF,
+                 LIMIT=INFER_LIMIT, STRIDE=INFER_STRIDE,
+                 OVERLAY_SCALE=0.5, WRITE_COCO=True))
     if not coco.exists():
         raise SystemExit(f"ERROR: inference wrote no {coco}.")
+    return pred_dir
 
-    doc = json.loads(coco.read_text(encoding="utf-8"))
+
+def _score(session, images_root, pred_dir):
+    """Score every predicted frame of one session against the vegetation prior.
+
+    NOTHING IS RASTERISED PER INSTANCE. A full-frame mask is 2.7 MB, so a real
+    session's worth held at once is gigabytes and the process dies after the
+    GPU pass has already been paid for. The scorer only needs the union per
+    frame, so one frame's polygons go into one array which is then released."""
+    import cv2
+    from training.active_learning import appearance_descriptor
+
+    doc = json.loads((pred_dir / "instances_default.json")
+                     .read_text(encoding="utf-8"))
     names = [c["name"] for c in doc.get("categories", [])]
     cat_name = {c["id"]: c["name"] for c in doc.get("categories", [])}
 
-    # Grouped by image, and NOTHING is rasterised yet. A mask per instance at
-    # full frame size is 2.7 MB, so a real session - 79 frames, 2,840 instances
-    # - is 7.8 GB held at once, and the process dies after the GPU pass has
-    # already been paid for. The scorer only ever needs the UNION per frame, so
-    # one frame's polygons are rasterised into one array and released.
     anns_by_image = {}
     for a in doc.get("annotations", []):
         anns_by_image.setdefault(a["image_id"], []).append(a)
 
     roots = [images_root, str(pred_dir), str(pred_dir / "cvat_ready")]
     qualities, per_frame, descriptors, order = [], {}, [], []
-    from training.active_learning import appearance_descriptor
-    print(f"\n  scoring {len(doc.get('images', []))} frame(s) from {SESSION}")
+    print(f"  scoring {len(doc.get('images', []))} frame(s) from {session}")
 
     for im in sorted(doc.get("images", []), key=lambda i: i["file_name"]):
         fn = Path(im["file_name"]).name
@@ -424,33 +563,54 @@ def main():
         descriptors.append(appearance_descriptor(bgr))
         order.append(fn)
 
-    if not qualities:
-        raise SystemExit("ERROR: no frames could be scored.")
+    return {"names": names, "qualities": qualities, "per_frame": per_frame,
+            "descriptors": descriptors, "order": order}
 
+
+def _emit(session, scored, pred_dir, out, n_hand, budget):
+    """Write one session's two batches, its spot check and its report."""
+    qualities, per_frame = scored["qualities"], scored["per_frame"]
     summary = pl.summarise(qualities, ACCEPT, REVIEW)
-    n_hand = N_HAND or _hand_frame_count(WEEDS_OUT_DIR)
-    budget = pl.pseudo_budget(n_hand)
     print(pl.format_report(summary, n_hand=n_hand, budget=budget))
 
     buckets = {"accept": [], "review": [], "skip": []}
     for q in qualities:
         buckets[pl.classify(q, ACCEPT, REVIEW)].append(q["frame"])
 
-    # Diversity BEFORE the budget cut, so the frames that survive are spread
-    # across the drive rather than clustered on one easy stretch.
+    # SEPARATION FIRST, on both halves. Everything was inferred and scored, so
+    # this is a choice among frames rather than a stride that never looked -
+    # and it applies to review/ as much as to accept/, because there each
+    # near-copy is a person correcting the same plant a second time.
+    order = scored["order"]
+    gap = max(0, int(MIN_FRAME_GAP) // max(1, int(INFER_STRIDE)))
+    def _score_of(f):
+        return per_frame[f]["quality"]["score"]
+    n_acc_raw, n_rev_raw = len(buckets["accept"]), len(buckets["review"])
+    buckets["accept"], dropped_acc = pl.select_spread(
+        order, buckets["accept"], _score_of, gap)
+    buckets["review"], dropped_rev = pl.select_spread(
+        order, buckets["review"], _score_of, gap)
+    print(pl.separation_note(n_acc_raw + n_rev_raw,
+                             len(buckets["accept"]) + len(buckets["review"]),
+                             MIN_FRAME_GAP, INFER_STRIDE))
+
+    # Appearance diversity BEFORE the budget cut, so the frames that survive
+    # are spread across the drive rather than clustered on one easy stretch.
+    # A different axis from the gap above: that one is position, this is looks.
     from training.active_learning import greedy_diverse
     idx = {f: i for i, f in enumerate(order)}
     accepted = buckets["accept"]
     if budget and len(accepted) > budget:
-        sub = [descriptors[idx[f]] for f in accepted]
+        sub = [scored["descriptors"][idx[f]] for f in accepted]
         pick = greedy_diverse(sub, budget,
-                              [per_frame[f]["quality"]["score"] for f in accepted])
+                              [per_frame[f]["quality"]["score"]
+                               for f in accepted])
         accepted = [accepted[i] for i in pick]
     dominant = {f: (per_frame[f]["classes"][0] if per_frame[f]["classes"] else "")
                 for f in accepted}
     accepted = pl.balance_by_class(accepted, dominant)
 
-    out = Path(OUT_DIR)
+    names = scored["names"]
     n_img, n_ann = _write_batch(accepted, per_frame, out / "accept", names,
                                 "SeeWeed3D PSEUDO-LABELS - model output, "
                                 "not reviewed")
@@ -465,7 +625,7 @@ def main():
 
     # After the counts, not before: the warning is about what those counts
     # actually mean, so it has to sit where they can be read together.
-    warn = stride_redundancy_warning(INFER_STRIDE, n_img, n_hand)
+    warn = separation_warning(MIN_FRAME_GAP, n_img, n_hand)
     if warn:
         print(warn)
 
@@ -481,26 +641,166 @@ def main():
             shutil.copy2(ov, sdir / ov.name)
     print(f"  spot_check/ {len(spot)} overlay(s)             -> {sdir}")
 
-    (out / "selftrain_report.json").write_text(json.dumps({
-        "session": SESSION, "round": ROUND, "accept_threshold": ACCEPT,
-        "review_threshold": REVIEW, "n_hand_corrected": n_hand,
-        "pseudo_budget": budget, "summary": summary,
-        "accepted": sorted(accepted), "review": sorted(buckets["review"]),
-        "per_frame": {f: per_frame[f]["quality"] for f in per_frame},
+    report = {"session": session, "round": ROUND, "accept_threshold": ACCEPT,
+              "review_threshold": REVIEW, "n_hand_corrected": n_hand,
+              "infer_stride": INFER_STRIDE, "pseudo_budget": budget,
+              "summary": summary, "accepted": sorted(accepted),
+              "review": sorted(buckets["review"]),
+              "per_frame": {f: per_frame[f]["quality"] for f in per_frame}}
+    (out / "selftrain_report.json").write_text(
+        json.dumps(report, indent=2, default=float), encoding="utf-8")
+    return report
+
+
+def next_steps(run_dir, pool_root, per_session):
+    """The round trip, written into the run folder with the real paths in it.
+
+    Four steps, and getting step 2 wrong silently creates a DUPLICATE label in
+    CVAT rather than filling the one the prelabels were meant to correct. It is
+    written down because a batch outlives the terminal it was produced in."""
+    L = [f"SeeWeed3D - self-training round {ROUND}",
+         f"{len(per_session)} session(s), "
+         f"{sum(r['summary']['accept'] for r in per_session)} accepted, "
+         f"{sum(r['summary']['review'] for r in per_session)} for review",
+         "",
+         "PER SESSION",
+         "-----------"]
+    for r in per_session:
+        s = r["summary"]
+        L.append(f"  {r['session']:<28} scored {s['n_frames']:>4}   "
+                 f"accept {s['accept']:>4}   review {s['review']:>4}")
+    L += [
+        "",
+        "1. CORRECT review/ FIRST, one CVAT task per session.",
+        "   Those are the frames the model got wrong, and they are the only",
+        "   ones that move it. accept/ stops it forgetting; it teaches little.",
+        "",
+        "   For each session folder below:",
+        "     a. New CVAT task, upload  <session>/review/cvat_ready/",
+        "     b. BEFORE importing: paste  weed_cvat_labels.json  into the Raw",
+        "        label editor. CVAT matches BY NAME - importing into a task",
+        "        with no matching label silently creates a duplicate.",
+        "     c. Import  instances_default.json  as \"COCO 1.0\".",
+        "     d. Correct, then export as \"Datumaro 1.0\".",
+        "",
+        "2. PUT EACH EXPORT BACK IN ITS OWN SESSION.",
+        "   The build takes one session folder per source and computes the gap",
+        "   accounting from session identity, so a corrected frame has to go",
+        "   back to the drive it came from:",
+        "",
+    ]
+    for r in per_session:
+        L.append(f"     {ntpath.join(pool_root, r['session'])}"
+                 f"\\annotations\\default.json")
+    L += [
+        "",
+        "3. ADD THOSE SESSIONS TO THE BUILD.",
+        "   In training/datasets/weeds.py, extend WEED_SESSIONS with the",
+        "   session folders you actually corrected, and set",
+        "       LABEL_PROVENANCE = \"mixed\"",
+        "   the moment any unreviewed frame is included. It stops being",
+        "   \"hand_corrected\" the first time it stops being true, and every",
+        "   score computed later is read through that field.",
+        "",
+        "4. REBUILD, BUMP THE ROUND, RETRAIN.",
+        "       python -m seeweed3d.training.datasets.weeds",
+        f"       ROUND = {ROUND + 1}   in training/datasets/weeds_train.py",
+        "       python -m seeweed3d.training.datasets.weeds_train",
+        "",
+        "   Every other runner reads ROUND from weeds_train.py, so that one",
+        "   edit moves inference, mining and the next self-training round too.",
+        "",
+        "WHAT TO CORRECT, IN ORDER OF VALUE",
+        "----------------------------------",
+        "* WHAT IS MISSING. A pre-labelled frame biases you toward accepting",
+        "  what is drawn and not noticing what is absent, and a missed weed is",
+        "  this project's failure mode: it becomes BACKGROUND in the label.",
+        "* SPECIES. The model proposes only what it was trained on.",
+        "* CLUSTERS. Split one if separating is merely tedious, not impossible.",
+        "* BOUNDARIES LAST, and the crown matters more than the leaf margin.",
+    ]
+    text = "\n".join(L)
+    (Path(run_dir) / "NEXT_STEPS.txt").write_text(text, encoding="utf-8")
+    return text
+
+
+def main():
+    warn = stale_round_warning(RUNS_ROOT, ROUND)
+    if warn:
+        print()
+        print(warn)
+
+    # os.path, not ntpath: these are opened, not printed. On Windows the
+    # two are the same module; anywhere else ntpath builds a path with
+    # separators the filesystem does not recognise.
+    round_dir = os.path.join(RUNS_ROOT, f"weeds_r{ROUND}")
+    ckpt_path = os.path.join(round_dir, "checkpoint_best_total.pth")
+    n_hand = N_HAND or _hand_frame_count(WEEDS_OUT_DIR)
+    budget = pl.pseudo_budget(n_hand)
+    run_dir = Path(OUT_DIR)
+
+    if IMAGES:
+        # The escape hatch: frames that are not laid out as a session at all.
+        jobs = [("images", IMAGES)]
+        skipped = []
+    else:
+        chosen, skipped = session_plan(WEED_POOL_ROOT, WEEDS_OUT_DIR,
+                                       HOLDOUT_TEST, SESSIONS)
+        jobs = [(s, os.path.join(WEED_POOL_ROOT, s)) for s in chosen]
+
+    if skipped:
+        print("\n  skipping:")
+        for s, why in skipped:
+            print(f"    {s:<28} {why}")
+    if not jobs:
+        raise SystemExit(
+            f"ERROR: no sessions to score under {WEED_POOL_ROOT}.\n"
+            f"Every session there is either held out or already in the "
+            f"training build, or the path is wrong.\n"
+            f"Name sessions explicitly in SESSIONS, or point IMAGES at a "
+            f"folder of frames.")
+
+    print(f"\n  {len(jobs)} session(s) to score, stride {INFER_STRIDE}, "
+          f"round {ROUND}")
+
+    reports = []
+    for session, images_root in jobs:
+        print(f"\n{'=' * 70}\n  {session}\n{'=' * 70}")
+        pred_dir = _predict(session, images_root, round_dir, ckpt_path)
+        scored = _score(session, images_root, pred_dir)
+        if not scored["qualities"]:
+            print(f"  [skip] no frames could be scored in {session}")
+            continue
+        reports.append(_emit(session, scored, pred_dir,
+                             run_dir / session, n_hand, budget))
+
+    if not reports:
+        raise SystemExit("ERROR: no frames could be scored in any session.")
+
+    n_acc = sum(r["summary"]["accept"] for r in reports)
+    n_rev = sum(r["summary"]["review"] for r in reports)
+    (run_dir / "selftrain_report.json").write_text(json.dumps({
+        "round": ROUND, "infer_stride": INFER_STRIDE,
+        "n_hand_corrected": n_hand, "pseudo_budget": budget,
+        "accept_threshold": ACCEPT, "review_threshold": REVIEW,
+        "skipped": [{"session": s, "reason": w} for s, w in skipped],
+        "sessions": reports,
     }, indent=2, default=float), encoding="utf-8")
 
-    print(f"\n  NEXT, and do BOTH halves:")
-    print(f"    1. Open spot_check/ and look. If any accepted frame is wrong, "
-          f"raise ACCEPT and re-run - this costs seconds, not a GPU pass.")
-    print(f"    2. Upload review/cvat_ready/ to CVAT and CORRECT it. These are "
-          f"the frames that move the model.")
-    print(f"    3. Add accept/ to the build as a session with "
-          f"LABEL_PROVENANCE='pseudo_label', or 'mixed' once corrected frames "
-          f"sit beside it.")
-    print(f"\n  Merging accept/ alone is a model talking to itself. It will "
-          f"look like it is working right up until it stops.")
+    print(f"\n{'=' * 70}")
+    print(f"  {len(reports)} session(s): {n_acc} accepted, "
+          f"{n_rev} for review")
+    # The budget is computed against the HAND-corrected count, not the dataset
+    # size, so a mostly-pseudo dataset cannot use its own size to justify more.
+    # Pooling sessions is exactly how it gets exceeded without anyone noticing.
+    if budget and n_acc > budget:
+        print(f"  [!] {n_acc} accepted across all sessions exceeds the budget "
+              f"of {budget} for {n_hand} hand-corrected frame(s).")
+        print(f"      The budget is enforced PER SESSION, so pooling can pass "
+              f"it. Correct more frames, or drop whole sessions from the "
+              f"merge - do not merge all of them.")
+    print(f"  -> {run_dir}")
+    print(next_steps(run_dir, WEED_POOL_ROOT, reports))
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

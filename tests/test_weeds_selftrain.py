@@ -509,3 +509,101 @@ def test_pooling_past_the_budget_is_called_out(run, tmp_path, monkeypatch,
     monkeypatch.setattr(mod, "N_HAND", 1)      # budget = 2
     mod.main()
     assert "exceeds the budget" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Reused predictions that do not match the settings asked for
+# --------------------------------------------------------------------------- #
+def _pred_coco(tmp_path, n):
+    d = tmp_path / "look_x_20260101_0000"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "instances_default.json"
+    p.write_text(json.dumps({
+        "images": [{"id": i + 1, "file_name": f"f{i:03d}.png",
+                    "height": 8, "width": 8} for i in range(n)],
+        "annotations": [], "categories": []}))
+    return p
+
+
+def _frames(tmp_path, n):
+    d = tmp_path / "sess" / "rgb"
+    d.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        cv2.imwrite(str(d / f"f{i:03d}.png"), soil((8, 8)))
+    return tmp_path / "sess"
+
+
+def test_reusing_a_stride_5_folder_at_stride_1_is_called_out(tmp_path):
+    """THE CASE. INFER_STRIDE went 5 -> 1 to score a whole 393-frame drive, the
+    run reused a folder built at stride 5, scored the same 79 frames and
+    reported them without a word. The setting had no effect and the output
+    looked entirely normal."""
+    import training.datasets.weeds_selftrain as mod
+    coco = _pred_coco(tmp_path, 79)
+    imgs = _frames(tmp_path, 393)
+    w = mod.reuse_mismatch_warning(coco, str(imgs), 0, 1)
+    assert w and "cover 79 frame(s)" in w and "select 393" in w
+
+
+def test_it_says_the_settings_had_no_effect(tmp_path):
+    """Naming the discrepancy is not enough - the reader has to understand that
+    the number they just changed did nothing."""
+    import training.datasets.weeds_selftrain as mod
+    w = mod.reuse_mismatch_warning(_pred_coco(tmp_path, 79),
+                                   str(_frames(tmp_path, 393)), 0, 1)
+    assert "NO EFFECT" in w
+
+
+def test_the_warning_names_the_folder_to_delete(tmp_path):
+    """A warning you cannot act on is noise. The fix is one folder."""
+    import training.datasets.weeds_selftrain as mod
+    coco = _pred_coco(tmp_path, 79)
+    w = mod.reuse_mismatch_warning(coco, str(_frames(tmp_path, 393)), 0, 1)
+    assert str(coco.parent) in w
+
+
+def test_matching_predictions_are_silent(tmp_path):
+    """Reuse is the point, and a warning on every correct reuse would train
+    the reader to skip past it."""
+    import training.datasets.weeds_selftrain as mod
+    w = mod.reuse_mismatch_warning(_pred_coco(tmp_path, 40),
+                                   str(_frames(tmp_path, 40)), 0, 1)
+    assert w is None
+
+
+def test_a_stride_that_matches_what_was_generated_is_silent(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    w = mod.reuse_mismatch_warning(_pred_coco(tmp_path, 20),
+                                   str(_frames(tmp_path, 100)), 0, 5)
+    assert w is None
+
+
+def test_frames_added_to_the_session_since_are_caught_too(tmp_path):
+    """It compares counts, not settings, so every cause is caught at once -
+    including the one nobody thinks of."""
+    import training.datasets.weeds_selftrain as mod
+    w = mod.reuse_mismatch_warning(_pred_coco(tmp_path, 40),
+                                   str(_frames(tmp_path, 55)), 0, 1)
+    assert w and "cover 40" in w and "select 55" in w
+
+
+def test_an_unreadable_coco_is_left_to_the_caller(tmp_path):
+    import training.datasets.weeds_selftrain as mod
+    p = tmp_path / "bad.json"
+    p.write_text("{not json")
+    assert mod.reuse_mismatch_warning(p, str(_frames(tmp_path, 10)), 0, 1) is None
+
+
+def test_missing_frames_are_not_a_mismatch(tmp_path):
+    """The images being gone is a different failure with its own message."""
+    import training.datasets.weeds_selftrain as mod
+    w = mod.reuse_mismatch_warning(_pred_coco(tmp_path, 40),
+                                   str(tmp_path / "nowhere"), 0, 1)
+    assert w is None
+
+
+def test_the_runner_checks_before_it_scores(tmp_path):
+    """After scoring is too late: the frames are already chosen."""
+    import inspect
+    import training.datasets.weeds_selftrain as mod
+    assert "reuse_mismatch_warning" in inspect.getsource(mod._predict)
