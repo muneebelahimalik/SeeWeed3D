@@ -542,10 +542,14 @@ def _run_full(pipe, path, bgr):
         print(f"  [note] no depth/calibration for {path.name} - "
               f"segmentation only for this frame")
 
-    res = pipe.run(bgr, depth, valid, K,
-                   session_id=session.name if session else "",
-                   frame_id=path.stem)
-    det = pipe.segmenter(bgr)
+    # ONE segmentation. Calling pipe.segmenter(bgr) again for the overlay
+    # doubled the cost of the expensive stage and drew the picture from a
+    # different inference than the record - and it skipped the duplicate
+    # suppression the pipeline applies, so the overlay could show two masks on
+    # a plant the record had already merged into one.
+    res, det = pipe.run_with_detections(
+        bgr, depth, valid, K,
+        session_id=session.name if session else "", frame_id=path.stem)
     conflicts = {t.instance_index for t in res.abstentions
                  if any("onion" in r or "crop" in r
                         for r in t.rejection_reasons)}

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES  # noqa: E402
 from perception import safety as safety_mod  # noqa: E402
 from perception.depth3d import localize_lep_3d  # noqa: E402
+from perception.segmenter import dedup_detections  # noqa: E402
 from perception.schema import (FrameResult, WeedTarget,  # noqa: E402
                                STATUS_ABSTAIN, STATUS_CANDIDATE)
 from training import roi as roi_mod  # noqa: E402
@@ -106,9 +107,29 @@ class InferencePipeline:
     # -- main -------------------------------------------------------------- #
     def run(self, bgr, depth_mm=None, depth_valid=None, K=None,
             session_id="", frame_id=""):
+        """One frame in, a FrameResult out. See `run_with_detections`."""
+        return self.run_with_detections(bgr, depth_mm, depth_valid, K,
+                                        session_id, frame_id)[0]
+
+    def run_with_detections(self, bgr, depth_mm=None, depth_valid=None, K=None,
+                            session_id="", frame_id=""):
+        """As `run`, and also returns the Detections the result was built from.
+
+        Callers that draw an overlay need them, and the only way to get them
+        used to be to call the segmenter a second time - which doubled the cost
+        of the expensive stage and drew the picture from a DIFFERENT inference
+        than the record, so the two could disagree about a frame with no way to
+        tell which was shown."""
         t0 = time.perf_counter()
         h, w = bgr.shape[:2]
         det = self.segmenter(bgr)
+
+        # DEDUP BEFORE ANYTHING READS `det`, including the onion safety mask.
+        # A set-prediction model can return one plant twice under two labels;
+        # left in, each copy becomes its own target with its own LEP and 3D
+        # point, and a copy labelled onion puts those pixels in the safety mask
+        # while its twin puts them on the target list.
+        det, self.last_duplicates = dedup_detections(det, self.cfg.dedup_iou)
         t_seg = time.perf_counter()
 
         onion = det.onion_safety_mask()
@@ -123,7 +144,7 @@ class InferencePipeline:
         if not idxs:
             result.timings_ms = {"segmentation": (t_seg - t0) * 1e3,
                                  "total": (time.perf_counter() - t0) * 1e3}
-            return result
+            return result, det
 
         rois, tfs = self._build_rois(bgr, det, idxs, depth_mm)
         t_roi = time.perf_counter()
@@ -220,4 +241,4 @@ class InferencePipeline:
             "depth_and_safety": (t_end - t_lep) * 1e3,
             "total": (t_end - t0) * 1e3,
             "n_weed_rois": len(idxs)}
-        return result
+        return result, det

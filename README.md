@@ -115,6 +115,12 @@ python seeweed3d/annotation/mine_pool.py
 localization in full technical detail — biology, both estimators, the math,
 uncertainty, 3D conversion and the safety rules.
 
+**→ [`docs/system_readiness.md`](docs/system_readiness.md) — is the whole system
+ready?** What each stage needs from the last, what goes wrong when it doesn't
+have it, and why a weed-only model cannot produce a single treatment candidate.
+Every failure it describes produces output that looks completely ordinary.
+Check with `python -m seeweed3d.perception.preflight`.
+
 **→ [`docs/RUNBOOK.md`](docs/RUNBOOK.md) is the complete end-to-end guide**: every
 step from raw recordings through SAM 3 prelabeling, CVAT annotation, merging
 multiple CVAT tasks, training both stages, evaluation, inference and Jetson
@@ -138,6 +144,8 @@ appeared by running it)**,
 architecture swap today would measure the teacher)**,
 **`docs/new_machine_setup.md` (standing up a second training machine — and why
 you copy the sessions, not the built dataset)**,
+**`docs/self_training.md` (scoring the model's own predictions against an
+independent witness, and why confidence is the wrong ranking signal)**,
 **`docs/weed_active_learning.md` (the round-by-round loop, and why you annotate
 the frames the model gets WRONG)**,
 `docs/experiment_tracking.md`, `docs/edge_model_research.md`, and
