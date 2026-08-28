@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np                                            # noqa: E402
 from common.dedup import DEFAULT_DEDUP_IOU                    # noqa: E402
 from common.ontology import CLASSES, CROP_CLASS               # noqa: E402
+from perception.schema import STATUS_CANDIDATE                # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
@@ -143,6 +144,15 @@ CLASS_COLOURS = {
 }
 C_UNKNOWN = (200, 200, 200)   # grey    - a class not in the ontology
 C_CONFLICT = (255, 255, 255)  # white   - outline on a weed touching the crop
+
+#: Growth-point markers in "full" mode. The verdict, not the class: whether the
+#: laser would fire is the question the whole pipeline exists to answer, and a
+#: point it would refuse looks identical to one it would take unless the picture
+#: says so. Cyan/magenta rather than green/red - the frame is already green and
+#: red is already other_weed, and both stay apart for anyone who reads the two
+#: alike.
+C_CANDIDATE = (255, 255, 0)    # cyan    - would be treated
+C_ABSTAIN = (255, 0, 255)      # magenta - a growth point the safety check refused
 
 
 def class_colour(name):
@@ -246,13 +256,18 @@ def _legend_strip(img, names, pad=10, row=26, font=0.5):
 
 
 def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
-         show_legend=True):
+         show_legend=True, targets=None):
     """Tint and outline every instance, ONE COLOUR PER CLASS.
 
     Crop proximity is drawn as an extra WHITE outline rather than by recolouring
     the instance. The class and the hazard are two different facts, and
     overwriting one with the other loses information at the moment it matters
     most - you would no longer be able to see WHICH weed is sitting on an onion.
+
+    `targets` are WeedTargets from the full pipeline. Without them a full-mode
+    overlay was pixel-identical to a segmentation one: the LEP and the 3D point
+    existed only in the JSON, so the one thing a person runs the whole pipeline
+    to LOOK at was the one thing the picture did not show.
     """
     import cv2
     out = bgr.copy()
@@ -282,6 +297,33 @@ def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
             if i in conflict_idx:
                 text += "  !CROP"
             _put_label(out, text, (int(xs.min()), int(ys.min()) - 4), colour)
+
+    # THE GROWTH POINTS, before the downscale so they land on true pixels.
+    #
+    # Drawn as a CROSSHAIR rather than a filled dot: the LEP sits in the middle
+    # of a plant, and a solid marker hides the few pixels someone is checking it
+    # against. Colour carries the safety verdict, because a point the laser
+    # would not fire at is a different fact from one it would, and they are
+    # otherwise indistinguishable in a picture.
+    for t in (targets or []):
+        uv = getattr(t, "lep_uv", None)
+        if not uv:
+            continue
+        u, v = int(round(uv[0])), int(round(uv[1]))
+        ok = getattr(t, "safety_status", "") == STATUS_CANDIDATE
+        c = C_CANDIDATE if ok else C_ABSTAIN
+        cv2.line(out, (u - 11, v), (u - 4, v), c, 2)
+        cv2.line(out, (u + 4, v), (u + 11, v), c, 2)
+        cv2.line(out, (u, v - 11), (u, v - 4), c, 2)
+        cv2.line(out, (u, v + 4), (u, v + 11), c, 2)
+        cv2.circle(out, (u, v), 3, c, -1)
+        # Depth beside it when there is one. A target with no xyz is not a
+        # target the robot can be sent to, and "no depth" looks exactly like
+        # "nothing found" unless the picture says which.
+        xyz = getattr(t, "xyz_mm", None)
+        if labels != "none":
+            txt = f"{xyz[2]:.0f}mm" if xyz else "no 3D"
+            _put_label(out, txt, (u + 13, v + 5), c)
 
     # Resize FIRST, then add the key: a legend drawn before a 0.5 downscale
     # comes out at half the font size and is the one thing you cannot zoom into.
@@ -355,8 +397,9 @@ def predict(cfg=None):
             print(f"  [skip] unreadable: {path}")
             continue
 
+        targets = None
         if pipe is not None:
-            rec, det, conflicts = _run_full(pipe, path, bgr)
+            rec, det, conflicts, targets = _run_full(pipe, path, bgr)
         else:
             det = seg(bgr)
             # BEFORE the conflict check and before the overlay, so the picture,
@@ -380,7 +423,7 @@ def predict(cfg=None):
 
         vis = draw(bgr, det, conflicts, c.get("OVERLAY_SCALE", 1.0),
                    labels=c.get("LABELS", "class_score"),
-                   show_legend=c.get("LEGEND", True))
+                   show_legend=c.get("LEGEND", True), targets=targets)
         dst = out_dir / "overlays" / f"{path.stem}.png"
         cv2.imwrite(str(dst), vis)
         rec.update({"image": str(path), "overlay": str(dst)})
@@ -567,7 +610,7 @@ def _run_full(pipe, path, bgr):
              "rejection_reasons": list(t.rejection_reasons)}
             for t in res.targets],
     }
-    return rec, det, conflicts
+    return rec, det, conflicts, res.targets
 
 
 def main(argv=None):

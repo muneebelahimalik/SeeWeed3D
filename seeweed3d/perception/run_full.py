@@ -62,12 +62,23 @@ from training.datasets.weeds import WEED_POOL_ROOT  # noqa: E402
 #: A PLAIN FOLDER OF IMAGES HAS NO DEPTH. The run still works and every target
 #: comes back 2D - useful for looking at Stage A and Stage B, useless for
 #: aiming anything.
-SESSION = ""
+SESSION = r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_103135"
 
-#: The MIXED model by default - see the module docstring for why a weed-only
-#: checkpoint cannot produce a candidate.
-CHECKPOINT = ntpath.join(RUNS_ROOT, f"mixed_r{ROUND}",
-                         "checkpoint_best_total.pth")
+#: WHICH MODEL. Two shapes, and they answer different questions.
+#:
+#: The MIXED model is the deployable one - it predicts the crop, so the safety
+#: decision can actually approve a target. Point here for a real run:
+#:     ntpath.join(RUNS_ROOT, f"mixed_r{ROUND}", "checkpoint_best_total.pth")
+#:
+#: A WEED-ONLY model shows Stage A and Stage B working and NOTHING will be
+#: approved: with no crop class there is no crop mask, and the decision refuses
+#: to read that as "no crop here". Every target comes back abstained with its
+#: LEP and its 3D point filled in, which is exactly what you want when the
+#: question is "does the growth point land on the plant" rather than "would
+#: this fire". Set STOP_ON_BLOCKING = False to run it.
+CHECKPOINT = ntpath.join(
+    r"E:\Dataset_Vidalia\runs_1_only_weeds", "weeds_r1",
+    "checkpoint_best_total.pth")
 
 #: Stage B. Empty falls back to the hand-engineered estimator in
 #: perception/lep.py, which is the baseline a learned model has to beat rather
@@ -88,11 +99,11 @@ STRIDE = 25
 #: Stop before the GPU if preflight finds something blocking. False prints the
 #: findings and runs anyway, which is right when you are deliberately looking at
 #: a model you already know is incomplete.
-STOP_ON_BLOCKING = True
+STOP_ON_BLOCKING = False
 
 #: Where overlays and records are written. Stamped, so two runs over one session
 #: both survive - comparing this round against the last is most of why you run it.
-OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"mixed_r{ROUND}"), "full")
+OUT_DIR = stamped(ntpath.dirname(CHECKPOINT), "full")
 
 # #############################################################################
 # ##  Nothing below here needs editing                                       ##
@@ -100,7 +111,7 @@ OUT_DIR = stamped(ntpath.join(RUNS_ROOT, f"mixed_r{ROUND}"), "full")
 
 CONFIG = dict(
     BASE,
-    IMAGES=SESSION or ntpath.join(WEED_POOL_ROOT, ""),
+    IMAGES=SESSION or WEED_POOL_ROOT,
     CHECKPOINT=CHECKPOINT,
     LEP_CHECKPOINT=LEP_CHECKPOINT,
     BACKEND="rfdetr",

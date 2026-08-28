@@ -184,3 +184,70 @@ def test_predict_images_does_not_segment_a_second_time():
                     if not l.strip().startswith("#"))
     assert "run_with_detections" in src
     assert "pipe.segmenter(" not in src
+
+
+# --------------------------------------------------------------------------- #
+# The overlay has to SHOW the thing the pipeline was run for
+# --------------------------------------------------------------------------- #
+def _target(uv, status, xyz=None):
+    from perception.schema import WeedTarget
+    return WeedTarget(lep_uv=list(uv) if uv else None,
+                      safety_status=status, xyz_mm=xyz)
+
+
+def test_a_full_mode_overlay_marks_the_growth_points():
+    """Without this a full-mode overlay was pixel-identical to a segmentation
+    one: the LEP and the 3D point lived only in the JSON, so the one thing a
+    person runs the whole pipeline to LOOK at was the one thing the picture did
+    not show."""
+    from perception.predict_images import draw
+    from perception.schema import STATUS_CANDIDATE
+    d = det([("grass_weed", (10, 40, 10, 40), 0.9)])
+    plain = draw(frame(), d, set(), show_legend=False)
+    marked = draw(frame(), d, set(), show_legend=False,
+                  targets=[_target((25, 25), STATUS_CANDIDATE, [1, 2, 300])])
+    assert not np.array_equal(plain, marked)
+
+
+def test_the_marker_colour_carries_the_safety_verdict():
+    """Whether the laser would fire is the question the pipeline exists to
+    answer, and a refused point looks identical to an approved one unless the
+    picture says which."""
+    from perception.predict_images import draw
+    from perception.schema import STATUS_ABSTAIN, STATUS_CANDIDATE
+    d = det([("grass_weed", (10, 40, 10, 40), 0.9)])
+    ok = draw(frame(), d, set(), show_legend=False, labels="none",
+              targets=[_target((25, 25), STATUS_CANDIDATE)])
+    no = draw(frame(), d, set(), show_legend=False, labels="none",
+              targets=[_target((25, 25), STATUS_ABSTAIN)])
+    assert not np.array_equal(ok, no)
+
+
+def test_a_target_with_no_lep_is_skipped_not_drawn_at_the_origin():
+    """lep_uv is None when the estimator abstained. Falling back to (0,0) would
+    put a marker in the corner of every such frame."""
+    from perception.predict_images import draw
+    from perception.schema import STATUS_ABSTAIN
+    d = det([("grass_weed", (10, 40, 10, 40), 0.9)])
+    plain = draw(frame(), d, set(), show_legend=False, labels="none")
+    with_none = draw(frame(), d, set(), show_legend=False, labels="none",
+                     targets=[_target(None, STATUS_ABSTAIN)])
+    assert np.array_equal(plain, with_none)
+
+
+def test_segmentation_mode_is_unchanged():
+    """targets defaults to None, so nothing about the 2D path moves."""
+    from perception.predict_images import draw
+    d = det([("grass_weed", (10, 40, 10, 40), 0.9)])
+    assert np.array_equal(draw(frame(), d, set(), show_legend=False),
+                          draw(frame(), d, set(), show_legend=False,
+                               targets=None))
+
+
+def test_run_full_returns_its_targets_to_the_caller():
+    """Structural: the overlay can only draw what _run_full hands back, and it
+    used to hand back three values."""
+    import inspect
+    from perception import predict_images as pi
+    src = inspect.getsource(pi._run_full)
+    assert "return rec, det, conflicts, res.targets" in src
