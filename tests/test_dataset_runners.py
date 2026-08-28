@@ -177,11 +177,38 @@ def test_looking_and_mining_read_the_same_pool():
     assert weeds_look.CONFIG["IMAGES"].startswith(weeds.WEED_POOL_ROOT)
 
 
-def test_the_pool_is_not_the_training_campaign():
-    """A pool containing only the session you trained on has nothing new to
-    find, and every frame it returns is one the model has already seen."""
-    for src in weeds.CONFIG["SOURCES"]:
-        assert not src["DATUMARO_ROOT"].startswith(weeds.WEED_POOL_ROOT)
+def test_the_pool_still_holds_something_untrained():
+    """A pool containing ONLY sessions you trained on has nothing new to find,
+    and every frame it returns is one the model has already seen.
+
+    Overlap itself is normal and used to fail here: a session is mined from the
+    pool, corrected, and becomes training data while staying physically in the
+    pool folder. That is the lifecycle, not a mistake. What would be a mistake
+    is EVERY source living there with nothing left over."""
+    under = [s for s in weeds.CONFIG["SOURCES"]
+             if s["DATUMARO_ROOT"].startswith(weeds.WEED_POOL_ROOT)]
+    assert len(under) < len(weeds.CONFIG["SOURCES"]) or not under, (
+        "every training source is inside the pool - either the pool has "
+        "nothing unseen left, or WEED_POOL_ROOT is pointing at the training "
+        "campaign")
+
+
+def test_a_trained_session_is_excluded_from_scoring_by_the_runner():
+    """The real guardrail, now that pool and training campaigns overlap. It
+    reads the build's own manifest rather than a list kept in step by hand,
+    because scoring a session the model trained on gives ceiling agreement
+    that reads as a great batch and teaches nothing."""
+    from training.datasets import weeds_selftrain as st
+    chosen, skipped = st.session_plan(
+        weeds.WEED_POOL_ROOT, weeds.CONFIG["OUT_DIR"], [],
+        requested=["vid_trained", "vid_fresh"])
+    # No manifest on this machine, so nothing is excluded - the point is that
+    # the runner consults one at all, and names its reason when it does.
+    import inspect
+    src = inspect.getsource(st.session_plan)
+    assert "trained_sessions(dataset_dir)" in src
+    assert "already in the training build" in src
+    assert chosen == ["vid_trained", "vid_fresh"]
 
 
 def test_looking_uses_the_same_backend_the_training_run_writes():

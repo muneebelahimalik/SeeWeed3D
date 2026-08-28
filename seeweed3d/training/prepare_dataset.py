@@ -367,7 +367,8 @@ def list_frames(datumaro_root, contract=None):
 def build(datumaro_root, images_root, out_root, *, contract=None,
           val_fraction=0.2, test_fraction=0.2, seed=1234,
           holdout_val=(), holdout_test=(), strict=True, gap_frames=2,
-          drop_classes=(), keep_classes=None, label_provenance="hand_corrected",
+          drop_classes=(), keep_classes=None, merge_classes=None,
+          label_provenance="hand_corrected",
           verify_images=False,
           keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
@@ -501,6 +502,27 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         else [images_root]
     img_roots = [Path(r) for r in img_roots]
 
+    # Validated HERE, beside the other class checks and before a single
+    # annotation file is opened. A typo in a class name is a config mistake,
+    # and making someone wait through a merge of every export to hear about it
+    # is the difference between a two-second fix and a two-minute one.
+    merge_classes = dict(merge_classes or {})
+    unknown_merge = sorted(
+        {c for c in list(merge_classes) + list(merge_classes.values())
+         if c not in CLASSES})
+    if unknown_merge:
+        raise SystemExit(
+            f"ERROR: --merge-classes names classes not in the ontology: "
+            f"{unknown_merge}\nKnown: {CLASSES}")
+    cycles = sorted(c for c in merge_classes if merge_classes[c] in merge_classes
+                    and merge_classes[c] != c)
+    if cycles:
+        raise SystemExit(
+            f"ERROR: --merge-classes chains {cycles} into a class that is "
+            f"itself merged.\nMerging is applied once, not repeatedly, so the "
+            f"result would depend on dict order. Name the final target "
+            f"directly.")
+
     drop = {c for c in (drop_classes or ())}
     unknown_drop = sorted(drop - set(CLASSES))
     if unknown_drop:
@@ -613,6 +635,40 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         print(f"  [!] {n_lep} LEP(s) for {n_weeds} weed instance(s) - PARTIAL. "
               f"Missing ones are reported as errors; finish them or set "
               f"--no-require-lep to build segmentation-only.")
+
+    # -- merge thin classes into a coarser one, BEFORE dropping --------------
+    #
+    # THE THIRD OPTION, and for a class with too few examples it beats both the
+    # others. Keeping wild_radish at 91 instances that all landed in train
+    # costs a head that can never be measured and drags the mean AP down for a
+    # reason that has nothing to do with the model. Dropping it teaches the
+    # model that 91 real plants are SOIL - this project's actual failure mode,
+    # deliberately introduced.
+    #
+    # Merging into other_weed keeps every one of them a target and asks the
+    # model only the question it has enough data to answer. It is not a hack:
+    # other_weed MEANS "a weed I cannot name more precisely", so a radish
+    # labelled other_weed is true, merely less specific. For a laser, an
+    # unnamed weed is still a weed.
+    #
+    # Before the drop, so a class can be merged and its target dropped in the
+    # same build without the merge silently vanishing.
+    if merge_classes:
+        moved = {}
+        for f in frames:
+            for i in f.instances:
+                tgt = merge_classes.get(i.class_name)
+                if tgt and tgt != i.class_name:
+                    moved[i.class_name] = moved.get(i.class_name, 0) + 1
+                    i.class_name = tgt
+        if moved:
+            body = ", ".join(f"{k} -> {merge_classes[k]} ({v})"
+                             for k, v in sorted(moved.items()))
+            print(f"  merged {sum(moved.values())} instance(s): {body}")
+            print(f"      They stay TARGETS. Dropping them would have taught "
+                  f"the model those plants are soil;\n"
+                  f"      keeping them as their own class asks a question this "
+                  f"build cannot answer.")
 
     # -- drop classes for THIS build (ontology untouched) --------------------
     if drop:
@@ -1062,6 +1118,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         "ontology": list(CLASSES),
         "active_classes": list(active_classes),
         "dropped": sorted(drop),
+        "merged": dict(merge_classes or {}),
         # What was ASKED for, alongside what it resolved to. An allow-list build
         # records the allow-list, so a later reader can tell "onion only, by
         # intent" from "these five happened to be dropped that day" - which is
@@ -1146,6 +1203,14 @@ def main(argv=None):
                    help="build a SEGMENTATION-ONLY dataset even if some LEPs "
                         "exist. Not normally needed: an export with no LEPs at "
                         "all is detected automatically.")
+    p.add_argument("--merge-classes", nargs="*", default=[], metavar="FROM=TO",
+                   help="relabel a class into a coarser one for THIS build "
+                        "(e.g. --merge-classes wild_radish=other_weed). The "
+                        "third option beside keep and drop, and the right one "
+                        "for a class with too few examples: dropping teaches "
+                        "the model those plants are soil, keeping asks a "
+                        "question the build cannot answer, merging keeps them "
+                        "targets. Applied BEFORE --drop-classes.")
     p.add_argument("--drop-classes", nargs="*", default=[],
                    help="exclude these ontology classes from THIS build "
                         "(e.g. --drop-classes wild_radish weed_cluster). "
@@ -1213,6 +1278,8 @@ def main(argv=None):
           seed=a.seed, holdout_val=a.holdout_val, holdout_test=a.holdout_test,
           strict=not a.allow_errors, gap_frames=a.gap_frames,
           drop_classes=a.drop_classes,
+          merge_classes=dict(
+              t.split('=', 1) for t in a.merge_classes if '=' in t),
           keep_classes=a.keep_classes,
           split_granularity=a.split_granularity,
           label_provenance=a.label_provenance,

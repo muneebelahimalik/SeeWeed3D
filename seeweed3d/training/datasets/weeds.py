@@ -57,13 +57,14 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: once there are several under one parent.
 WEED_SESSIONS = [
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
+    r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
 ]
 
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
 #: Keep it on the same drive as the images unless you have a reason not to -
 #: the manifest records absolute paths, so a dataset and its images that live
 #: on different drives are two things to keep in step instead of one.
-OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v3"
+OUT_DIR = r"E:\Dataset_Vidalia\datasets\weeds_v4"
 
 #: THE UNLABELLED POOL - the `sessions` folder holding weed recordings that are
 #: not yet corrected. Mining reads it, and weeds_look.py runs the model over a
@@ -101,34 +102,73 @@ CONFIG = dict(
     KEEP_CLASSES=["cutleaf_evening_primrose", "wild_radish", "grass_weed",
                   "weed_cluster", "other_weed"],
 
-    # weed_cluster has TWO instances in this build. A class in single digits
-    # reports an AP near zero and drags the mean down for a reason that has
-    # nothing to do with the model, so it is dropped from THIS build - the
-    # ontology is untouched and it returns the moment there are examples.
+    # wild_radish MERGED, not dropped.
     #
-    # The cost is that those two clusters become background, which is the wrong
-    # lesson in principle; at 2 instances out of 1446 it is noise either way,
-    # and a class the metrics cannot measure is worse. Remove this the first
-    # round that brings real cluster examples in.
+    # Dropping was the previous answer and it is the worse one: its 91
+    # instances are real plants, and a plant with no annotation is trained as
+    # SOIL. A weeder that has learned a radish is ground is the exact failure
+    # this project exists to avoid.
     #
-    # wild_radish has ZERO instances here. A class with no examples still gets
-    # a head, still costs capacity, and can never be predicted - and preflight
-    # lists it as 0/0 rather than flagging it, because "not in this build at
-    # all" is a legitimate state it declines to complain about. Dropping it
-    # makes the model 3 classes instead of 4.
-    DROP_CLASSES=["weed_cluster", "wild_radish"],
+    # Keeping it as its own class asks a question this build cannot answer
+    # well. 91 instances across 135 frames is under one per frame, and a class
+    # that thin reports an AP whose error bars are wider than the number -
+    # which makes round-to-round comparison harder at exactly the round that
+    # establishes the baseline.
+    #
+    # other_weed already means "a weed I cannot name more precisely", so a
+    # radish labelled other_weed is TRUE and merely less specific - and for a
+    # laser, an unnamed weed is still a weed. It also thickens other_weed,
+    # the thinnest class in the build at 126 training instances.
+    #
+    # Give it its own class back the round a second drive contributes radishes.
+    # One line, and the ontology never changed.
+    MERGE_CLASSES={"wild_radish": "other_weed"},
+
+    # weed_cluster has ~2 instances here. Too few to learn, too few to matter
+    # as background, and merging it would be wrong for a different reason:
+    # weed_cluster means "no separable single growth point", which is a
+    # statement about targetability rather than species. Calling one
+    # other_weed would assert it can be aimed at individually.
+    DROP_CLASSES=["weed_cluster"],
 
     # HAND CORRECTED - unlike the onion build. Change to "mixed" as soon as a
     # round merges frames that were accepted rather than corrected.
     LABEL_PROVENANCE="hand_corrected",
 
-    # These frames WERE all corrected, so there is no unverified subset to
-    # exclude. Set this only if that stops being true.
-    INCLUDE_FRAMES="",
+    # NOT OPTIONAL once a CVAT task was pre-loaded with prelabels. The export
+    # carries annotations on EVERY frame, including the ones nobody opened -
+    # vid3's task held 393 and 75 were corrected, so without this the other 318
+    # enter training as the model's own output while LABEL_PROVENANCE below
+    # says a person verified them. Nothing downstream can tell the difference.
+    #
+    # vid2 was corrected in full, so it takes `*`. vid3's 1-75 are the first 75
+    # frames in session order, which is the order they were worked in - a
+    # SCATTERED selection would need the item ids instead, and
+    # annotation/corrected_frames.py generates that list by diffing the export
+    # against the prelabels that went in.
+    #
+    # Positions are 1-based and CVAT's slider is 0-based. Run the build with
+    # LIST_FRAMES = True once after changing this and confirm the ids.
+    INCLUDE_FRAMES=("vid2_20260108_122731:*,"
+                    "vid3_20260108_110444:1-75"),
 
-    # Whole sessions where there are enough of them, frame blocks otherwise -
-    # and the build says which it used.
-    SPLIT_MODE="auto",
+    # FRAME BLOCKS WITHIN EVERY SESSION, so both drives contribute to both
+    # splits. "auto" chose group granularity with two sessions and put one
+    # whole drive in train and the other in val - a genuine generalisation
+    # estimate, and it cost 60 of 135 hand-corrected frames as training data
+    # and left the two splits with different weed populations (train 58% grass,
+    # val 58% primrose), so per-class AP moved for compositional reasons.
+    #
+    # WHAT THIS GIVES UP, and it is not small: val now shares its drives with
+    # train, so it shares their light, soil, growth stage and often the
+    # individual plants. Every number computed on it is an UPPER BOUND on a new
+    # drive, not an estimate of one. The gap accounting below is what keeps it
+    # from being worse than that.
+    #
+    # Justified while the dataset is this small - at 135 frames the binding
+    # constraint is training data, not measurement - and NOT justified once a
+    # third drive exists. Go back to "auto" then and hold a whole drive out.
+    SPLIT_MODE="frame_block",
     SPLIT_GRANULARITY="auto",
     HOLDOUT_TEST_SESSIONS=HOLDOUT_TEST,
 
