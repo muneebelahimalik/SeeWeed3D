@@ -256,7 +256,7 @@ def _legend_strip(img, names, pad=10, row=26, font=0.5):
 
 
 def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
-         show_legend=True, targets=None):
+         show_legend=True, targets=None, note=None):
     """Tint and outline every instance, ONE COLOUR PER CLASS.
 
     Crop proximity is drawn as an extra WHITE outline rather than by recolouring
@@ -332,6 +332,12 @@ def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
                          interpolation=cv2.INTER_AREA)
     if show_legend and drawn:
         out = _legend_strip(out, sorted(set(drawn)))
+    # AFTER the downscale, like the legend: a banner drawn before a 0.5 resize
+    # comes out at half the font size.
+    if note:
+        cv2.rectangle(out, (0, 0), (out.shape[1], 26), (0, 0, 0), -1)
+        cv2.putText(out, note, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    C_ABSTAIN, 1, cv2.LINE_AA)
     return out
 
 
@@ -397,9 +403,10 @@ def predict(cfg=None):
             print(f"  [skip] unreadable: {path}")
             continue
 
-        targets = None
+        targets, note = None, None
         if pipe is not None:
             rec, det, conflicts, targets = _run_full(pipe, path, bgr)
+            note = frame_note(rec)
         else:
             det = seg(bgr)
             # BEFORE the conflict check and before the overlay, so the picture,
@@ -423,7 +430,8 @@ def predict(cfg=None):
 
         vis = draw(bgr, det, conflicts, c.get("OVERLAY_SCALE", 1.0),
                    labels=c.get("LABELS", "class_score"),
-                   show_legend=c.get("LEGEND", True), targets=targets)
+                   show_legend=c.get("LEGEND", True), targets=targets,
+                   note=note)
         dst = out_dir / "overlays" / f"{path.stem}.png"
         cv2.imwrite(str(dst), vis)
         rec.update({"image": str(path), "overlay": str(dst)})
@@ -568,6 +576,21 @@ def _build_pipeline(c, seg, device):
                              torch_device=device)
 
 
+def frame_note(rec):
+    """A whole-frame warning for the overlay, or None.
+
+    Some abstention reasons are not facts about any plant. `crop_protection_
+    unavailable` says the MODEL has no onion class, so it is the same statement
+    on every instance in every frame - and repeating it per weed both buries it
+    and reads as a hazard. Said once, at the top, it is what it is: a reason
+    nothing in this run can be approved, no matter how good the masks are."""
+    from perception.safety import R_CROP_UNVERIFIABLE
+    n = (rec.get("reason_counts") or {}).get(R_CROP_UNVERIFIABLE, 0)
+    if n and n == len(rec.get("instances") or []):
+        return "NO CROP MASK - model cannot predict onion_plant; all abstained"
+    return None
+
+
 def _run_full(pipe, path, bgr):
     """One frame through the deployed pipeline. Falls back to segmentation for
     this frame if its depth or calibration is missing, rather than aborting a
@@ -593,9 +616,17 @@ def _run_full(pipe, path, bgr):
     res, det = pipe.run_with_detections(
         bgr, depth, valid, K,
         session_id=session.name if session else "", frame_id=path.stem)
+    # NAMED reasons, not a substring match on "crop". `crop_protection_
+    # unavailable` contains "crop" and means the opposite of what the !CROP tag
+    # says: there is no crop mask AT ALL because the model has no onion class.
+    # Matching loosely put a hazard marker on every weed in a frame with no
+    # onions in it, drawn by a model that cannot predict one - a capability gap
+    # dressed as a laser-on-the-crop warning, which is the most alarming thing
+    # this overlay can say.
+    from perception.safety import R_ONION, R_ONION_CONFLICT
     conflicts = {t.instance_index for t in res.abstentions
-                 if any("onion" in r or "crop" in r
-                        for r in t.rejection_reasons)}
+                 if R_ONION_CONFLICT in t.rejection_reasons
+                 or R_ONION in t.rejection_reasons}
     rec = {
         "n_candidates": len(res.candidates),
         "n_abstentions": len(res.abstentions),

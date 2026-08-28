@@ -251,3 +251,64 @@ def test_run_full_returns_its_targets_to_the_caller():
     from perception import predict_images as pi
     src = inspect.getsource(pi._run_full)
     assert "return rec, det, conflicts, res.targets" in src
+
+
+# --------------------------------------------------------------------------- #
+# !CROP must mean a weed on the crop, and nothing else
+# --------------------------------------------------------------------------- #
+def test_no_crop_mask_is_not_a_crop_conflict():
+    """THE CASE, seen in a real overlay: every weed tagged !CROP in a frame with
+    no onions in it, by a model that cannot predict one.
+
+    `crop_protection_unavailable` contains the substring "crop" and means the
+    OPPOSITE of what the tag says - not 'this weed sits on the crop' but 'there
+    is no crop mask at all'. A capability gap drawn as a laser-on-the-crop
+    warning is the most alarming thing this overlay can say."""
+    import inspect
+    from perception import predict_images as pi
+    src = inspect.getsource(pi._run_full)
+    assert '"crop" in r' not in src, \
+        "substring matching on reasons is exactly what broke it"
+    assert '"onion" in r' not in src
+    assert "R_ONION_CONFLICT in t.rejection_reasons" in src
+
+
+def test_the_missing_crop_mask_is_said_once_per_frame():
+    """It is the same statement on every instance of every frame, so repeating
+    it per weed both buries it and reads as a hazard."""
+    from perception.predict_images import frame_note
+    from perception.safety import R_CROP_UNVERIFIABLE
+    note = frame_note({"reason_counts": {R_CROP_UNVERIFIABLE: 3},
+                       "instances": [1, 2, 3]})
+    assert note and "NO CROP MASK" in note
+
+
+def test_a_real_crop_conflict_gets_no_such_banner():
+    """A weed genuinely sitting on an onion is a per-instance fact and must
+    keep its per-instance marker."""
+    from perception.predict_images import frame_note
+    from perception.safety import R_ONION_CONFLICT
+    assert frame_note({"reason_counts": {R_ONION_CONFLICT: 1},
+                       "instances": [1, 2, 3]}) is None
+
+
+def test_a_partial_crop_failure_is_not_a_frame_wide_claim():
+    """One instance unverifiable while others were checked is a different
+    situation, and saying 'all abstained' would be false."""
+    from perception.predict_images import frame_note
+    from perception.safety import R_CROP_UNVERIFIABLE
+    assert frame_note({"reason_counts": {R_CROP_UNVERIFIABLE: 1},
+                       "instances": [1, 2, 3]}) is None
+
+
+def test_segmentation_mode_has_no_banner():
+    from perception.predict_images import frame_note
+    assert frame_note({}) is None
+
+
+def test_the_banner_reaches_the_overlay():
+    from perception.predict_images import draw
+    d = det([("grass_weed", (10, 40, 10, 40), 0.9)])
+    plain = draw(frame(), d, set(), show_legend=False)
+    warned = draw(frame(), d, set(), show_legend=False, note="NO CROP MASK")
+    assert not np.array_equal(plain, warned)
