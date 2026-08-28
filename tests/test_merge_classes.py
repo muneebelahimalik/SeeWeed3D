@@ -11,6 +11,7 @@ Merging keeps every instance a target and asks only what the data supports.
 It is not a fudge: other_weed MEANS "a weed I cannot name more precisely", so
 a radish labelled other_weed is true, merely less specific.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -122,3 +123,94 @@ def test_it_fails_before_reading_any_export(tmp_path):
         pd.build(str(tmp_path), str(tmp_path), str(tmp_path / "o"),
                  merge_classes={"nope": "other_weed"})
     assert "Datumaro" not in str(e.value)
+
+
+# --------------------------------------------------------------------------- #
+# End to end - the half that shipped broken
+# --------------------------------------------------------------------------- #
+def _export(tmp_path, labels_by_frame):
+    """A minimal Datumaro export plus its images. labels_by_frame maps a frame
+    number to the ontology class index its single instance carries."""
+    import cv2
+    import numpy as np
+    from training import prepare_dataset as pd
+    items = [{
+        "id": f"s_one_{i:06d}", "media": {"path": f"s_one_{i:06d}.png"},
+        "image": {"size": [200, 200]},
+        "annotations": [{"id": i, "type": "polygon", "label_id": lab,
+                         "group": i,
+                         "points": [10, 10, 60, 10, 60, 60, 10, 60],
+                         "attributes": {}}]}
+        for i, lab in sorted(labels_by_frame.items())]
+    ann = tmp_path / "exports" / "annotations"
+    ann.mkdir(parents=True)
+    (ann / "default.json").write_text(json.dumps(
+        {"info": {}, "categories": {"label": {"labels": [
+            {"name": c} for c in pd.CLASSES]}}, "items": items}))
+    d = tmp_path / "sessions" / "s_one" / "rgb"
+    d.mkdir(parents=True)
+    for i in labels_by_frame:
+        cv2.imwrite(str(d / f"s_one_{i:06d}.png"),
+                    np.zeros((200, 200, 3), np.uint8))
+    return ann.parent, tmp_path / "sessions"
+
+
+def _built(tmp_path, **kw):
+    from training import prepare_dataset as pd
+    radish = CLASSES.index("wild_radish")
+    grass = CLASSES.index("grass_weed")
+    labels = {i: (radish if i % 2 else grass) for i in range(1, 13)}
+    root, images = _export(tmp_path, labels)
+    pd.build(root, images, tmp_path / "ds", val_fraction=0.25,
+             test_fraction=0.0, strict=False, **kw)
+    return json.loads((tmp_path / "ds" / "seg_manifest.json").read_text())
+
+
+def test_a_merged_class_gets_no_detection_head(tmp_path):
+    """THE REGRESSION, and it shipped. Renaming the instances empties the class
+    but left it in active_classes, so the model was built with one more class
+    than it had data for - capacity spent on something that can never be
+    predicted, an AP pinned at zero dragging the mean, and a model with a
+    different class count from the round before it, which breaks the only
+    comparison the loop exists to make.
+
+    A real run reached the trainer showing 4 classes and `wild_radish 0 0`."""
+    man = _built(tmp_path, merge_classes={"wild_radish": "other_weed"})
+    assert "wild_radish" not in man["classes"]
+
+
+def test_the_merge_target_survives_as_a_class(tmp_path):
+    man = _built(tmp_path, merge_classes={"wild_radish": "other_weed"})
+    assert "other_weed" in man["classes"]
+
+
+def test_the_instances_really_moved(tmp_path):
+    """Not merely relabelled in the report - the frames must carry them."""
+    man = _built(tmp_path, merge_classes={"wild_radish": "other_weed"})
+    names = {i["class_name"] for f in man["frames"] for i in f["instances"]}
+    assert "wild_radish" not in names
+    assert "other_weed" in names
+
+
+def test_nothing_is_lost_to_a_merge(tmp_path):
+    """The whole reason to merge rather than drop: every instance survives."""
+    plain = _built(tmp_path / "a", merge_classes={})
+    merged = _built(tmp_path / "b", merge_classes={"wild_radish": "other_weed"})
+    n = lambda m: sum(len(f["instances"]) for f in m["frames"])
+    assert n(merged) == n(plain)
+
+
+def test_a_dropped_class_does_lose_its_instances(tmp_path):
+    """The contrast that makes the merge worth having."""
+    plain = _built(tmp_path / "a", merge_classes={})
+    dropped = _built(tmp_path / "b", drop_classes=["wild_radish"])
+    n = lambda m: sum(len(f["instances"]) for f in m["frames"])
+    assert n(dropped) < n(plain)
+
+
+def test_merging_leaves_no_empty_class_in_the_report(tmp_path):
+    """`wild_radish 0 0` in a preflight table is the symptom someone has to
+    notice by eye. There should be nothing to notice."""
+    man = _built(tmp_path, merge_classes={"wild_radish": "other_weed"})
+    counts = man.get("per_class") or {}
+    assert all(v for v in counts.values()), counts
