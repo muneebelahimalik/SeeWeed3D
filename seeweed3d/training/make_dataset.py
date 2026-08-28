@@ -162,6 +162,24 @@ CONFIG = {
     # pollutes the metrics.
     "DROP_CLASSES": [],
 
+    # RELABEL a class into a coarser one, for THIS build only. The third
+    # option beside keep and drop, and the right one for a class with too few
+    # examples to train:
+    #
+    #     "MERGE_CLASSES": {"wild_radish": "other_weed"},
+    #
+    # Dropping teaches the model those plants are SOIL, which is this
+    # project's failure mode introduced on purpose. Keeping a class whose 91
+    # instances all landed in train costs a head that can never be measured
+    # and drags the mean AP down for a reason unrelated to the model. Merging
+    # keeps every instance a TARGET while asking only the question the build
+    # can answer - and other_weed already means "a weed I cannot name more
+    # precisely", so it is true, merely less specific.
+    #
+    # Applied BEFORE DROP_CLASSES, so a class can be merged and its old label
+    # dropped in the same build.
+    "MERGE_CLASSES": {},
+
     # The inverse, and the better spelling when the build is defined by what it
     # IS rather than by what it lacks. None = no allow-list (use DROP_CLASSES).
     #
@@ -409,6 +427,7 @@ def main(cfg=None):
         include_frames=c["INCLUDE_FRAMES"] or None,
         exclude_frames=c["EXCLUDE_FRAMES"] or None,
         drop_classes=c["DROP_CLASSES"],
+        merge_classes=c.get("MERGE_CLASSES") or {},
         keep_classes=c.get("KEEP_CLASSES"),
         label_provenance=c.get("LABEL_PROVENANCE", "hand_corrected"),
         # The runner has real paths, so it checks the images are actually there
