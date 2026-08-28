@@ -794,10 +794,19 @@ def next_steps(run_dir, pool_root, per_session):
     for r in per_session:
         L.append(f"  {r['session']:<28} {r['summary']['n_frames']:>7} "
                  f"{r['written']['accept']:>8} {r['written']['review']:>8}")
-    L += ["",
-          "  'scored' is every frame the model ran on. The other two are what",
-          "  is actually in the folders, after near-copies were dropped and the",
-          "  per-class cap applied - see each session's selftrain_report.json"]
+    # Under EXPORT_ALL nothing was thinned, so the stock explanation of the gap
+    # between the columns describes filtering that did not happen. A footer that
+    # is false is worse than none: it is the line someone reads to decide the
+    # numbers are fine.
+    L += ["", "  'scored' is every frame the model ran on."] + ([
+        "  Nothing was thinned - EXPORT_ALL, so accept/ + review/ is every one",
+        "  of them. Per-frame scores are in each session's "
+        "selftrain_report.json.",
+    ] if EXPORT_ALL else [
+        "  The other two are what is actually in the folders, after near-copies",
+        "  were dropped and the per-class cap applied - see each session's",
+        "  selftrain_report.json",
+    ])
     L += [
         "",
         "1. CORRECT review/ FIRST, one CVAT task per session.",
