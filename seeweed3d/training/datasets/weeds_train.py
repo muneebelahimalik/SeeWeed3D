@@ -34,7 +34,7 @@ from training.train_model_rfdetr import CONFIG as BASE, main  # noqa: E402
 # #############################################################################
 
 #: Bump this each round. Round 0 is the model trained on what you have today.
-ROUND = 0
+ROUND = 1
 
 #: WHERE RUNS ARE WRITTEN. One folder per round - reusing one overwrites the
 #: checkpoint you would have compared against, and the comparison is the point.
