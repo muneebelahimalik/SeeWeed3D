@@ -825,3 +825,30 @@ def test_export_all_is_off_by_default():
     """The filtered path is the one that is safe to run without thinking."""
     import training.datasets.weeds_selftrain as mod
     assert mod.EXPORT_ALL is False
+
+
+def test_export_all_next_steps_does_not_claim_frames_were_thinned(run,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+    """The stock footer explains the gap between 'scored' and the folder counts
+    as separation plus the class cap. Under EXPORT_ALL there is no gap and
+    neither ran, so that line describes filtering that did not happen - and it
+    is the line someone reads to decide the numbers are fine."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    # Whitespace-normalised: the footer wraps, so a phrase spanning the break
+    # is absent from the raw text in BOTH modes - which made this pass without
+    # testing anything.
+    txt = " ".join((tmp_path / "out" / "NEXT_STEPS.txt").read_text().split())
+    assert "near-copies were dropped" not in txt
+    assert "Nothing was thinned" in txt
+
+
+def test_the_filtered_path_keeps_the_explanation(run, tmp_path):
+    """There the gap is real and large, and unexplained it looks like frames
+    went missing."""
+    mod, out = run
+    mod.main()
+    txt = " ".join((tmp_path / "out" / "NEXT_STEPS.txt").read_text().split())
+    assert "near-copies were dropped" in txt
