@@ -175,7 +175,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from annotation.prelabel_weeds_sam3 import (link_or_copy,  # noqa: E402
                                             load_sam3, mask_iou, mask_polygons,
                                             pool_frames, print_pool_report,
-                                            sam3_instances)
+                                            refine_boundary, sam3_instances,
+                                            smooth_boundary)
 from common.ontology import (CLASSES, PRELABEL_CATEGORY_ID,  # noqa: E402
                              PRELABEL_CLASS, prelabel_categories,
                              prelabel_cvat_labels)
@@ -366,6 +367,38 @@ CONFIG = {
     # second true lobe is not. An absolute floor deletes cotyledons.
     "FRAGMENT_MIN_FRAC": 0.15,
     "FILL_HOLES_MAX_PX": 400,
+
+    # -- Boundary quality ----------------------------------------------------
+    #
+    # The weed prelabeler's, imported rather than reimplemented: they were tuned
+    # on this ground and a second copy would drift from it.
+    #
+    # THE ERROR IS SIZE-DEPENDENT, which is why a fixed band is the right shape
+    # of fix. SAM decodes on a fixed grid over the whole frame, so a rosette
+    # gets many cells across it and a seedling a handful - and the seedling's
+    # outline is quantised to those few cells before anything else runs. 2 px is
+    # a large fraction of a 30 px seedling and cosmetic on a 200 px one.
+    #
+    # It matters MORE in a mixed scene than in a weed-only one. Onion leaves are
+    # thin tubes a few pixels wide crossing everything, so a boundary that
+    # bleeds two pixels does not merely blur an edge - it swallows a leaf that
+    # belongs to the crop, and the crop is the thing that must not be hit.
+    "BOUNDARY_REFINE_BAND_PX": 2,
+    "BOUNDARY_REFINE_VEG_MIN": 0.5,
+
+    # Only refine instances at or below this area; 0 refines everything. 1500 px
+    # is the project's own definition of a small weed (eval_seg.py), so the
+    # prelabeler and the metric agree on what "small" means.
+    #
+    # DO NOT RAISE THIS to "improve" the big plants. They are the half that
+    # already works, and #29 is the case where a boundary pipeline that improved
+    # every number produced worse masks in the field.
+    "BOUNDARY_REFINE_MAX_AREA_PX": 1500,
+
+    # Anti-aliasing: blur-and-rethreshold to remove the single-pixel staircase
+    # refinement leaves behind. Set ~0.7 to enable.
+    "BOUNDARY_SMOOTH_SIGMA_PX": 0.0,
+    "BOUNDARY_SMOOTH_MIN_RETAINED_FRAC": 0.85,
     # The last gate before an instance reaches CVAT. Every instance under this
     # is one shape somebody has to select and delete by hand, and on pebbly
     # ground there can be hundreds per frame. 250 is the value the weed
@@ -943,16 +976,30 @@ def _own_components(claimed, seed):
     return np.isin(labels, list(keep)) if keep else np.zeros_like(claimed)
 
 
-def clean_instance(mask, cfg):
-    """Fill pinholes, drop specks. Returns None if nothing plant-sized is left.
+def clean_instance(mask, cfg, veg_score=None):
+    """Fill pinholes, snap the edge, anti-alias, drop specks.
 
-    Runs AFTER the watershed, because both operations are about the shape of a
-    finished instance: filling before it would let a hole get assigned, and
-    dropping specks before it would delete markers."""
+    Runs AFTER the watershed, because every operation here is about the shape of
+    a FINISHED instance: filling before it would let a hole get assigned, and
+    dropping specks before it would delete markers.
+
+    The boundary steps are the weed prelabeler's, imported rather than copied -
+    they were tuned on this data and a second implementation would drift. They
+    are no-ops until configured, so the mixed pipeline behaves exactly as before
+    unless BOUNDARY_REFINE_BAND_PX is set.
+
+    ORDER. Refine decides each edge pixel on the image's own evidence, which
+    leaves single-pixel staircase noise a real leaf margin does not have; smooth
+    removes it. Both before drop_fragments, so a speck the refinement created is
+    still caught, and both before the area floor, so an instance is measured at
+    the size it will actually be exported at."""
     m = np.asarray(mask).astype(bool)
     if not m.any():
         return None
     m = fill_holes(m, cfg["FILL_HOLES_MAX_PX"])
+    if veg_score is not None:
+        m = refine_boundary(m, veg_score, cfg)
+    m = smooth_boundary(m, cfg)
     m = drop_fragments(m, min_frac=cfg["FRAGMENT_MIN_FRAC"])
     return m if int(m.sum()) >= cfg["MIN_INSTANCE_AREA_PX"] else None
 
@@ -996,7 +1043,7 @@ def analyze_frame(bgr, sam_masks, cfg, depth_mm=None, conf=None,
 
     instances = []
     for m, src, sp in zip(grown, sources, seed_px):
-        m = clean_instance(m, cfg)
+        m = clean_instance(m, cfg, score)
         if m is None:
             continue
         area = int(m.sum())
