@@ -78,6 +78,25 @@ pseudo-labels get **weighted**: an error on one plant enters the training set
 once per near-copy. It applies to `review/` too, where each near-copy is a
 person correcting the same plant a second time.
 
+### Or export the lot and correct it
+
+`EXPORT_ALL = True` turns off separation, the budget and the class cap together.
+
+All three exist to bound labels **nobody looked at** — so intending to correct
+every frame removes the premise of all three at once. It also stops being
+self-training: what comes out is ordinary annotation with prelabels, and once
+corrected the provenance is `hand_corrected`, not `mixed`. The accept/review
+split survives as the *order to work in*.
+
+The run prints the frame **and instance** counts before you commit, because the
+instance count is what decides whether it was a good idea and nobody estimates
+it correctly from a frame count — two 390-frame drives is ~780 frames and
+~30,000 instances.
+
+One cost outlives the correcting: 60 near-identical frames of one stretch of
+field, even perfectly labelled, still weight that stretch 60× against everywhere
+else the robot has to work.
+
 > **The yield is arithmetic, not quality.** A 391-frame drive at gap 60 has
 > 6–7 windows, so 292 frames passing the gates still becomes ~6 files. To get
 > more, lower `MIN_FRAME_GAP` or add drives — 391 frames is about thirteen

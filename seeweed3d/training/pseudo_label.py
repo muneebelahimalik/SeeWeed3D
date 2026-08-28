@@ -254,6 +254,26 @@ def select_spread(order, chosen, score_of, min_gap):
     return kept, [f for f in cand if f not in keptset]
 
 
+def export_all_note(n_accept, n_review, n_inst):
+    """What EXPORT_ALL turned off, and what it is going to cost.
+
+    Printed rather than assumed, because the number that decides whether this
+    was a good idea is the instance count, and nobody estimates it correctly
+    from a frame count. A 390-frame drive carries tens of thousands."""
+    total = n_accept + n_review
+    return (f"  EXPORT_ALL: every scored frame - {total} frame(s), "
+            f"~{n_inst} instance(s).\n"
+            f"              No separation, no pseudo-label budget, no "
+            f"per-class cap: all three\n"
+            f"              exist to bound labels nobody looked at, and you "
+            f"are going to look at\n"
+            f"              all of them. Corrected, this is "
+            f"'hand_corrected' - not 'mixed'.\n"
+            f"              Work review/ ({n_review}) before accept/ "
+            f"({n_accept}): same frames either\n"
+            f"              way, but that is where the model is wrong.")
+
+
 def separation_note(n_before, n_after, min_gap, stride=1):
     """What the separation step did, in one line, always printed.
 

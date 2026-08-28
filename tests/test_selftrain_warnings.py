@@ -170,7 +170,7 @@ def test_the_runner_prints_it_after_the_batch_counts():
     them rather than scrolled off above."""
     import inspect
     from training.datasets import weeds_selftrain as st
-    src = inspect.getsource(st._emit)
+    src = inspect.getsource(st._finish)
     assert "separation_warning" in src
     assert src.index("review/") < src.index("separation_warning")
 
