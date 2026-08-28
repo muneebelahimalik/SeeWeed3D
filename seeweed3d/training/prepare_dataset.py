@@ -548,7 +548,19 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                 "is FOR, or omit it entirely to keep every class.")
         drop |= set(CLASSES) - keep
 
-    active_classes = [c for c in CLASSES if c not in drop]
+    # A MERGED CLASS IS NOT AN ACTIVE CLASS. Renaming its instances empties it,
+    # and leaving it in the list gives it a detection head trained on zero
+    # examples: capacity spent on something that can never be predicted, an AP
+    # pinned at zero dragging the mean, and a model with one more class than
+    # the round before it - so the comparison the whole loop exists for stops
+    # working. It shipped that way and a training run reached 4 classes with
+    # `wild_radish 0 0` in the preflight before anyone noticed.
+    #
+    # Kept separate from `drop` so the printed reasons stay honest: these
+    # instances were not discarded, they are in the build under another name.
+    merged_away = {c for c, t in merge_classes.items() if t != c}
+    active_classes = [c for c in CLASSES
+                      if c not in drop and c not in merged_away]
     if not active_classes:
         raise SystemExit("ERROR: every class was dropped; nothing to train on.")
 
