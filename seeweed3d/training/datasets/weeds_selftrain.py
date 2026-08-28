@@ -31,6 +31,15 @@ One drive still cannot supply a round - 393 frames is thirteen seconds of
 driving - so the way to get more data is more drives, which is why this scores
 every eligible session by default.
 
+OR EXPORT THE LOT AND CORRECT IT
+--------------------------------
+EXPORT_ALL = True turns off separation, the budget and the class cap together.
+All three exist to bound labels NOBODY LOOKED AT, so intending to correct every
+frame removes the premise of all three at once - and it stops being
+self-training at that point, becoming ordinary annotation with prelabels. The
+accept/review split survives as the order to work in. The cost is time, and the
+run prints the frame AND instance counts before you commit to it.
+
 ONE SUBFOLDER PER SESSION, NOT ONE POOLED BATCH
 -----------------------------------------------
 Pooling would be one less CVAT task and would break the round trip. The build
@@ -150,6 +159,28 @@ REVIEW = pl.REVIEW_SCORE
 #: computed against THIS, not against the dataset size, so a mostly-pseudo
 #: dataset cannot use its own size to justify more. 0 = read it from the build.
 N_HAND = 0
+
+#: EXPORT EVERY SCORED FRAME. No separation, no budget, no class cap.
+#:
+#: Set this when you intend to CORRECT ALL OF IT. Every filter it turns off
+#: exists to bound labels nobody looked at - separation because an unreviewed
+#: error enters training once per near-copy, the budget because a mostly-pseudo
+#: dataset outvotes the hand-corrected signal, the class cap because the loop
+#: otherwise concentrates on the class the model is already best at. A human
+#: correcting every frame removes the premise of all three.
+#:
+#: IT STOPS BEING SELF-TRAINING. What comes out is ordinary annotation with
+#: prelabels, and once corrected the provenance is "hand_corrected", not
+#: "mixed" - there is no unreviewed label left to qualify. The accept/review
+#: split still earns its keep as the ORDER to work in.
+#:
+#: THE COST IS YOUR TIME AND IT IS LARGE. Two 390-frame drives is ~780 frames
+#: and ~30,000 instances. The run prints both numbers before you commit.
+#:
+#: The other cost outlives the correcting: 60 near-identical frames of one
+#: stretch of field, even perfectly labelled, still weight that stretch 60x
+#: against everywhere else the robot has to work.
+EXPORT_ALL = False
 
 # #############################################################################
 # ##  Nothing below here needs editing                                       ##
@@ -577,14 +608,38 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
     for q in qualities:
         buckets[pl.classify(q, ACCEPT, REVIEW)].append(q["frame"])
 
+    order = scored["order"]
+
+    def _score_of(f):
+        return per_frame[f]["quality"]["score"]
+
+    if EXPORT_ALL:
+        # EVERY SCORED FRAME, no thinning. The three filters below all exist to
+        # bound labels NOBODY LOOKED AT - separation because an unreviewed error
+        # enters training once per near-copy, the budget because a mostly-pseudo
+        # dataset outvotes the hand-corrected signal, the class cap because the
+        # loop otherwise concentrates on the class the model is already best at.
+        # A human correcting every frame removes the premise of all three, so
+        # applying them would just be hiding work that was asked for.
+        #
+        # It stops being self-training at that point and becomes ordinary
+        # annotation with prelabels. The accept/review split still earns its
+        # keep as the ORDER to work in - review/ is where the model is wrong -
+        # but nothing here is a pseudo-label any more.
+        print(pl.export_all_note(len(buckets["accept"]),
+                                 len(buckets["review"]),
+                                 sum(len(per_frame[f]["polys"])
+                                     for f in buckets["accept"]
+                                     + buckets["review"])))
+        accepted = list(buckets["accept"])
+        return _finish(session, scored, pred_dir, out, n_hand, budget,
+                       summary, buckets, accepted)
+
     # SEPARATION FIRST, on both halves. Everything was inferred and scored, so
     # this is a choice among frames rather than a stride that never looked -
     # and it applies to review/ as much as to accept/, because there each
     # near-copy is a person correcting the same plant a second time.
-    order = scored["order"]
     gap = max(0, int(MIN_FRAME_GAP) // max(1, int(INFER_STRIDE)))
-    def _score_of(f):
-        return per_frame[f]["quality"]["score"]
     n_acc_raw, n_rev_raw = len(buckets["accept"]), len(buckets["review"])
     buckets["accept"], dropped_acc = pl.select_spread(
         order, buckets["accept"], _score_of, gap)
@@ -629,10 +684,24 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
               f"                 {int(pl.BALANCE_CAP_FRAC * 100)}% per-class "
               f"cap - {body}")
 
+    return _finish(session, scored, pred_dir, out, n_hand, budget,
+                   summary, buckets, accepted)
+
+
+def _finish(session, scored, pred_dir, out, n_hand, budget, summary, buckets,
+            accepted):
+    """Write the two batches, the spot check and the report.
+
+    Split from the selection so the EXPORT_ALL path and the filtered path share
+    one writer: two copies of this, kept in step by hand, is how the two modes
+    would come to disagree about what a batch folder contains."""
+    per_frame = scored["per_frame"]
     names = scored["names"]
+    provenance = ("SeeWeed3D model prelabels FOR CORRECTION - every scored "
+                  "frame, EXPORT_ALL" if EXPORT_ALL else
+                  "SeeWeed3D PSEUDO-LABELS - model output, not reviewed")
     n_img, n_ann = _write_batch(accepted, per_frame, out / "accept", names,
-                                "SeeWeed3D PSEUDO-LABELS - model output, "
-                                "not reviewed")
+                                provenance)
     print(f"\n  accept/     {n_img} frame(s), {n_ann} instance(s)"
           f"  -> {out / 'accept' / 'cvat_ready'}")
     r_img, r_ann = _write_batch(buckets["review"], per_frame, out / "review",
@@ -757,10 +826,17 @@ def next_steps(run_dir, pool_root, per_session):
         "3. ADD THOSE SESSIONS TO THE BUILD.",
         "   In training/datasets/weeds.py, extend WEED_SESSIONS with the",
         "   session folders you actually corrected, and set",
+    ] + ([
+        "       LABEL_PROVENANCE = \"hand_corrected\"",
+        "   ONLY IF you corrected every frame in both folders - which is what",
+        "   EXPORT_ALL was for. Any frame you skipped is an unreviewed label,",
+        "   and one of those makes the whole build \"mixed\".",
+    ] if EXPORT_ALL else [
         "       LABEL_PROVENANCE = \"mixed\"",
         "   the moment any unreviewed frame is included. It stops being",
         "   \"hand_corrected\" the first time it stops being true, and every",
         "   score computed later is read through that field.",
+    ]) + [
         "",
         "4. REBUILD, BUMP THE ROUND, RETRAIN.",
         "       python -m seeweed3d.training.datasets.weeds",
@@ -856,7 +932,10 @@ def main():
     print(f"\n{'=' * 70}")
     print(f"  {len(reports)} session(s): {n_scored} frame(s) scored -> "
           f"{n_acc} in accept/, {n_rev} in review/")
-    warn = pooled_budget_warning(n_acc, budget, n_hand)
+    # The budget bounds UNREVIEWED labels. Under EXPORT_ALL there will not be
+    # any, so firing here would be a false alarm on the run that least needs it.
+    warn = None if EXPORT_ALL else pooled_budget_warning(n_acc, budget,
+                                                         n_hand)
     if warn:
         print(warn)
     print(f"  -> {run_dir}")

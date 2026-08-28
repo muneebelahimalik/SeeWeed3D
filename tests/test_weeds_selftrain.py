@@ -707,3 +707,121 @@ def test_a_batch_within_the_cap_prints_no_balance_line(run, capsys):
     mod, out = run
     mod.main()
     assert "class balance" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# EXPORT_ALL: correcting everything, so none of the guardrails apply
+# --------------------------------------------------------------------------- #
+def test_export_all_keeps_every_scored_frame(run, tmp_path, monkeypatch):
+    """The filters bound labels nobody looked at. Intending to correct all of
+    them removes the premise of every one, so applying them would be hiding
+    work that was asked for."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    s = rep["summary"]
+    assert rep["written"]["accept"] == s["accept"]
+    assert rep["written"]["review"] == s["review"]
+
+
+def test_export_all_beats_the_filtered_path_on_count(run, tmp_path,
+                                                     monkeypatch):
+    mod, out = run
+    mod.main()
+    filtered = json.loads((out / "selftrain_report.json").read_text())["written"]
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    monkeypatch.setattr(mod, "OUT_DIR", str(tmp_path / "all"))
+    mod.main()
+    every = json.loads(
+        (tmp_path / "all" / "vid_test" / "selftrain_report.json").read_text()
+    )["written"]
+    assert every["accept"] >= filtered["accept"]
+
+
+def test_export_all_ignores_the_frame_gap(run, tmp_path, monkeypatch):
+    """A gap of 60 on a 7-frame fixture leaves one frame. EXPORT_ALL has to
+    override it, not be overridden by it."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    monkeypatch.setattr(mod, "MIN_FRAME_GAP", 10_000)
+    mod.main()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    assert rep["written"]["accept"] == rep["summary"]["accept"]
+
+
+def test_export_all_ignores_the_budget(run, tmp_path, monkeypatch):
+    """The budget bounds unreviewed labels, and there will not be any."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    monkeypatch.setattr(mod, "N_HAND", 1)          # budget 2
+    mod.main()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    assert rep["written"]["accept"] == rep["summary"]["accept"]
+
+
+def test_export_all_does_not_warn_about_the_budget(run, monkeypatch, capsys):
+    """Firing there would be a false alarm on the run that least needs it."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    monkeypatch.setattr(mod, "N_HAND", 1)
+    mod.main()
+    assert "exceeds the budget" not in capsys.readouterr().out
+
+
+def test_export_all_says_what_it_turned_off_and_what_it_costs(run, monkeypatch,
+                                                              capsys):
+    """The number that decides whether this was a good idea is the instance
+    count, and nobody estimates it correctly from a frame count."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    txt = capsys.readouterr().out
+    assert "EXPORT_ALL" in txt
+    assert "instance(s)" in txt
+    assert "No separation" in txt and "budget" in txt and "cap" in txt
+
+
+def test_export_all_still_splits_accept_from_review(run, monkeypatch):
+    """Same frames either way, but review/ is where the model is wrong - it is
+    the order to work in, and that is worth keeping."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    rep = json.loads((out / "selftrain_report.json").read_text())
+    assert rep["written"]["accept"] and rep["written"]["review"]
+
+
+def test_export_all_stamps_the_batch_as_for_correction(run, monkeypatch):
+    """Calling it PSEUDO-LABELS would be wrong: nothing here is meant to be
+    merged unreviewed, and provenance is what makes that recoverable later."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    desc = batch(out, "accept")["info"]["description"]
+    assert "PSEUDO-LABELS" not in desc
+    assert "EXPORT_ALL" in desc
+
+
+def test_export_all_next_steps_says_hand_corrected(run, tmp_path, monkeypatch):
+    """Merging a fully corrected batch as "mixed" would understate it for every
+    later reader, and every score is read through that field."""
+    mod, out = run
+    monkeypatch.setattr(mod, "EXPORT_ALL", True)
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    assert 'LABEL_PROVENANCE = "hand_corrected"' in txt
+    assert "Any frame you skipped" in txt, "the condition has to travel with it"
+
+
+def test_the_default_path_still_says_mixed(run, tmp_path):
+    mod, out = run
+    mod.main()
+    txt = (tmp_path / "out" / "NEXT_STEPS.txt").read_text()
+    assert 'LABEL_PROVENANCE = "mixed"' in txt
+
+
+def test_export_all_is_off_by_default():
+    """The filtered path is the one that is safe to run without thinking."""
+    import training.datasets.weeds_selftrain as mod
+    assert mod.EXPORT_ALL is False
