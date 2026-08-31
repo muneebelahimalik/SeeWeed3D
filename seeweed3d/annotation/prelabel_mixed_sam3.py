@@ -192,7 +192,7 @@ from perception.segmenter import drop_fragments  # noqa: E402
 # ##   ONLY_SESSIONS  -  your MIXED (onion + weed) sessions                  ##
 # #############################################################################
 
-DATASET_ROOT   = r"E:\Dataset_Vidalia\Vidalia_visit_1_2025_all_sessions"
+DATASET_ROOT   = r"E:\Dataset_Vidalia\Vidalia_visit_1_20250221_all_sessions"
 SAM_VERSION    = "sam3"
 SAM_CHECKPOINT = r"E:\Models\sam3.pt"
 # =============================================================================
@@ -203,7 +203,7 @@ CONFIG = {
     "DATASET_ROOT":   DATASET_ROOT,
     "SAM_VERSION":    SAM_VERSION,
     "SAM_CHECKPOINT": SAM_CHECKPOINT,
-    "OUTPUT_SUBDIR":  "auto_labels_mixed",
+    "OUTPUT_SUBDIR":  "auto_labels_mixed_v1",
 
     # Mixed sessions. Empty = every session under sessions/.
     "ONLY_SESSIONS": ["Visit1_20250221_142227","Visit1_20250221_142905","Visit1_20250221_143322"],
