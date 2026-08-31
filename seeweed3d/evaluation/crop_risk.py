@@ -39,6 +39,23 @@ They come apart. One detection sprawling across six onions is one bad detection
 and six endangered plants; six small false detections on one onion is the
 reverse. Reporting either alone hides a real case.
 
+THE SAME RATE MEANS TWO DIFFERENT THINGS
+----------------------------------------
+Run against a WEED-ONLY model, a high rate is close to the ceiling BY
+CONSTRUCTION: with no class for an onion, in a drive where every plant is one,
+almost anything the model detects has to land on crop. That proves the
+checkpoint is unsafe and it cannot prove anything else - in particular it cannot
+separate "onions look like weeds" from "the model detects plants and has nowhere
+to put an onion". The verdict says so instead of sending the next month of
+annotation after a conclusion the measurement could not support.
+
+Run against a CROP-CAPABLE model the question becomes discriminative, so its own
+onion_plant detections are EXCLUDED from the numerator - scoring the model for
+correctly calling an onion an onion would rank the fixed model below the broken
+one. What is left is a real confusion. That model also gets CROP RECALL, because
+an onion it never detects is an onion the safety mask cannot protect, and
+`allow_missing_crop_mask = False` makes that the other half of crop safety.
+
 WHAT THIS CANNOT TELL YOU
 -------------------------
 A detection that lands on NO onion is not automatically wrong. Onion drives
@@ -243,27 +260,41 @@ def rasterise(polys, h, w):
 
 
 def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
-               det_min=DETECTION_ON_CROP_MIN, onion_min=ONION_COVERED_MIN):
+               det_min=DETECTION_ON_CROP_MIN, onion_min=ONION_COVERED_MIN,
+               crop_class=CROP_CLASS):
     """One frame's verdict. Pure: takes polygons, returns counts.
 
     Both directions are computed from the same masks so they cannot disagree
     about a frame, and the per-class tally records WHICH weed class the model
     mistook the crop for - if one dominates, that is an interpretable finding
-    rather than a number."""
+    rather than a number.
+
+    ONLY WEED-CLASS DETECTIONS COUNT AS CROP HITS. A crop-capable model puts an
+    `onion_plant` mask on an onion, which is the model getting it exactly right;
+    counting that as risk would score the fixed model as worse than the broken
+    one. Those detections are tallied separately as crop RECALL - an onion the
+    model never detects is an onion the safety mask cannot protect, which is the
+    other half of crop safety and free to measure here."""
     onion_masks = [rasterise(p, h, w) for _, p, _ in onion_insts]
     onion_union = np.zeros((h, w), bool)
     for m in onion_masks:
         onion_union |= m
 
     kept = [(c, p) for c, p, s in pred_insts if s >= min_score]
-    hits_by_class, n_on_crop, n_off_crop = {}, 0, 0
+    hits_by_class, n_on_crop, n_off_crop, n_weeds, n_crop_det = {}, 0, 0, 0, 0
     covered = np.zeros((h, w), bool)
+    crop_covered = np.zeros((h, w), bool)
     on_crop_idx = []
     for i, (cls, polys) in enumerate(kept):
         m = rasterise(polys, h, w)
         area = int(m.sum())
         if not area:
             continue
+        if cls == crop_class:
+            n_crop_det += 1
+            crop_covered |= m
+            continue
+        n_weeds += 1
         frac = float((m & onion_union).sum()) / area
         if frac >= det_min:
             n_on_crop += 1
@@ -273,31 +304,37 @@ def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
         else:
             n_off_crop += 1
 
-    endangered = sum(
-        1 for m in onion_masks
-        if m.any() and float((m & covered).sum()) / float(m.sum()) >= onion_min)
+    def _covered_by(mask):
+        return sum(1 for m in onion_masks if m.any()
+                   and float((m & mask).sum()) / float(m.sum()) >= onion_min)
 
-    return {"n_detections": len(kept),
+    return {"n_detections": n_weeds,
             "n_on_crop": n_on_crop, "n_off_crop": n_off_crop,
-            "n_onions": len(onion_masks), "n_endangered": endangered,
+            "n_onions": len(onion_masks),
+            "n_endangered": _covered_by(covered),
+            "n_crop_detections": n_crop_det,
+            "n_onions_detected": _covered_by(crop_covered),
             "hits_by_class": hits_by_class, "on_crop_idx": on_crop_idx}
 
 
 def summarise(per_frame):
-    """Totals plus the two rates, kept apart because they answer differently."""
-    tot = {"frames": len(per_frame), "n_detections": 0, "n_on_crop": 0,
-           "n_off_crop": 0, "n_onions": 0, "n_endangered": 0,
-           "hits_by_class": {}}
+    """Totals plus the rates, kept apart because they answer differently."""
+    keys = ("n_detections", "n_on_crop", "n_off_crop", "n_onions",
+            "n_endangered", "n_crop_detections", "n_onions_detected")
+    tot = dict({k: 0 for k in keys}, frames=len(per_frame), hits_by_class={})
     for r in per_frame.values():
-        for k in ("n_detections", "n_on_crop", "n_off_crop", "n_onions",
-                  "n_endangered"):
-            tot[k] += r[k]
+        for k in keys:
+            tot[k] += r.get(k, 0)
         for c, n in r["hits_by_class"].items():
             tot["hits_by_class"][c] = tot["hits_by_class"].get(c, 0) + n
     tot["detection_on_crop_rate"] = (
         tot["n_on_crop"] / tot["n_detections"] if tot["n_detections"] else 0.0)
     tot["onion_endangered_rate"] = (
         tot["n_endangered"] / tot["n_onions"] if tot["n_onions"] else 0.0)
+    # Only meaningful for a model that HAS the crop class; the report shows it
+    # only then, because 0% from a weed-only model is a tautology, not a score.
+    tot["crop_recall"] = (
+        tot["n_onions_detected"] / tot["n_onions"] if tot["n_onions"] else 0.0)
     return tot
 
 
@@ -317,28 +354,122 @@ def sweep(frames, thresholds=SWEEP, conf=CONF):
             for t in sorted(t for t in thresholds if t >= conf)]
 
 
-def verdict(s):
-    """What the number means for the next decision, not just what it is."""
+def verdict(s, model_classes=None):
+    """What the number means for the next decision, not just what it is.
+
+    THE SAME RATE MEANS TWO DIFFERENT THINGS depending on the model, and reading
+    it the wrong way sends the next month of annotation in the wrong direction.
+
+    A WEED-ONLY model has no class for an onion, so in a drive where every plant
+    IS an onion, anything its objectness fires on necessarily lands on crop. A
+    high rate there is close to the ceiling by construction: it proves the
+    checkpoint is unsafe, but it CANNOT separate "onions look like weeds" from
+    "the model detects plants and has nowhere to put an onion". Only a
+    crop-capable model can be asked the discriminative question, so the honest
+    conclusion is to train one and re-run rather than to buy contact frames on
+    the strength of a number that could not have come out low.
+
+    A CROP-CAPABLE model's own onion detections are excluded from the numerator,
+    so what remains is a genuine confusion and the bands mean what they say."""
     r = s["onion_endangered_rate"]
     if s["n_onions"] == 0:
         return ("No annotated onions were found in these frames, so nothing "
                 "was measured. Check SESSIONS points at the onion campaign.")
+
+    if not (model_classes and CROP_CLASS in model_classes):
+        if r < 0.02:
+            return ("LOW, and informative. Even with no class for an onion this "
+                    "model mostly leaves crop tissue alone, so its learnt weed "
+                    "appearance does not cover onions. Adding the crop class "
+                    "should be enough - build mixed.py and retrain.")
+        return (f"UNSAFE, AND EXPECTED. {r:.0%} of onions carry a weed "
+                f"detection - but this model has no class for an onion, so in a "
+                f"drive where every plant is one, almost anything it detects "
+                f"must land on crop. It confirms the weed-only checkpoint can "
+                f"never drive a laser; it CANNOT tell you whether a crop class "
+                f"fixes it, because a model with no onion class had no way to "
+                f"be right here. Train the mixed model and re-run - this number "
+                f"only becomes diagnostic then.")
+
     if r < 0.02:
-        return ("LOW. The model rarely claims crop tissue, so its problem is "
-                "that it cannot SEE onions rather than that it mistakes them. "
-                "Adding the crop class should be enough - build mixed.py and "
-                "retrain.")
+        return ("LOW. The model rarely puts a WEED class on crop tissue. Check "
+                "crop recall below too: an onion it never detects at all is one "
+                "the safety mask cannot protect.")
     if r < 0.15:
-        return ("MODERATE. Some crop tissue reads as weed. The crop class will "
-                "help, but budget contact frames - onions and weeds touching - "
-                "rather than assuming more onion-only data fixes it.")
+        return ("MODERATE. Some crop tissue reads as weed even with an onion "
+                "class available. The next annotation should buy contact frames "
+                "- onions and weeds touching - rather than more onion-only "
+                "drives.")
     return ("HIGH. Onion tissue is genuinely confusable with weeds at this "
-            "resolution, and a crop class alone will not settle it. Spend the "
-            "next annotation on MIXED frames with real contact, and re-run "
-            "this before trusting any crop-safety number.")
+            "resolution: the model can say onion_plant and chose a weed class "
+            "anyway. Spend the next annotation on MIXED frames with real "
+            "contact, and do not trust any crop-safety number until it drops.")
 
 
-def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0):
+def hits_note(hits_by_class, model_classes=None, dominant=0.8):
+    """What the class tally does and does not say about appearance.
+
+    The tempting reading is "onions look like X". For a model with no onion
+    class that is usually wrong: it has to emit SOME weed label, so a single
+    class taking almost every hit is its class PRIOR showing through, not a
+    resemblance. Saying so here stops a training-set imbalance being mistaken
+    for a fact about how onions look."""
+    if not hits_by_class:
+        return []
+    total = sum(hits_by_class.values())
+    top = max(hits_by_class, key=hits_by_class.get)
+    share = hits_by_class[top] / total if total else 0.0
+    crop_aware = bool(model_classes) and CROP_CLASS in model_classes
+    out = []
+    if share >= dominant and not crop_aware:
+        out += [f"    ({top} takes {share:.0%} of the crop hits, but this model "
+                f"has no onion class",
+                f"     and must emit SOME weed label - so that is most likely "
+                f"its majority class",
+                f"     showing through, not a claim that onions resemble "
+                f"{top}. Check the training",
+                f"     set's class balance before reading it as appearance.)"]
+    elif top == "grass_weed":
+        out += ["    (grass_weed dominating is the expected shape: an onion "
+                "leaf is long, thin",
+                "     and linear, and so is a grass weed. It is a finding "
+                "about appearance,",
+                "     not a random error.)"]
+    return out
+
+
+def sweep_note(rows):
+    """What the threshold sweep says that the table alone does not.
+
+    Two findings hide in these rows and both change what to do next, so they
+    are derived rather than left for someone to spot in four numbers."""
+    out = []
+    live = [r for r in rows if r["n_detections"]]
+    if not live:
+        return out
+    dead = [r for r in rows if not r["n_detections"]]
+    if dead:
+        top = min(r["threshold"] for r in dead)
+        out.append(
+            f"    NOTE: nothing at all survives {top:.2f}. The model's scores "
+            f"never reach it, so a gate\n"
+            f"    that high would switch the machine off rather than make it "
+            f"safe.")
+    lo, hi = live[0], live[-1]
+    if hi["detection_on_crop_rate"] > lo["detection_on_crop_rate"] + 1e-9:
+        out.append(
+            f"    NOTE: the on-crop share RISES with the threshold "
+            f"({lo['detection_on_crop_rate']:.1%} -> "
+            f"{hi['detection_on_crop_rate']:.1%}).\n"
+            f"    The model is MORE confident on crop tissue than on the "
+            f"off-crop plants, so raising\n"
+            f"    the bar removes real weeds faster than it removes crop hits. "
+            f"Confidence is not a fix.")
+    return out
+
+
+def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0,
+                        sessions_skipped=None):
     """Everything that makes a number here weaker than it looks.
 
     Printed with the result rather than in a docstring nobody re-reads, because
@@ -350,12 +481,26 @@ def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0):
            "as ground truth."]
     if model_classes and CROP_CLASS in model_classes:
         out.append(
-            f"  [!] this checkpoint CAN predict {CROP_CLASS}, so it is not the "
-            f"weed-only model\n"
-            f"      this check is written for. A crop hit here may just be the "
-            f"model correctly\n"
-            f"      calling an onion an onion - check hits_by_class before "
-            f"reading the rate.")
+            f"  [i] this checkpoint CAN predict {CROP_CLASS}. Its own crop "
+            f"detections are excluded\n"
+            f"      from the rates, so what is left is a genuine confusion - "
+            f"and CROP RECALL is\n"
+            f"      reported, because an onion it never detects is one the "
+            f"safety mask cannot protect.")
+    else:
+        out.append(
+            "  [!] this checkpoint has NO crop class, so in a drive where "
+            "every plant is an\n"
+            "      onion, nearly anything it detects must land on crop. A high "
+            "rate here proves\n"
+            "      the model is unsafe; it does NOT prove onions and weeds are "
+            "confusable. Only a\n"
+            "      crop-capable model can be asked that.")
+    if sessions_skipped:
+        out.append(
+            f"  [i] {len(sessions_skipped)} session(s) contributed nothing:")
+        out.extend(f"        {name}: {why}"
+                   for name, why in sorted(sessions_skipped.items()))
     if skipped_no_onion:
         out.append(
             f"  [i] {skipped_no_onion} predicted frame(s) had no annotated "
@@ -371,7 +516,8 @@ def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0):
 
 
 def format_report(s, checkpoint=None, conf=None, sweep_rows=(), warnings=(),
-                  per_session=None):
+                  per_session=None, model_classes=None):
+    crop_aware = bool(model_classes) and CROP_CLASS in model_classes
     L = ["", "  Crop risk - does the weed model claim onion tissue?",
          "  " + "-" * 52]
     if checkpoint:
@@ -382,27 +528,31 @@ def format_report(s, checkpoint=None, conf=None, sweep_rows=(), warnings=(),
           f"  {s['frames']} frame(s), {s['n_onions']} annotated onion(s)",
           "",
           f"  DETECTION-SIDE  {s['n_on_crop']} of {s['n_detections']} "
-          f"detection(s) sit on crop tissue "
+          f"weed detection(s) sit on crop tissue "
           f"({s['detection_on_crop_rate']:.1%})",
           f"  ONION-SIDE      {s['n_endangered']} of {s['n_onions']} onion(s) "
           f"have a weed detection on them "
-          f"({s['onion_endangered_rate']:.1%})",
-          "",
-          f"  {s['n_off_crop']} detection(s) landed off-crop. NOT counted as "
-          f"errors: onion drives",
+          f"({s['onion_endangered_rate']:.1%})"]
+    if crop_aware:
+        L += [f"  CROP RECALL     {s['n_onions_detected']} of {s['n_onions']} "
+              f"onion(s) were detected AS {CROP_CLASS} "
+              f"({s['crop_recall']:.1%})",
+              f"                  an onion the model never detects is one the "
+              f"safety mask cannot protect.",
+              f"                  Its {s['n_crop_detections']} "
+              f"{CROP_CLASS} detection(s) are excluded from the rates above - "
+              f"those are",
+              f"                  the model getting it right, not risk."]
+    L += ["",
+          f"  {s['n_off_crop']} weed detection(s) landed off-crop. NOT counted "
+          f"as errors: onion drives",
           f"  contain real weeds that were never annotated, so those are "
           f"unknown, not wrong."]
     if s["hits_by_class"]:
         L += ["", "  Which class the crop was mistaken for:"]
         for c, n in sorted(s["hits_by_class"].items(), key=lambda kv: -kv[1]):
             L.append(f"    {c:<28}{n:>6}")
-        top = max(s["hits_by_class"], key=s["hits_by_class"].get)
-        if top == "grass_weed":
-            L += ["    (grass_weed dominating is the expected shape: an onion "
-                  "leaf is long, thin",
-                  "     and linear, and so is a grass weed. It is a finding "
-                  "about appearance,",
-                  "     not a random error.)"]
+        L += hits_note(s["hits_by_class"], model_classes)
     if per_session:
         L += ["", "  Per session (one bad drive can carry the pooled rate):",
               f"    {'session':<40}{'onions':>8}{'endangered':>12}{'rate':>8}"]
@@ -419,9 +569,12 @@ def format_report(s, checkpoint=None, conf=None, sweep_rows=(), warnings=(),
                      f"{row['detection_on_crop_rate']:>9.1%}"
                      f"{row['onion_endangered_rate']:>12.1%}"
                      f"{row['n_detections']:>13}")
+        notes = sweep_note(sweep_rows)
+        if notes:
+            L += [""] + notes
     if warnings:
         L += [""] + list(warnings)
-    L += ["", f"  VERDICT: {verdict(s)}", ""]
+    L += ["", f"  VERDICT: {verdict(s, model_classes)}", ""]
     return "\n".join(L)
 
 
@@ -444,7 +597,11 @@ def draw_overlay(bgr, onion_insts, pred_insts, on_crop_idx, min_score=0.0):
     hit = set(on_crop_idx)
     fill = out.copy()
     for i, (cls, polys) in enumerate(kept):
-        colour = C_HIT if i in hit else C_OFF
+        # A crop-class detection is drawn in the crop's own colour: the model
+        # agreeing with the annotation should not look like the failure being
+        # counted.
+        colour = (C_ONION if cls == CROP_CLASS else
+                  C_HIT if i in hit else C_OFF)
         for poly in polys:
             pts = np.round(np.asarray(poly, np.float64).reshape(-1, 2)
                            ).astype(np.int32)
@@ -527,12 +684,17 @@ def main():
 
     frames, roots_by_key = {}, {}
     per_session_frames, skipped_no_onion, skipped_no_pred = {}, 0, 0
+    # WHY a session contributed nothing, recorded rather than only printed. A
+    # run that measures 5 of 14 drives and a run that found only 5 look the
+    # same in the JSON otherwise, and they mean opposite things.
+    sessions_skipped = {}
 
     for sess in sessions:
         print(f"\n  {sess.name}")
         onions = load_polygons(sess, want_class=CROP_CLASS)
         if not onions:
             print(f"    no {CROP_CLASS} annotations - skipped")
+            sessions_skipped[sess.name] = f"no {CROP_CLASS} annotations"
             continue
         pred_dir = _predict(sess, pred_root, CHECKPOINT)
         preds = load_polygons(pred_dir / "instances_default.json")
@@ -550,6 +712,10 @@ def main():
             keys.append(key)
         skipped_no_pred += len(set(onions) - set(sizes))
         per_session_frames[sess.name] = keys
+        if not keys:
+            sessions_skipped[sess.name] = (
+                f"{len(onions)} annotated frame(s), but none of them were "
+                f"among the {len(sizes)} predicted (STRIDE={STRIDE})")
         print(f"    {len(keys)} frame(s) with both onions and predictions")
 
     if not frames:
@@ -564,7 +730,7 @@ def main():
     per_session = {name: summarise({k: per_frame[k] for k in keys})
                    for name, keys in per_session_frames.items() if keys}
     warnings = provenance_warnings(model_classes, skipped_no_onion,
-                                   skipped_no_pred)
+                                   skipped_no_pred, sessions_skipped)
 
     shots = worst(per_frame, WORST_FRAMES)
     if shots:
@@ -588,7 +754,8 @@ def main():
 
     report = format_report(pooled, checkpoint=CHECKPOINT, conf=CONF,
                            sweep_rows=rows, warnings=warnings,
-                           per_session=per_session)
+                           per_session=per_session,
+                           model_classes=model_classes)
     print(report)
 
     for r in per_frame.values():
@@ -599,6 +766,7 @@ def main():
         "onion_covered_min": ONION_COVERED_MIN,
         "model_classes": model_classes,
         "sessions": [str(s) for s in sessions],
+        "sessions_skipped": sessions_skipped,
         "pooled": pooled, "per_session": per_session, "sweep": rows,
         "per_frame": per_frame, "worst_frames": written,
         "warnings": warnings,
