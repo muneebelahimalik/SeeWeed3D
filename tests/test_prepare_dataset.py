@@ -804,3 +804,83 @@ def test_a_manifest_is_written_even_if_the_directory_is_new(tmp_path):
     prep.build(root, tmp_path / "images", out, val_fraction=0.0,
                test_fraction=0.0, seed=1, strict=False)
     assert (out / "seg_manifest.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# A hand-curated batch folder: annotations/ + rgb/, filenames that no longer
+# name a drive. It is the only shape that holds onions and weeds in one frame,
+# so it must be buildable rather than an error nobody can act on.
+# --------------------------------------------------------------------------- #
+def _batch_export(tmp_path, folder="Mix_raj Batch 01", frames=3):
+    """Frames named the way a person names them, not the way extraction does."""
+    items = []
+    for f in range(frames):
+        items.append({"id": f"photo{f}",
+                      "image": {"path": f"photo{f}.png", "size": [480, 640]},
+                      "annotations": [
+                          {"id": 1, "type": "polygon",
+                           "label_id": L["wild_radish"], "group": 1,
+                           "points": _sq(20, 20, 60), "z_order": 0,
+                           "attributes": {"lep_visibility": "visible",
+                                          "targetable": "yes"}},
+                          {"id": 2, "type": "points", "label_id": L["weed_LEP"],
+                           "group": 1, "points": [50.0, 50.0], "z_order": 0,
+                           "attributes": {}},
+                          {"id": 3, "type": "polygon", "label_id": L[CROP_CLASS],
+                           "group": 2, "points": _sq(200, 150, 80),
+                           "z_order": 0, "attributes": {}}]})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []} for n in LABELS],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / folder
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_a_hand_curated_batch_builds_under_its_folder_name(tmp_path):
+    root = _batch_export(tmp_path)
+    report, split_map, rows = prep.build(root, tmp_path / "images",
+                                         tmp_path / "out", val_fraction=0.34,
+                                         test_fraction=0.33, seed=1,
+                                         strict=False)
+    assert report.ok, report.errors
+    sessions = sorted(s for v in split_map.values() for s in v)
+    assert sessions == ["Mix_raj_Batch_01"], "the space becomes an underscore"
+    assert not any(e["kind"] == "unresolvable_session" for e in report.errors)
+
+
+def test_two_batches_stay_two_sessions(tmp_path):
+    """One shared id would let a split put near-copies of the same plant on
+    both sides, which shows up only as a validation score that is too good."""
+    roots = [_batch_export(tmp_path, "Batch 01"),
+             _batch_export(tmp_path, "Batch 02")]
+    report, split_map, _ = prep.build(roots, tmp_path / "images",
+                                      tmp_path / "out", val_fraction=0.25,
+                                      test_fraction=0.25, seed=1, strict=False)
+    assert sorted(s for v in split_map.values() for s in v) == \
+        ["Batch_01", "Batch_02"]
+
+
+def test_a_batch_frame_that_names_its_drive_keeps_it(tmp_path):
+    """A curated batch drawn from real drives must stay those drives - the
+    fallback is a fallback, never an override."""
+    root = _batch_export(tmp_path, "Mix_raj Batch 01", frames=0)
+    doc = json.loads((root / "annotations" / "default.json").read_text())
+    doc["items"] = [
+        {"id": f"vid3_20260108_103135_{i:06d}",
+         "image": {"path": f"vid3_20260108_103135_{i:06d}.png",
+                   "size": [480, 640]},
+         "annotations": [{"id": 3, "type": "polygon", "label_id": L[CROP_CLASS],
+                          "group": 2, "points": _sq(200, 150, 80),
+                          "z_order": 0, "attributes": {}}]}
+        for i in range(4)]
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    report, split_map, _ = prep.build(root, tmp_path / "images",
+                                      tmp_path / "out", val_fraction=0.25,
+                                      test_fraction=0.25, seed=1, strict=False,
+                                      keep_classes=[CROP_CLASS])
+    assert sorted(s for v in split_map.values() for s in v) == \
+        ["vid3_20260108_103135"]

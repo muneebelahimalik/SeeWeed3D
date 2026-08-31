@@ -146,6 +146,100 @@ def test_report_shows_crop_recall_only_for_a_crop_capable_model():
 
 
 # --------------------------------------------------------------------------
+# a hand-annotated MIXED frame, where the weeds are marked too
+
+
+def test_an_off_crop_detection_on_an_annotated_weed_is_the_model_working():
+    """The whole reason a small contact batch beats a long onion drive: only
+    here can a detection be scored as CORRECT rather than merely 'not on an
+    onion'."""
+    onions = [_onion(_sq(0, 0, 15))]
+    weeds = [(("grass_weed"), [_sq(40, 40, 15)], 1.0)]
+    preds = [_pred("grass_weed", _sq(41, 41, 12))]
+    r = cr.frame_risk(onions, preds, H, W, weed_insts=weeds)
+    assert r["n_off_crop"] == 1
+    assert r["n_on_weed"] == 1 and r["n_on_nothing"] == 0
+
+
+def test_an_off_crop_detection_on_bare_soil_is_separated_from_one_on_a_weed():
+    onions = [_onion(_sq(0, 0, 15))]
+    weeds = [("grass_weed", [_sq(40, 40, 10)], 1.0)]
+    preds = [_pred("other_weed", _sq(20, 20, 8))]
+    r = cr.frame_risk(onions, preds, H, W, weed_insts=weeds)
+    assert r["n_on_weed"] == 0 and r["n_on_nothing"] == 1
+
+
+def test_without_weed_annotations_an_off_crop_detection_stays_unjudged():
+    """An onion drive with no weed labels means 'nobody said', not 'no weeds'.
+    Calling those wrong would invent false positives out of missing labels."""
+    onions = [_onion(_sq(0, 0, 15))]
+    preds = [_pred("grass_weed", _sq(40, 40, 10))]
+    r = cr.frame_risk(onions, preds, H, W)
+    assert r["n_off_crop"] == 1
+    assert r["n_on_weed"] == 0 and r["n_on_nothing"] == 0
+    assert r["n_judged_frames"] == 0
+
+
+def test_a_frame_with_weed_labels_is_marked_as_judged():
+    r = cr.frame_risk([_onion(_sq(0, 0, 15))], [], H, W, weed_insts=[])
+    assert r["n_judged_frames"] == 1, "an empty weed list still means someone " \
+                                      "looked; None means nobody did"
+
+
+def test_score_frames_accepts_both_the_four_and_five_element_frame():
+    onions = [_onion(_sq(0, 0, 15))]
+    preds = [_pred("grass_weed", _sq(40, 40, 10))]
+    weeds = [("grass_weed", [_sq(40, 40, 10)], 1.0)]
+    got = cr.score_frames({"plain": (onions, preds, H, W),
+                           "judged": (onions, preds, H, W, weeds)}, 0.5)
+    assert got["plain"]["n_judged_frames"] == 0
+    assert got["judged"]["n_on_weed"] == 1
+
+
+def test_report_shows_the_judged_split_only_when_there_is_one():
+    onions = [_onion(_sq(0, 0, 15))]
+    preds = [_pred("grass_weed", _sq(40, 40, 10))]
+    weeds = [("grass_weed", [_sq(40, 40, 10)], 1.0)]
+    judged = cr.summarise(cr.score_frames(
+        {"a": (onions, preds, H, W, weeds)}, 0.5))
+    plain = cr.summarise(cr.score_frames({"a": (onions, preds, H, W)}, 0.5))
+    assert "landed on an annotated weed" in cr.format_report(judged)
+    assert "landed on an annotated weed" not in cr.format_report(plain)
+
+
+# --------------------------------------------------------------------------
+# provenance: which half of the number a person actually checked
+
+
+def test_provenance_note_splits_reviewed_from_prelabelled():
+    note = "\n".join(cr.provenance_note(
+        {"batch": {"n_onions": 40}, "drive": {"n_onions": 600}},
+        {"batch": True, "drive": False}))
+    assert "40" in note and "600" in note
+    assert "REVIEWED" in note and "UNREVIEWED" in note
+
+
+def test_provenance_note_says_so_when_nothing_was_reviewed():
+    note = "\n".join(cr.provenance_note({"drive": {"n_onions": 600}},
+                                        {"drive": False}))
+    assert "[!]" in note and "estimate" in note
+    assert "contact" in note, "it should say where reviewed ground comes from"
+
+
+def test_provenance_note_says_so_when_everything_was_reviewed():
+    note = "\n".join(cr.provenance_note({"batch": {"n_onions": 40}},
+                                        {"batch": True}))
+    assert "measurement" in note and "[!]" not in note
+
+
+def test_per_session_table_marks_which_masks_were_reviewed():
+    s = cr.summarise(cr.score_frames(_frames(), 0.5))
+    txt = cr.format_report(s, per_session={"batch": s, "drive": s},
+                           reviewed_by_name={"batch": True, "drive": False})
+    assert "reviewed" in txt and "prelabel" in txt
+
+
+# --------------------------------------------------------------------------
 # pooling and the sweep
 
 
