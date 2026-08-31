@@ -102,6 +102,50 @@ def test_score_filter_drops_low_confidence_detections():
 
 
 # --------------------------------------------------------------------------
+# a model that HAS the crop class
+
+
+def test_the_models_own_onion_detections_are_not_counted_as_risk():
+    """Scoring a correct onion_plant mask as a crop hit would rank the fixed
+    model below the broken one - the exact wrong signal."""
+    onions = [_onion(_sq(10, 10, 20))]
+    preds = [_pred(CROP_CLASS, _sq(10, 10, 20))]
+    r = cr.frame_risk(onions, preds, H, W)
+    assert r["n_detections"] == 0, "a crop detection is not a weed detection"
+    assert r["n_on_crop"] == 0 and r["n_endangered"] == 0
+    assert r["hits_by_class"] == {}
+    assert r["n_crop_detections"] == 1
+
+
+def test_crop_recall_counts_onions_the_model_actually_found():
+    """An onion the model never detects is one the safety mask cannot protect
+    - allow_missing_crop_mask=False makes that the other half of crop safety."""
+    onions = [_onion(_sq(0, 0, 20)), _onion(_sq(30, 30, 20))]
+    preds = [_pred(CROP_CLASS, _sq(0, 0, 20))]
+    r = cr.frame_risk(onions, preds, H, W)
+    assert r["n_onions"] == 2 and r["n_onions_detected"] == 1
+    assert cr.summarise({"f": r})["crop_recall"] == pytest.approx(0.5)
+
+
+def test_a_weed_detection_still_counts_when_the_crop_class_exists():
+    """Excluding onion_plant must not excuse a weed class on the same plant."""
+    onions = [_onion(_sq(10, 10, 20))]
+    preds = [_pred(CROP_CLASS, _sq(10, 10, 20)),
+             _pred("grass_weed", _sq(12, 12, 10))]
+    r = cr.frame_risk(onions, preds, H, W)
+    assert r["n_on_crop"] == 1 and r["n_endangered"] == 1
+    assert r["hits_by_class"] == {"grass_weed": 1}
+
+
+def test_report_shows_crop_recall_only_for_a_crop_capable_model():
+    """0% recall from a model with no onion class is a tautology, not a score
+    - printing it would read as a failure the model cannot have."""
+    s = cr.summarise(cr.score_frames(_frames(), 0.5))
+    assert "CROP RECALL" not in cr.format_report(s, model_classes=WEED_ONLY)
+    assert "CROP RECALL" in cr.format_report(s, model_classes=MIXED)
+
+
+# --------------------------------------------------------------------------
 # pooling and the sweep
 
 
@@ -136,6 +180,59 @@ def test_sweep_only_reports_at_or_above_conf():
     assert rows[-1]["detection_on_crop_rate"] == pytest.approx(1.0)
 
 
+def test_hits_note_calls_a_dominant_class_a_prior_not_a_resemblance():
+    """398 of 407 hits were cutleaf_evening_primrose. Reading that as 'onions
+    look like primrose' would chase a resemblance that is really the training
+    set's majority class leaking through a model with nowhere else to put an
+    onion."""
+    note = "\n".join(cr.hits_note({"cutleaf_evening_primrose": 398,
+                                   "other_weed": 7, "grass_weed": 2},
+                                  WEED_ONLY))
+    assert "majority class" in note and "class balance" in note
+    assert "resemble" in note
+
+
+def test_hits_note_keeps_the_appearance_reading_for_a_crop_capable_model():
+    """A model that could have said onion_plant and chose grass_weed IS making
+    a claim about appearance."""
+    note = "\n".join(cr.hits_note({"grass_weed": 100}, MIXED))
+    assert "long, thin" in note and "majority class" not in note
+
+
+def test_hits_note_is_silent_when_no_class_dominates():
+    assert cr.hits_note({"other_weed": 5, "cutleaf_evening_primrose": 4},
+                        WEED_ONLY) == []
+    assert cr.hits_note({}, WEED_ONLY) == []
+
+
+def _row(t, det, on_crop_rate):
+    return {"threshold": t, "n_detections": det,
+            "detection_on_crop_rate": on_crop_rate}
+
+
+def test_sweep_note_flags_a_threshold_that_disables_the_machine():
+    """0 detections at 0.9 is not '0% risk' - it is a model whose scores never
+    reach the gate, which switches the weeder off rather than making it safe."""
+    note = "\n".join(cr.sweep_note([_row(0.5, 416, 0.978), _row(0.9, 0, 0.0)]))
+    assert "0.90" in note and "switch the machine off" in note
+
+
+def test_sweep_note_flags_confidence_ranking_the_crop_highest():
+    """The on-crop share RISING with the threshold means the model is surer
+    about onions than about the real weeds - so a higher bar makes it worse."""
+    note = "\n".join(cr.sweep_note([_row(0.5, 416, 0.978), _row(0.7, 227, 0.991)]))
+    assert "RISES" in note and "Confidence is not a fix" in note
+
+
+def test_sweep_note_is_silent_when_a_higher_bar_actually_helps():
+    assert not any("RISES" in n for n in
+                   cr.sweep_note([_row(0.5, 416, 0.90), _row(0.7, 200, 0.40)]))
+
+
+def test_sweep_note_says_nothing_about_an_empty_sweep():
+    assert cr.sweep_note([_row(0.5, 0, 0.0)]) == []
+
+
 def test_sweep_does_not_mutate_or_cache_masks():
     """Re-running the sweep must give the same answer - the failure mode of a
     cached-mask optimisation is a silently different second row."""
@@ -155,27 +252,68 @@ def test_verdict_distinguishes_no_data_from_a_clean_run():
     assert clean.startswith("LOW")
 
 
+MIXED = ["grass_weed", CROP_CLASS]
+WEED_ONLY = ["grass_weed"]
+
+
 @pytest.mark.parametrize("rate,head", [(0.0, "LOW"), (0.05, "MODERATE"),
                                        (0.4, "HIGH")])
-def test_verdict_bands(rate, head):
-    assert cr.verdict({"n_onions": 100,
-                       "onion_endangered_rate": rate}).startswith(head)
+def test_verdict_bands_for_a_crop_capable_model(rate, head):
+    assert cr.verdict({"n_onions": 100, "onion_endangered_rate": rate},
+                      MIXED).startswith(head)
+
+
+def test_a_weed_only_model_is_not_told_onions_are_confusable():
+    """The trap this run walked into: a weed-only model has no class for an
+    onion, so in an onion drive a high rate is near the ceiling by
+    construction. Reading it as 'onions look like weeds' would buy contact
+    frames on the strength of a number that could not come out low."""
+    v = cr.verdict({"n_onions": 645, "onion_endangered_rate": 0.61}, WEED_ONLY)
+    assert "UNSAFE" in v
+    assert "no class for an onion" in v
+    assert "CANNOT tell you" in v and "crop class" in v
+    assert "confusable" not in v
+
+
+def test_a_weed_only_model_with_a_low_rate_is_informative():
+    """The one weed-only result that IS diagnostic: if it leaves crop tissue
+    alone with no onion class, its weed appearance genuinely excludes onions."""
+    v = cr.verdict({"n_onions": 645, "onion_endangered_rate": 0.0}, WEED_ONLY)
+    assert v.startswith("LOW") and "informative" in v
+
+
+def test_verdict_without_model_classes_assumes_weed_only():
+    """The conservative default: an unknown class list must not be read as
+    'has a crop class', which is the assumption that over-concludes."""
+    s = {"n_onions": 100, "onion_endangered_rate": 0.4}
+    assert cr.verdict(s) == cr.verdict(s, WEED_ONLY)
 
 
 def test_report_states_the_prelabel_provenance():
     """The whole run produces one quotable percentage; it must carry the
     caveat that 'onion tissue' is itself a machine label."""
-    warns = cr.provenance_warnings(["grass_weed"])
+    warns = cr.provenance_warnings(WEED_ONLY)
     text = "\n".join(warns).lower()
     assert "prelabel" in text and "ground truth" in text
 
 
-def test_report_warns_when_the_model_can_predict_the_crop():
-    """A mixed checkpoint answers a different question - a 'crop hit' would
-    then be the model getting it RIGHT."""
-    warns = cr.provenance_warnings(["grass_weed", CROP_CLASS])
-    assert any(CROP_CLASS in w and "[!]" in w for w in warns)
-    assert not any("[!]" in w for w in cr.provenance_warnings(["grass_weed"]))
+def test_a_weed_only_checkpoint_is_flagged_as_the_ceiling_case():
+    warns = "\n".join(cr.provenance_warnings(WEED_ONLY))
+    assert "[!]" in warns and "NO crop class" in warns
+    assert "does NOT prove" in warns
+
+
+def test_a_crop_capable_checkpoint_says_its_detections_are_excluded():
+    warns = "\n".join(cr.provenance_warnings(MIXED))
+    assert "excluded" in warns and "CROP RECALL" in warns
+    assert "[!]" not in warns
+
+
+def test_skipped_sessions_are_named_not_just_counted():
+    """5 of 14 drives measured and 5 drives found look identical otherwise."""
+    warns = "\n".join(cr.provenance_warnings(
+        WEED_ONLY, sessions_skipped={"Visit2_x": "no onion_plant annotations"}))
+    assert "Visit2_x" in warns and "no onion_plant annotations" in warns
 
 
 def test_report_contains_both_rates_and_the_off_crop_caveat():
