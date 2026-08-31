@@ -61,7 +61,14 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: the same frame. Those are the most valuable frames in the project: they are
 #: the only ones that teach the model to tell the two apart at a boundary, which
 #: is the exact decision the laser depends on.
+#:
+#: A hand-curated batch folder (annotations/ + rgb/, no sessions/ parent) works
+#: here as-is. If its filenames no longer name a drive, the build reads the
+#: EXPORT FOLDER NAME as the session id and says so - check that line if the
+#: batch came from several drives, because one id over frames metres apart lets
+#: a split put near-copies on both sides of it.
 MIXED_SESSIONS = [
+    r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
 ]
 
 SOURCES_ROOTS = list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
@@ -75,7 +82,27 @@ OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
 #: campaigns there is no excuse for splitting within a drive, and a held-out
 #: drive is the only thing that makes round N comparable with round N-1. Pin the
 #: same list in mine_pool's HOLDOUT_SESSIONS - a test asserts they agree.
+#:
+#: THE CONTACT BATCH IS THE ONE REAL CANDIDATE, and it is a genuine trade.
+#:
+#: It is hand corrected, it holds both classes in one frame, and it is small.
+#: As TRAINING data it is the only thing that teaches the onion/weed boundary,
+#: and a handful of frames of that is still the most valuable data in the
+#: project. As a TEST set it is the only honest crop-safety measurement that
+#: exists: every other number here is computed on weed-only or onion-only
+#: frames, or against unreviewed prelabels, and neither can see a crop mistake
+#: at a boundary at all.
+#:
+#: Hold it out until there is a second batch. An untested crop-safety claim is
+#: the failure this project keeps designing against, and a model that trained
+#: on its only contact frames cannot be asked whether it is safe. Move it into
+#: MIXED_SESSIONS the day Batch 02 exists to take its place here.
+#:
+#: The batch's own frame count decides whether that is even possible: below
+#: roughly 20 frames it is too small to measure with AND too small to train on,
+#: and the answer is more annotation rather than a choice between the two.
 HOLDOUT_TEST = [
+    "Mix_raj_Batch_01",
 ]
 
 CONFIG = dict(

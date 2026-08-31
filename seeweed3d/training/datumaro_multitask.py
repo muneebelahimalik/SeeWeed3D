@@ -311,13 +311,20 @@ def _mask_to_polygons(mask, min_points=3):
     return out
 
 
-def _session_of(item_id, image_path, session_from):
+def _session_of(item_id, image_path, session_from, fallback=""):
     """Session id for a frame.
 
     Extraction names every pooled frame `<session_id>_<frame_idx>.png`, so the
     session is recoverable from the filename. An explicit map wins when given.
     Returning "" means unresolvable, which the caller turns into a hard error -
-    a frame with no session cannot be placed in a leak-free split."""
+    a frame with no session cannot be placed in a leak-free split.
+
+    `fallback` is for a HAND-CURATED batch: a folder someone assembled and
+    annotated in CVAT, whose files were renamed on the way in and so carry no
+    session. It is a fallback and never an override, because a filename that
+    does name its session is better information than the folder it now sits in -
+    a batch drawn from three drives must stay three sessions or the split leaks
+    between frames metres apart."""
     if session_from:
         for key in (item_id, Path(image_path).name, Path(image_path).stem):
             if key in session_from:
@@ -327,11 +334,34 @@ def _session_of(item_id, image_path, session_from):
         head = stem.rsplit("_", 1)
         if head[-1].isdigit():
             return head[0]
-    return ""
+    return fallback or ""
+
+
+def session_id_from_name(folder_name):
+    """A folder name as a session id: punctuation to underscores.
+
+    Separate from batch_session_id so a CONFIG holding a Windows path can work
+    out the id it will produce without a Path() that would treat the whole
+    string as one segment on posix - the slip this project has hit before."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(folder_name)).strip("_")
+
+
+def batch_session_id(annotation_file):
+    """A session id for a hand-curated batch, from its export folder name.
+
+    `<...>/Mix_raj_Batch 01/annotations/default.json` -> `Mix_raj_Batch_01`.
+
+    Derived rather than configured: each batch folder then gets its own id
+    automatically, so adding a second batch cannot silently merge it with the
+    first - which one shared config value would have done, and which would show
+    up only as a validation score that was too good."""
+    p = Path(annotation_file)
+    root = p.parent.parent if p.parent.name == "annotations" else p.parent
+    return session_id_from_name(root.name)
 
 
 def load_datumaro(json_path, contract=None, session_from=None, report=None,
-                  only_items=None):
+                  only_items=None, fallback_session=None):
     """Parse one Datumaro 1.0 annotation file into FrameRecords.
 
     Returns (frames, report). The report carries every integrity finding; the
@@ -344,7 +374,12 @@ def load_datumaro(json_path, contract=None, session_from=None, report=None,
     re-read an export after a frame selection, so the report describes the
     dataset being built rather than the export it came from. Note that label
     schema validation above still runs over the WHOLE file - an unknown label
-    is a broken export regardless of which frames you selected."""
+    is a broken export regardless of which frames you selected.
+
+    fallback_session: used only for frames whose session cannot be read from
+    their filename - a hand-curated batch. Pass `batch_session_id(json_path)` to
+    name it after its own export folder. Frames that DO name their session keep
+    it, so a batch drawn from several drives stays several sessions."""
     contract = contract or AnnotationContract()
     report = report or MultitaskDatasetReport()
     path = Path(json_path)
@@ -394,20 +429,25 @@ def load_datumaro(json_path, contract=None, session_from=None, report=None,
         if only_items is not None and str(item.get("id", "")) not in only_items:
             continue
         frames.append(_parse_item(item, names, path, contract, session_from,
-                                  report))
+                                  report, fallback_session))
     return frames, report
 
 
-def _parse_item(item, names, path, contract, session_from, report):
+def _parse_item(item, names, path, contract, session_from, report,
+                fallback_session=None):
     item_id = str(item.get("id", ""))
     img_path, w, h = _item_image(item, path)
-    session = _session_of(item_id, img_path, session_from)
+    session = _session_of(item_id, img_path, session_from,
+                          fallback_session or "")
     rec = FrameRecord(item_id=item_id, image_path=img_path, width=w, height=h,
                       session_id=session)
     if not session:
         report.add_error(item_id, "unresolvable_session",
                          "cannot derive a session id from the item id or image "
-                         "path; splits would leak. Pass session_from={...}.")
+                         "path; splits would leak. Extraction names frames "
+                         "<session>_<index>.png; a hand-curated batch instead "
+                         "gets its export folder's name, via "
+                         "fallback_session=batch_session_id(<file>).")
 
     by_group_shape = defaultdict(list)      # group -> [PlantInstance]
     leps_by_group = defaultdict(list)       # group -> [LEPAnnotation]

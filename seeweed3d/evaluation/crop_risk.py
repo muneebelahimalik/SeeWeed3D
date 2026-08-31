@@ -88,15 +88,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 from common.ontology import CROP_CLASS  # noqa: E402
 from common.run_dirs import newest, stamped  # noqa: E402
+from training.datasets.mixed import MIXED_SESSIONS  # noqa: E402
 from training.datasets.onions import ONION_SESSIONS  # noqa: E402
 
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
 # #############################################################################
 
-#: The onion-only sessions. Imported from the onion build so a session added
+#: The sessions to measure on. Imported from the builds so a session added
 #: there reaches this check without a second edit.
-SESSIONS = list(ONION_SESSIONS)
+#:
+#: The MIXED batches are the better ground even though they are far smaller: an
+#: onion-only drive can only say "that detection is on an onion", while a
+#: hand-annotated mixed frame also knows where the WEEDS are - so an off-crop
+#: detection stops being unknown and becomes right or wrong.
+SESSIONS = list(ONION_SESSIONS) + list(MIXED_SESSIONS)
+
+#: Sessions whose masks a PERSON checked. Everything else here is SAM 3
+#: prelabels, and a crop hit against a wrong mask is not a crop hit - so the
+#: report says how much of its number rests on each, rather than averaging a
+#: measurement and an estimate into one percentage.
+REVIEWED_SESSIONS = list(MIXED_SESSIONS)
 
 #: The model under test. A WEED-ONLY checkpoint is the point: it has no onion
 #: class, so every detection it makes on crop tissue is a mistake it cannot
@@ -261,7 +273,7 @@ def rasterise(polys, h, w):
 
 def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
                det_min=DETECTION_ON_CROP_MIN, onion_min=ONION_COVERED_MIN,
-               crop_class=CROP_CLASS):
+               crop_class=CROP_CLASS, weed_insts=None):
     """One frame's verdict. Pure: takes polygons, returns counts.
 
     Both directions are computed from the same masks so they cannot disagree
@@ -274,14 +286,28 @@ def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
     counting that as risk would score the fixed model as worse than the broken
     one. Those detections are tallied separately as crop RECALL - an onion the
     model never detects is an onion the safety mask cannot protect, which is the
-    other half of crop safety and free to measure here."""
+    other half of crop safety and free to measure here.
+
+    `weed_insts` turns an off-crop detection from unknown into right or wrong.
+    An onion-only drive has no such list - its weeds are real but were never
+    annotated - so off-crop stays unjudged there. In a hand-annotated MIXED
+    frame the weeds ARE marked, and a detection landing on one is the model
+    working. That is why a small contact batch outweighs a long onion drive
+    here: it is the only input that can score both mistakes and successes."""
     onion_masks = [rasterise(p, h, w) for _, p, _ in onion_insts]
     onion_union = np.zeros((h, w), bool)
     for m in onion_masks:
         onion_union |= m
 
+    weed_union = None
+    if weed_insts is not None:
+        weed_union = np.zeros((h, w), bool)
+        for _, p, _ in weed_insts:
+            weed_union |= rasterise(p, h, w)
+
     kept = [(c, p) for c, p, s in pred_insts if s >= min_score]
     hits_by_class, n_on_crop, n_off_crop, n_weeds, n_crop_det = {}, 0, 0, 0, 0
+    n_on_weed = n_on_nothing = 0
     covered = np.zeros((h, w), bool)
     crop_covered = np.zeros((h, w), bool)
     on_crop_idx = []
@@ -303,6 +329,11 @@ def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
             covered |= m
         else:
             n_off_crop += 1
+            if weed_union is not None:
+                if float((m & weed_union).sum()) / area >= det_min:
+                    n_on_weed += 1
+                else:
+                    n_on_nothing += 1
 
     def _covered_by(mask):
         return sum(1 for m in onion_masks if m.any()
@@ -314,13 +345,18 @@ def frame_risk(onion_insts, pred_insts, h, w, min_score=0.0,
             "n_endangered": _covered_by(covered),
             "n_crop_detections": n_crop_det,
             "n_onions_detected": _covered_by(crop_covered),
+            # Only non-zero where the weeds were annotated too. Elsewhere the
+            # off-crop detections stay in n_off_crop and are judged by nobody.
+            "n_on_weed": n_on_weed, "n_on_nothing": n_on_nothing,
+            "n_judged_frames": 1 if weed_union is not None else 0,
             "hits_by_class": hits_by_class, "on_crop_idx": on_crop_idx}
 
 
 def summarise(per_frame):
     """Totals plus the rates, kept apart because they answer differently."""
     keys = ("n_detections", "n_on_crop", "n_off_crop", "n_onions",
-            "n_endangered", "n_crop_detections", "n_onions_detected")
+            "n_endangered", "n_crop_detections", "n_onions_detected",
+            "n_on_weed", "n_on_nothing", "n_judged_frames")
     tot = dict({k: 0 for k in keys}, frames=len(per_frame), hits_by_class={})
     for r in per_frame.values():
         for k in keys:
@@ -339,13 +375,22 @@ def summarise(per_frame):
 
 
 def score_frames(frames, min_score=0.0):
-    """{key: frame_risk(...)} over `frames` = {key: (onions, preds, h, w)}.
+    """{key: frame_risk(...)} over `frames`.
+
+    A frame is `(onions, preds, h, w)`, or `(onions, preds, h, w, weeds)` where
+    the weeds were annotated too - the fifth element is what lets an off-crop
+    detection be judged rather than only counted.
 
     Masks are rebuilt per threshold rather than cached. Caching them would be
     one full-frame boolean array per instance held across the whole sweep,
     which is the exact shape that has already killed a run here."""
-    return {k: frame_risk(on, pr, h, w, min_score=min_score)
-            for k, (on, pr, h, w) in frames.items()}
+    out = {}
+    for k, rec in frames.items():
+        on, pr, h, w = rec[:4]
+        weeds = rec[4] if len(rec) > 4 else None
+        out[k] = frame_risk(on, pr, h, w, min_score=min_score,
+                            weed_insts=weeds)
+    return out
 
 
 def sweep(frames, thresholds=SWEEP, conf=CONF):
@@ -468,17 +513,52 @@ def sweep_note(rows):
     return out
 
 
+def provenance_note(per_session=None, reviewed_by_name=None):
+    """How much of the number rests on masks a person checked.
+
+    Averaging a measurement and an estimate into one percentage is what makes a
+    crop-safety claim unfalsifiable six weeks later, so the split is stated in
+    onions rather than left to whoever remembers which drives were prelabelled.
+    A hit against a wrong mask is not a hit, and only the reviewed half is
+    immune to that."""
+    reviewed_by_name = reviewed_by_name or {}
+    if not per_session:
+        return ["  [i] the onion masks are UNREVIEWED SAM prelabels. A crop "
+                "hit against a wrong",
+                "      mask is not a crop hit - read this rate as an estimate, "
+                "not as ground truth."]
+    yes = sum(v["n_onions"] for k, v in per_session.items()
+              if reviewed_by_name.get(k))
+    no = sum(v["n_onions"] for k, v in per_session.items()
+             if not reviewed_by_name.get(k))
+    if not yes:
+        return [f"  [!] all {no} onion(s) come from UNREVIEWED SAM prelabels. "
+                f"A crop hit against a",
+                f"      wrong mask is not a crop hit, so this whole rate is an "
+                f"estimate. The contact",
+                f"      batch is the only reviewed ground here - add it to "
+                f"SESSIONS to anchor it."]
+    if not no:
+        return [f"  [i] all {yes} onion(s) come from REVIEWED masks, so the "
+                f"rate is a measurement",
+                f"      rather than an estimate."]
+    return [f"  [i] {yes} onion(s) come from REVIEWED masks and {no} from "
+            f"UNREVIEWED SAM prelabels.",
+            f"      A crop hit against a wrong mask is not a crop hit, so read "
+            f"the per-session table:",
+            f"      the reviewed rows are a measurement, the rest are an "
+            f"estimate."]
+
+
 def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0,
-                        sessions_skipped=None):
+                        sessions_skipped=None, per_session=None,
+                        reviewed_by_name=None):
     """Everything that makes a number here weaker than it looks.
 
     Printed with the result rather than in a docstring nobody re-reads, because
     this run produces a single percentage that is very easy to quote out of
     context six weeks from now."""
-    out = ["  [i] the onion masks are UNREVIEWED SAM prelabels. A crop hit "
-           "against a wrong",
-           "      mask is not a crop hit - read this rate as an estimate, not "
-           "as ground truth."]
+    out = list(provenance_note(per_session, reviewed_by_name))
     if model_classes and CROP_CLASS in model_classes:
         out.append(
             f"  [i] this checkpoint CAN predict {CROP_CLASS}. Its own crop "
@@ -516,7 +596,8 @@ def provenance_warnings(model_classes, skipped_no_onion=0, skipped_no_pred=0,
 
 
 def format_report(s, checkpoint=None, conf=None, sweep_rows=(), warnings=(),
-                  per_session=None, model_classes=None):
+                  per_session=None, model_classes=None,
+                  reviewed_by_name=None):
     crop_aware = bool(model_classes) and CROP_CLASS in model_classes
     L = ["", "  Crop risk - does the weed model claim onion tissue?",
          "  " + "-" * 52]
@@ -548,18 +629,33 @@ def format_report(s, checkpoint=None, conf=None, sweep_rows=(), warnings=(),
           f"as errors: onion drives",
           f"  contain real weeds that were never annotated, so those are "
           f"unknown, not wrong."]
+    if s.get("n_judged_frames"):
+        judged = s["n_on_weed"] + s["n_on_nothing"]
+        L += [f"  Of those, {judged} were in {s['n_judged_frames']} frame(s) "
+              f"where the WEEDS were annotated too:",
+              f"    {s['n_on_weed']:>6} landed on an annotated weed - the "
+              f"model working, not a miss",
+              f"    {s['n_on_nothing']:>6} landed on neither crop nor weed - "
+              f"soil, or a weed nobody marked",
+              f"  Only these frames can score a success. Every other number "
+              f"here can only score a",
+              f"  mistake, which is why a small contact batch is worth more "
+              f"than a long onion drive."]
     if s["hits_by_class"]:
         L += ["", "  Which class the crop was mistaken for:"]
         for c, n in sorted(s["hits_by_class"].items(), key=lambda kv: -kv[1]):
             L.append(f"    {c:<28}{n:>6}")
         L += hits_note(s["hits_by_class"], model_classes)
     if per_session:
+        rev = reviewed_by_name or {}
         L += ["", "  Per session (one bad drive can carry the pooled rate):",
-              f"    {'session':<40}{'onions':>8}{'endangered':>12}{'rate':>8}"]
+              f"    {'session':<40}{'onions':>8}{'endangered':>12}{'rate':>8}"
+              f"  masks"]
         for name, ss in per_session.items():
             L.append(f"    {name[:39]:<40}{ss['n_onions']:>8}"
                      f"{ss['n_endangered']:>12}"
-                     f"{ss['onion_endangered_rate']:>7.1%}")
+                     f"{ss['onion_endangered_rate']:>7.1%}"
+                     f"  {'reviewed' if rev.get(name) else 'prelabel'}")
     if len(sweep_rows) > 1:
         L += ["", "  At a higher bar (same predictions, re-scored):",
               f"    {'conf':>6}{'on-crop':>10}{'endangered':>13}"
@@ -689,13 +785,32 @@ def main():
     # same in the JSON otherwise, and they mean opposite things.
     sessions_skipped = {}
 
+    reviewed = {str(Path(p).resolve()) for p in REVIEWED_SESSIONS}
+    reviewed_by_name = {}
+
     for sess in sessions:
         print(f"\n  {sess.name}")
-        onions = load_polygons(sess, want_class=CROP_CLASS)
+        all_gt = load_polygons(sess)
+        onions = {k: [i for i in v if i[0] == CROP_CLASS]
+                  for k, v in all_gt.items()}
+        onions = {k: v for k, v in onions.items() if v}
         if not onions:
             print(f"    no {CROP_CLASS} annotations - skipped")
             sessions_skipped[sess.name] = f"no {CROP_CLASS} annotations"
             continue
+        # Weeds annotated in the SAME export is what makes an off-crop
+        # detection judgeable. A session with none is not "no weeds here", it
+        # is "nobody said", so those frames get None rather than an empty list.
+        weeds = {k: [i for i in v if i[0] != CROP_CLASS]
+                 for k, v in all_gt.items()}
+        has_weed_labels = any(weeds.values())
+        reviewed_by_name[sess.name] = (
+            str(sess.resolve()) in reviewed
+            or any(str(sess.resolve()).startswith(r) for r in reviewed))
+        if has_weed_labels:
+            print(f"    weeds are annotated here too - off-crop detections "
+                  f"can be judged")
+
         pred_dir = _predict(sess, pred_root, CHECKPOINT)
         preds = load_polygons(pred_dir / "instances_default.json")
         sizes = image_sizes(pred_dir / "instances_default.json")
@@ -706,7 +821,8 @@ def main():
                 skipped_no_onion += 1
                 continue
             key = f"{sess.name}/{stem}"
-            frames[key] = (onions[stem], preds.get(stem, []), size[0], size[1])
+            frames[key] = (onions[stem], preds.get(stem, []), size[0], size[1],
+                           weeds.get(stem, []) if has_weed_labels else None)
             roots_by_key[key] = (stem, [sess / "rgb", sess, pred_dir,
                                         pred_dir / "cvat_ready"])
             keys.append(key)
@@ -730,7 +846,8 @@ def main():
     per_session = {name: summarise({k: per_frame[k] for k in keys})
                    for name, keys in per_session_frames.items() if keys}
     warnings = provenance_warnings(model_classes, skipped_no_onion,
-                                   skipped_no_pred, sessions_skipped)
+                                   skipped_no_pred, sessions_skipped,
+                                   per_session, reviewed_by_name)
 
     shots = worst(per_frame, WORST_FRAMES)
     if shots:
@@ -744,7 +861,7 @@ def main():
         bgr = cv2.imread(str(img_path))
         if bgr is None:
             continue
-        onion_insts, pred_insts, _, _ = frames[key]
+        onion_insts, pred_insts = frames[key][0], frames[key][1]
         vis = draw_overlay(bgr, onion_insts, pred_insts,
                            per_frame[key]["on_crop_idx"], min_score=CONF)
         name = key.replace("/", "__") + ".jpg"
@@ -755,7 +872,8 @@ def main():
     report = format_report(pooled, checkpoint=CHECKPOINT, conf=CONF,
                            sweep_rows=rows, warnings=warnings,
                            per_session=per_session,
-                           model_classes=model_classes)
+                           model_classes=model_classes,
+                           reviewed_by_name=reviewed_by_name)
     print(report)
 
     for r in per_frame.values():
@@ -767,6 +885,7 @@ def main():
         "model_classes": model_classes,
         "sessions": [str(s) for s in sessions],
         "sessions_skipped": sessions_skipped,
+        "reviewed_by_name": reviewed_by_name,
         "pooled": pooled, "per_session": per_session, "sweep": rows,
         "per_frame": per_frame, "worst_frames": written,
         "warnings": warnings,

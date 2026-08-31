@@ -331,7 +331,11 @@ def list_frames(datumaro_root, contract=None):
     contract = contract or AnnotationContract()
     frames = []
     for f in find_annotation_files(datumaro_root):
-        got, _ = dmm.load_datumaro(f, contract)
+        # Same fallback as build(), so the listing shows the session ids the
+        # build will actually use - a table naming sessions the build then
+        # rejects is worse than no table.
+        got, _ = dmm.load_datumaro(f, contract,
+                                   fallback_session=dmm.batch_session_id(f))
         frames.extend(got)
 
     by_session = {}
@@ -567,11 +571,28 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     ann_files = find_annotation_files(datumaro_root)
     frames, report = [], dmm.MultitaskDatasetReport()
     origin = {}
+    # A hand-curated batch - frames someone gathered into one folder and
+    # annotated - has filenames that no longer name their drive, and a frame
+    # with no session cannot be placed in a leak-free split. Each export folder
+    # names its own fallback, so two batches can never be merged into one
+    # session by accident. Frames that DO name their session keep it.
+    foldered = Counter()
     for f in ann_files:
-        got, report = dmm.load_datumaro(f, contract, report=report)
+        batch_id = dmm.batch_session_id(f)
+        got, report = dmm.load_datumaro(f, contract, report=report,
+                                        fallback_session=batch_id)
         for rec in got:
             origin.setdefault(rec.item_id, []).append(str(f))
+            if rec.session_id == batch_id:
+                foldered[batch_id] += 1
         frames.extend(got)
+    for batch_id, n in sorted(foldered.items()):
+        print(f"  [i] {n} frame(s) do not name a session in their filename; "
+              f"read as session {batch_id!r}\n"
+              f"      after the export folder. Correct if they came from "
+              f"several drives - one\n"
+              f"      session id over frames metres apart lets a split put "
+              f"near-copies on both sides.")
 
     # -- keep only hand-verified frames --------------------------------------
     # FIRST, before duplicate detection and before validation. A frame you never
@@ -591,8 +612,9 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         origin = {k: v for k, v in origin.items() if k in keep_ids}
         report = dmm.MultitaskDatasetReport()     # errors from discarded frames
         for f in ann_files:                       # are not yours to fix
-            _, report = dmm.load_datumaro(f, contract, report=report,
-                                          only_items=keep_ids)
+            _, report = dmm.load_datumaro(
+                f, contract, report=report, only_items=keep_ids,
+                fallback_session=dmm.batch_session_id(f))
         kept_ids = sorted(keep_ids)
         print(f"  SELECTED {len(frames)} of {before} frame(s); discarded "
               f"{len(discarded)}.")

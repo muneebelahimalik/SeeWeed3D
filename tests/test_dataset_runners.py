@@ -417,3 +417,41 @@ def test_every_new_configured_path_is_absolute():
     paths += [s["DATUMARO_ROOT"] for s in mixed.CONFIG["SOURCES"]]
     for p in paths:
         assert ntpath.isabs(p), f"not an absolute path: {p!r}"
+
+
+# --------------------------------------------------------------------------- #
+# The mixed build, and the one decision it makes about the contact batch
+# --------------------------------------------------------------------------- #
+def test_the_contact_batch_is_held_out_not_trained_on():
+    """The hand-annotated mixed batch is the only data that can measure crop
+    safety at a boundary: every other number is computed on weed-only or
+    onion-only frames, or against unreviewed prelabels, and none of those can
+    see a crop mistake where the two plants touch.
+
+    Training on it spends the only test set in the project. That is a defensible
+    trade the day a second batch exists to replace it - and this test is what
+    makes it a decision rather than a drift."""
+    from training.datasets import mixed
+    import training.datumaro_multitask as dmm
+
+    # ntpath, not Path: these configs name Windows drives, and on posix
+    # Path() treats the whole string as a single segment.
+    import ntpath
+    batch_ids = {dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
+                 for p in mixed.MIXED_SESSIONS}
+    if not batch_ids:
+        pytest.skip("no mixed batch configured yet")
+    assert batch_ids & set(mixed.HOLDOUT_TEST), (
+        "a mixed contact batch is in MIXED_SESSIONS but not in HOLDOUT_TEST. "
+        "Training on it spends the only crop-safety test set that exists; if "
+        "that is deliberate, name the batch that replaces it here.")
+
+
+def test_the_mixed_holdout_names_sessions_the_build_can_produce():
+    """HOLDOUT_TEST matches on SESSION ID, not on path. A batch folder's id is
+    its name with the punctuation replaced, so a raw path here would silently
+    hold out nothing and the test set would quietly become training data."""
+    from training.datasets import mixed
+    for sid in mixed.HOLDOUT_TEST:
+        assert "\\" not in sid and "/" not in sid and " " not in sid, (
+            f"{sid!r} looks like a path; HOLDOUT_TEST takes session ids")

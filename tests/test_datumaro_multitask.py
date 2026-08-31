@@ -376,3 +376,49 @@ def test_the_filename_is_found_when_size_and_path_are_in_different_blobs(tmp_pat
     frames, _ = dm.load_datumaro(_write(tmp_path, _doc([item])))
     assert frames[0].image_path == "sess_a_000001.png"
     assert (frames[0].width, frames[0].height) == (640, 480)
+
+
+# --------------------------------------------------------------------------- #
+# A hand-curated batch: frames someone gathered into one folder and annotated,
+# whose filenames no longer name the drive they came from.
+# --------------------------------------------------------------------------- #
+def test_a_frame_that_names_no_session_is_unresolvable_without_a_fallback(tmp_path):
+    """The existing guard: a frame with no session cannot be placed in a
+    leak-free split, so it is an error rather than a guess."""
+    doc = _doc([_item(item_id="raj_photo", path="raj_photo.png")])
+    frames, rep = dm.load_datumaro(_write(tmp_path, doc))
+    assert frames[0].session_id == ""
+    assert any(f["kind"] == "unresolvable_session" for f in rep.errors)
+
+
+def test_a_batch_folder_supplies_the_session_a_filename_cannot(tmp_path):
+    doc = _doc([_item(item_id="raj_photo", path="raj_photo.png")])
+    frames, rep = dm.load_datumaro(_write(tmp_path, doc),
+                                   fallback_session="Mix_raj_Batch_01")
+    assert frames[0].session_id == "Mix_raj_Batch_01"
+    assert not any(f["kind"] == "unresolvable_session" for f in rep.errors)
+
+
+def test_the_fallback_never_overrides_a_session_the_filename_names(tmp_path):
+    """A batch drawn from three drives must stay three sessions. One id over
+    frames metres apart lets a split put near-copies on both sides of it."""
+    doc = _doc([_item(item_id="vid3_20260108_103135_000012",
+                      path="vid3_20260108_103135_000012.png")])
+    frames, _ = dm.load_datumaro(_write(tmp_path, doc),
+                                 fallback_session="Mix_raj_Batch_01")
+    assert frames[0].session_id == "vid3_20260108_103135"
+
+
+def test_batch_session_id_is_derived_from_the_export_folder(tmp_path):
+    p = tmp_path / "Mix_raj_Batch 01" / "annotations" / "default.json"
+    assert dm.batch_session_id(p) == "Mix_raj_Batch_01"
+    assert dm.batch_session_id(tmp_path / "Batch-02" / "default.json") \
+        == "Batch_02"
+
+
+def test_two_batches_get_different_session_ids(tmp_path):
+    """One shared config value would have merged them, and that shows up only
+    as a validation score that is too good."""
+    a = dm.batch_session_id(tmp_path / "Mix_raj_Batch 01" / "annotations" / "d.json")
+    b = dm.batch_session_id(tmp_path / "Mix_raj_Batch 02" / "annotations" / "d.json")
+    assert a != b
