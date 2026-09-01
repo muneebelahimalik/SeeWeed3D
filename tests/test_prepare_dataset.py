@@ -1091,3 +1091,48 @@ def test_the_warning_counts_instances_not_scene_labels():
         {"train": ["a"], "val": ["onion_with_weeds"]},
         {"a": {"grass_weed": 100, CROP_CLASS: 100},
          "onion_with_weeds": {CROP_CLASS: 900, "grass_weed": 3}}) == []
+
+
+# --------------------------------------------------------------------------- #
+# A drive whose scene says weeds are present and whose labels have none.
+# --------------------------------------------------------------------------- #
+class _Info:
+    def __init__(self, session_id, scene):
+        self.session_id, self.scene = session_id, scene
+
+
+def test_a_mixed_drive_with_no_weed_labels_is_reported():
+    """Visit2_20260210_164614 is scene 'mixed' and carries zero weeds: only the
+    crop was annotated. Its real weeds then train as background, teaching that
+    a weed among onions is soil - in the one drive that should teach the
+    opposite."""
+    lines = "\n".join(prep.scene_annotation_mismatch_warning(
+        [_Info("mix1", "mixed")], {"mix1": {CROP_CLASS: 900}}))
+    assert "mix1" in lines and "BACKGROUND" in lines
+    assert "Annotate its weeds, or drop it" in lines
+
+
+def test_a_mixed_drive_that_does_have_weeds_is_not_reported():
+    assert prep.scene_annotation_mismatch_warning(
+        [_Info("mix1", "mixed")],
+        {"mix1": {CROP_CLASS: 900, "grass_weed": 40}}) == []
+
+
+def test_an_onion_only_drive_with_no_weeds_is_not_reported():
+    """That is what onion_only MEANS - warning on it would fire on every onion
+    drive in the project."""
+    assert prep.scene_annotation_mismatch_warning(
+        [_Info("onion1", "onion_only")], {"onion1": {CROP_CLASS: 900}}) == []
+
+
+def test_a_weed_only_drive_with_no_weeds_is_reported():
+    lines = "\n".join(prep.scene_annotation_mismatch_warning(
+        [_Info("w1", "weed_only")], {"w1": {CROP_CLASS: 5}}))
+    assert "w1" in lines
+
+
+def test_a_session_with_no_annotations_at_all_is_not_reported():
+    """Absent from the build is a different problem with a different message."""
+    assert prep.scene_annotation_mismatch_warning(
+        [_Info("empty", "mixed")], {"empty": {}}) == []
+    assert prep.scene_annotation_mismatch_warning([_Info("x", "mixed")], {}) == []
