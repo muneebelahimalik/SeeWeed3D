@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.ontology import CLASSES  # noqa: E402
+from common.session_meta import parse_session_id  # noqa: E402
 from training import datumaro_multitask as dmm  # noqa: E402
 from training import seg_dataset as sd  # noqa: E402
 from training import splits as sp  # noqa: E402
@@ -77,6 +78,35 @@ def session_source_table(session_sources, counts):
         L.append(f"    {(sess or '<unresolved>'):<34}"
                  f"{counts.get(sess, 0):>8}  {folders}")
     return L
+
+
+def folder_id_mismatch_warning(session_sources):
+    """An export folder that names a DIFFERENT session than its frames do.
+
+    `Visit1_20260108_132749/` holds frames named `vid3_20260108_132749_*.png`,
+    so the build knows that drive as vid3_20260108_132749 while every folder,
+    path and earlier report calls it Visit1_20260108_132749. Nothing is wrong
+    with the data - the filename is the better evidence and wins correctly - but
+    the two names are now in circulation for one drive, and HOLDOUT_TEST,
+    SCENE_HINTS and HOLDOUT_SESSIONS all match on the id. Naming the folder
+    there holds out nothing, silently, which is the failure this build has
+    already had once."""
+    out = []
+    for sess in sorted(session_sources or {}):
+        for folder in sorted(session_sources[sess]):
+            fid = dmm.session_id_from_name(folder)
+            # Only when the folder looks like a session id in its own right.
+            # A batch folder legitimately differs; that is what it is for.
+            if sess and fid != sess and parse_session_id(fid)[0]:
+                out.append(
+                    f"  [!] session {sess!r} lives in a folder named "
+                    f"{folder!r}, and both look like\n"
+                    f"      session ids. The FRAMES win, so this build knows "
+                    f"it as {sess!r} - use that\n"
+                    f"      id in HOLDOUT_TEST, SCENE_HINTS and "
+                    f"HOLDOUT_SESSIONS. The folder name matches\n"
+                    f"      nothing and would hold out nothing.")
+    return out
 
 
 def shared_session_warning(session_sources):
@@ -469,6 +499,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           verify_images=False,
           keep_empty_frames=False, require_lep="auto",
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
+          scene_hints=None,
           split_mode="auto", blocks_per_session=1,
           split_granularity="auto"):
     """Everything after out_root is keyword-only on purpose: a positional
@@ -698,6 +729,8 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     for line in session_source_table(
             session_sources, Counter(f.session_id or "" for f in frames)):
         print(line)
+    for line in folder_id_mismatch_warning(session_sources):
+        print(line)
     for line in shared_session_warning(session_sources):
         print(line)
 
@@ -917,9 +950,27 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # with a handful of sessions it is entirely ordinary for every mixed drive
     # to land in train, leaving a validation set that never once exercises the
     # crop-vs-weed decision.
-    from common.session_meta import find_session_meta, unknown_scene_report
+    from common.session_meta import (find_session_meta, normalise_scene,
+                                     unknown_scene_report)
     metas = {s: find_session_meta(img_roots, s)
              for s in sorted(per_session) if s}
+    # A hand-curated batch has no meta/session.json and never will - it is a
+    # folder of frames, not a recording the extractor produced. Without a scene
+    # it is "unknown", which drops it out of stratification entirely, and the
+    # mixed batch is precisely the session whose scene matters most: it is the
+    # only one where the crop-vs-weed decision is exercised at all.
+    for sess, hint in (scene_hints or {}).items():
+        if sess in metas:
+            metas[sess] = dict(metas[sess], scene=normalise_scene(hint),
+                               has_meta=True)
+    unknown_hints = sorted(set(scene_hints or {}) - set(metas))
+    if unknown_hints:
+        print(f"\n  [!] SCENE_HINTS names session(s) not in this build: "
+              f"{', '.join(unknown_hints)}.\n"
+              f"      Known: {', '.join(sorted(s for s in metas))}\n"
+              f"      A hint that matches nothing is silently doing nothing - "
+              f"check the spelling\n"
+              f"      against the SESSIONS IN THIS BUILD table above.")
     infos = [sp.SessionInfo(session_id=s, n_frames=n,
                             class_counts=report.per_session.get(s, {}),
                             scene=metas.get(s, {}).get("scene", "unknown"),

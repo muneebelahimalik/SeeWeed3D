@@ -150,6 +150,27 @@ CONFIG = dict(
     # confident number about a model that had never been asked the question.
     STRATIFY_BY_SCENE=True,
 
+    # WITHOUT THESE, STRATIFICATION CANNOT RUN. The first mixed build reported
+    #
+    #     [!] val contains no mixed session - the crop-vs-weed decision is
+    #         never exercised there.
+    #
+    # and the cause was not the split: four sessions had no meta/session.json,
+    # so their scene was "unknown" and they were invisible to the allocator.
+    # The mixed batch was one of them - the single session whose scene matters
+    # most, since a mixed frame is the only place the crop-vs-weed decision is
+    # exercised at all.
+    #
+    # Ids come from the SESSIONS IN THIS BUILD table, which is NOT always the
+    # export folder name: vid3_20260108_132749's frames live in a folder called
+    # Visit1_20260108_132749.
+    SCENE_HINTS={
+        "Mix_raj_Batch_01": "mixed",
+        "vid2_20260108_122731": "weed_only",
+        "vid3_20260108_110444": "weed_only",
+        "vid3_20260108_132749": "onion_only",
+    },
+
     VAL_FRACTION=0.15,
     TEST_FRACTION=0.15,
 
