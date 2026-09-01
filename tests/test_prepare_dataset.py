@@ -942,3 +942,38 @@ def test_the_coco_export_carries_no_ignore_region(tmp_path):
         [CROP_CLASS], {"f0": "f0.png"})
     assert len(doc["annotations"]) == 1
     assert all(a["iscrowd"] == 0 for a in doc["annotations"])
+
+
+def test_a_frame_named_batch_takes_its_folder_id_not_the_word_frame(tmp_path):
+    """The first real mixed build died here: CVAT had renamed the batch's
+    images to frame_000001.png, every frame became session 'frame', and the
+    holdout named 'Mix_raj_Batch_01' matched nothing."""
+    root = _batch_export(tmp_path, "Mix_raj Batch 01", frames=0)
+    p = root / "annotations" / "default.json"
+    doc = json.loads(p.read_text())
+    doc["items"] = [
+        {"id": f"frame_{i:06d}",
+         "image": {"path": f"frame_{i:06d}.png", "size": [480, 640]},
+         "annotations": [{"id": 3, "type": "polygon", "label_id": L[CROP_CLASS],
+                          "group": 2, "points": _sq(200, 150, 80),
+                          "z_order": 0, "attributes": {}}]}
+        for i in range(4)]
+    p.write_text(json.dumps(doc))
+    _, split_map, _ = prep.build(root, tmp_path / "images", tmp_path / "out",
+                                 val_fraction=0.25, test_fraction=0.25, seed=1,
+                                 strict=False, keep_classes=[CROP_CLASS])
+    assert sorted(s for v in split_map.values() for s in v) == \
+        ["Mix_raj_Batch_01"]
+
+
+def test_shared_session_warning_names_the_folders_that_collide():
+    lines = "\n".join(prep.shared_session_warning(
+        {"frame": {"Batch 01", "Batch 02"}, "vid3_x": {"vid3_x"}}))
+    assert "'frame'" in lines and "Batch 01" in lines and "Batch 02" in lines
+    assert "vid3_x" not in lines, "a session from one folder is not a collision"
+    assert "both sides" in lines
+
+
+def test_no_shared_session_warning_when_each_session_has_one_source():
+    assert prep.shared_session_warning({"a": {"x"}, "b": {"y"}}) == []
+    assert prep.shared_session_warning({}) == []

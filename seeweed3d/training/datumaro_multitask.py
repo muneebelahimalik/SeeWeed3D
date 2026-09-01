@@ -63,6 +63,19 @@ from training.config import AnnotationContract  # noqa: E402
 # Datumaro's sentinel for "this shape belongs to no group".
 NO_GROUP = 0
 
+#: Filename stems that name a TOOL rather than a recording. CVAT writes
+#: `frame_000001.png` for uploaded images, which parses as session "frame" -
+#: identifying nothing, and identical across every batch, so two unrelated
+#: exports would become one session and a split could put near-copies of the
+#: same plant on both sides of it.
+#:
+#: Deliberately a short list of names no drive would ever be called, not a
+#: pattern: the test has to reject generic names without rejecting real ones,
+#: and real session ids in this project range from `vid3_20260108_103135` to a
+#: plain `sess00`.
+GENERIC_STEMS = {"frame", "frames", "image", "images", "img", "default",
+                 "photo", "picture", "screenshot", "capture"}
+
 
 class DatumaroFormatError(ValueError):
     """The export cannot be interpreted. Always raised with the offending file
@@ -321,10 +334,19 @@ def _session_of(item_id, image_path, session_from, fallback=""):
 
     `fallback` is for a HAND-CURATED batch: a folder someone assembled and
     annotated in CVAT, whose files were renamed on the way in and so carry no
-    session. It is a fallback and never an override, because a filename that
-    does name its session is better information than the folder it now sits in -
-    a batch drawn from three drives must stay three sessions or the split leaks
-    between frames metres apart."""
+    session. A filename that genuinely NAMES its session still wins - a batch
+    drawn from three drives must stay three sessions or the split leaks between
+    frames metres apart.
+
+    One exception, and it is not "the id must look like a date". CVAT renames
+    uploaded images to `frame_000001.png`, which parses perfectly and yields the
+    session id "frame" - a name carrying no information about WHICH drive, and
+    the same one every such batch would land in, silently merging unrelated
+    exports into a single session. So a derived id that is one of these generic
+    tool-assigned names loses to the folder, which at least identifies the
+    export. Any real id - `vid3_20260108_103135`, `sess00` - still wins, and
+    with no fallback even a generic id stands, because something beats an
+    unresolvable_session error."""
     if session_from:
         for key in (item_id, Path(image_path).name, Path(image_path).stem):
             if key in session_from:
@@ -333,7 +355,9 @@ def _session_of(item_id, image_path, session_from, fallback=""):
     if "_" in stem:
         head = stem.rsplit("_", 1)
         if head[-1].isdigit():
-            return head[0]
+            derived = head[0]
+            if not fallback or derived.lower() not in GENERIC_STEMS:
+                return derived
     return fallback or ""
 
 
