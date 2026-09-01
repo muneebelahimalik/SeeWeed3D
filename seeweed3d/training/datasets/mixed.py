@@ -115,8 +115,23 @@ CONFIG = dict(
     # scores as background.
     KEEP_CLASSES=list(CLASSES),
 
-    # Empty ON PURPOSE - see the module docstring. Let the build's class report
-    # tell you which classes are too thin to train, then name them here.
+    # MERGED, not dropped, and the build's own counts are why.
+    #
+    #   weed_cluster       5 instances, 0 in val, 0 in test
+    #   wild_radish       97 instances, 0 in val, 0 in test
+    #
+    # Both are unmeasurable: a class with no val instances has an AP that moves
+    # between rounds on noise, and a class with 5 costs a detection head that
+    # can never fire. But DROPPING them would turn 102 real weeds into
+    # background - teaching that those plants are soil, which on a weeder is an
+    # untreated weed. Merging keeps every one of them a TARGET, which is the
+    # decision the laser actually needs; only the species label is lost, and
+    # neither class had enough instances to support one.
+    #
+    # weed_cluster merges too even though it means "intermingled weeds, no
+    # separable LEP". This build carries 0 LEPs, so the distinction it exists to
+    # make is not being trained anyway. Revisit when Stage B has labels.
+    MERGE_CLASSES={"wild_radish": "other_weed", "weed_cluster": "other_weed"},
     DROP_CLASSES=[],
 
     # Hand-corrected weeds beside unreviewed crop masks. Neither label answers

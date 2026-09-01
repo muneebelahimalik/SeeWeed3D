@@ -59,6 +59,26 @@ def _write_json(path, doc, indent=2):
         json.dump(doc, fh, indent=indent)
 
 
+def session_source_table(session_sources, counts):
+    """Every session, how many frames it has, and which export folder it came
+    from. Printed ALWAYS, not only when something looks wrong.
+
+    Two rounds of this build were spent working out where a session called
+    'frame' came from, because the only sessions the output named were the ones
+    that took a fallback. A session whose id came from its filenames was
+    invisible, so an id that identifies nothing looked the same as one that
+    identifies a drive. Three lines of output answer it directly."""
+    if not session_sources:
+        return []
+    L = ["", "  SESSIONS IN THIS BUILD",
+         f"    {'session':<34}{'frames':>8}  from export folder"]
+    for sess in sorted(session_sources):
+        folders = ", ".join(sorted(session_sources[sess])) or "?"
+        L.append(f"    {(sess or '<unresolved>'):<34}"
+                 f"{counts.get(sess, 0):>8}  {folders}")
+    return L
+
+
 def shared_session_warning(session_sources):
     """A session id claimed by more than one export folder.
 
@@ -675,6 +695,9 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
               f"      from several drives - one session id over frames metres "
               f"apart lets a split\n"
               f"      put near-copies on both sides.")
+    for line in session_source_table(
+            session_sources, Counter(f.session_id or "" for f in frames)):
+        print(line)
     for line in shared_session_warning(session_sources):
         print(line)
 
