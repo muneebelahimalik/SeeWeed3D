@@ -59,6 +59,46 @@ def _write_json(path, doc, indent=2):
         json.dump(doc, fh, indent=indent)
 
 
+def ignore_region_warning(frames):
+    """Say what actually happens to ignore_region, because it is not what the
+    label means.
+
+    An ignore_region is drawn to say "do not learn from this bit" - by a person
+    over an ambiguous plant, or by prelabel_complement_sam3.py over everything
+    it could not stand behind. It is parsed, it reaches seg_manifest.json, and
+    then BOTH trainers drop it: coco_export.build_coco and seg_dataset both
+    iterate `instances` only.
+
+    Dropping an annotation is not neutral. In detection, every pixel not claimed
+    by a box or mask is supervised as BACKGROUND, so an ignore region over a
+    real plant teaches exactly the lesson it was drawn to prevent - and does it
+    silently, since the label is there in CVAT and in the manifest.
+
+    Exporting them as COCO `iscrowd: 1` does not fix it either: rfdetr's loader
+    filters crowd annotations out of the targets, so those pixels come back as
+    background by a longer route.
+
+    So this states it rather than letting the count sit unread in a JSON file.
+    A silent wrong answer beats a loud one every time - so make it loud."""
+    n_regions = sum(len(getattr(f, "ignore_regions", ()) or ()) for f in frames)
+    if not n_regions:
+        return []
+    n_frames = sum(1 for f in frames if getattr(f, "ignore_regions", None))
+    return [
+        f"\n  [!] {n_regions} ignore_region(s) across {n_frames} frame(s) are "
+        f"NOT excluded from training.",
+        f"      They are recorded in seg_manifest.json and read by neither "
+        f"trainer, so their",
+        f"      pixels supervise as BACKGROUND - the opposite of what the label "
+        f"means. Over a",
+        f"      real plant that teaches 'this plant is soil', which is the "
+        f"lesson the region",
+        f"      was drawn to prevent.",
+        f"      Until a trainer honours them: exclude those FRAMES, or accept "
+        f"that the marked",
+        f"      regions are being trained as bare ground.\n"]
+
+
 def find_annotation_files(roots):
     """Every Datumaro JSON under one or several export roots.
 
@@ -669,6 +709,9 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         print(f"  [!] {n_lep} LEP(s) for {n_weeds} weed instance(s) - PARTIAL. "
               f"Missing ones are reported as errors; finish them or set "
               f"--no-require-lep to build segmentation-only.")
+
+    for line in ignore_region_warning(frames):
+        print(line)
 
     # -- merge thin classes into a coarser one, BEFORE dropping --------------
     #

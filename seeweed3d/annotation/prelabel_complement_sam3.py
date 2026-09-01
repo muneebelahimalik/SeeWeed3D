@@ -30,10 +30,16 @@ cannot stand behind:
     <weed class>    vegetation far from any onion, on confident ground
     ignore_region   everything else - near an onion, low score, ambiguous
 
-`ignore_region` is already in the ontology and is excluded from training by
-the dataset builder, so an uncertain region costs an annotator one look and
-costs the model nothing. That is the whole safety design: the error the
-complement makes most often lands in a bucket that is inert.
+`ignore_region` is already in the ontology, and the intent is that an uncertain
+region costs an annotator one look and costs the model nothing - the error the
+complement makes most often landing in a bucket that is inert.
+
+THAT BUCKET IS NOT INERT YET. Ignore regions reach seg_manifest.json and no
+further: both trainers iterate `instances` only, so those pixels are supervised
+as BACKGROUND - over a real plant, the exact lesson the region exists to
+prevent. prepare_dataset.py prints a warning whenever a build contains any.
+Until a trainer honours them, treat this prelabeler's output as needing a human
+pass over the ignore regions rather than as safe to train on directly.
 
 WHY IT IS STILL BETTER THAN THE SAM 3 MIXED PRELABELER, WHERE IT APPLIES
 -------------------------------------------------------------------------
@@ -117,8 +123,8 @@ CONFIG = {
     "WEED_MIN_VEG_SCORE": 0.90,
 
     # Vegetation the model neither claimed nor left clearly alone. Written as
-    # ignore_region, which the dataset builder excludes from training - so the
-    # complement's most common error costs a look and teaches nothing.
+    # ignore_region - which no trainer honours yet, so those pixels currently
+    # train as background. See the module docstring before building on it.
     "EMIT_IGNORE": True,
     "IGNORE_MIN_AREA_PX": 150,
 
@@ -497,6 +503,10 @@ def main():
     print(f"Import instances_default.json into CVAT. Anything labelled "
           f"{IGNORE_LABEL} is a region the model could not stand behind - "
           f"decide those first, they are where the crop/weed boundary lives.")
+    print(f"  Decide them, do not leave them: no trainer honours "
+          f"{IGNORE_LABEL} yet, so any left\n"
+          f"  in place train as bare ground rather than as 'do not learn "
+          f"from this'.")
 
 
 if __name__ == "__main__":

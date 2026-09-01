@@ -884,3 +884,61 @@ def test_a_batch_frame_that_names_its_drive_keeps_it(tmp_path):
                                       keep_classes=[CROP_CLASS])
     assert sorted(s for v in split_map.values() for s in v) == \
         ["vid3_20260108_103135"]
+
+
+# --------------------------------------------------------------------------- #
+# ignore_region: drawn to mean "do not learn from this", currently trained as
+# background by both trainers. The warning is the only thing that says so.
+# --------------------------------------------------------------------------- #
+def _with_ignore(tmp_path, folder="ig_export"):
+    root = _one_session_export(tmp_path, "sess00", folder)
+    p = root / "annotations" / "default.json"
+    doc = json.loads(p.read_text())
+    for item in doc["items"]:
+        item["annotations"].append(
+            {"id": 9, "type": "polygon", "label_id": L["ignore_region"],
+             "group": 0, "points": _sq(300, 300, 40), "z_order": 0,
+             "attributes": {}})
+    p.write_text(json.dumps(doc))
+    return root
+
+
+def test_ignore_regions_are_parsed_but_reach_no_trainer(tmp_path):
+    """The whole reason the warning exists. If this test ever fails because a
+    trainer started honouring them, delete the warning - do not loosen this."""
+    root = _with_ignore(tmp_path)
+    files = prep.find_annotation_files(root)
+    frames, _ = prep.dmm.load_datumaro(files[0])
+    assert all(f.ignore_regions for f in frames), "parsed into the record"
+    assert all(all(i.class_name != "ignore_region" for i in f.instances)
+               for f in frames), "never an instance - so no trainer sees it"
+
+
+def test_a_build_with_ignore_regions_says_they_train_as_background(tmp_path):
+    lines = "\n".join(prep.ignore_region_warning(
+        prep.dmm.load_datumaro(
+            prep.find_annotation_files(_with_ignore(tmp_path))[0])[0]))
+    assert "[!]" in lines and "BACKGROUND" in lines
+    assert "opposite of what the label means" in lines
+
+
+def test_no_ignore_region_warning_when_there_are_none(tmp_path):
+    frames, _ = prep.dmm.load_datumaro(
+        prep.find_annotation_files(_one_session_export(
+            tmp_path, "sess00", "plain"))[0])
+    assert prep.ignore_region_warning(frames) == []
+
+
+def test_the_coco_export_carries_no_ignore_region(tmp_path):
+    """coco_export is what rfdetr trains from. An ignore region exported as
+    iscrowd would not help either - rfdetr's loader drops crowd annotations,
+    so those pixels come back as background by a longer route."""
+    ce = load_script("training/coco_export.py")
+    doc = ce.build_coco(
+        [{"item_id": "f0", "height": 480, "width": 640,
+          "instances": [{"class_name": CROP_CLASS,
+                         "polygons": [_sq(10, 10, 50)]}],
+          "ignore_regions": [_sq(300, 300, 40)]}],
+        [CROP_CLASS], {"f0": "f0.png"})
+    assert len(doc["annotations"]) == 1
+    assert all(a["iscrowd"] == 0 for a in doc["annotations"])
