@@ -80,6 +80,44 @@ def session_source_table(session_sources, counts):
     return L
 
 
+def unmeasurable_classes_warning(split_map, per_session_classes, split="val"):
+    """Classes with ZERO instances in val - the split that picks the checkpoint.
+
+    Scene warnings say a SCENE is missing. This says what that costs: which
+    classes cannot be scored at all in the split that decides which epoch you
+    keep. `checkpoint_best_total.pth` is selected on val, so a val set with no
+    weeds in it keeps whichever epoch was best at onions, and a mixed model
+    quietly becomes a crop detector that ignores weeds while every number on the
+    page goes up.
+
+    Counted from instances rather than inferred from scene labels, because a
+    scene hint is a description someone typed and this is the thing itself."""
+    sessions = (split_map or {}).get(split) or []
+    if not sessions:
+        return []
+    present, everywhere = Counter(), Counter()
+    for sess, counts in (per_session_classes or {}).items():
+        for cls, n in (counts or {}).items():
+            everywhere[cls] += n
+            if sess in sessions:
+                present[cls] += n
+    missing = sorted(c for c in everywhere if not present.get(c))
+    if not missing:
+        return []
+    return [
+        f"\n  [!] {len(missing)} class(es) have NO instances in {split}: "
+        f"{', '.join(missing)}.",
+        f"      Their AP cannot be computed there, so the checkpoint chosen on "
+        f"{split} is chosen",
+        f"      without them. Trained this way a mixed model can lose the "
+        f"missing class entirely",
+        f"      while the mean AP rises, because the class that is left is the "
+        f"easy one.",
+        f"      Pin a session containing them with HOLDOUT_VAL_SESSIONS, or "
+        f"read every number\n"
+        f"      from this build as being about the other classes only.\n"]
+
+
 def folder_id_mismatch_warning(session_sources):
     """An export folder that names a DIFFERENT session than its frames do.
 
@@ -1070,6 +1108,11 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                                       "there"}.get(scene, "")
                 print(f"  [!] {split} contains no {scene} session"
                       f"{' - ' + cost if cost else ''}.")
+        # A missing SCENE is a description; a missing CLASS is the cost of it,
+        # and val is the split that picks the checkpoint.
+        for line in unmeasurable_classes_warning(split_map,
+                                                 report.per_session, "val"):
+            print(line)
     else:
         # Blocks WITHIN each session, so every session - and therefore every
         # class - is represented in train and in val.

@@ -105,6 +105,21 @@ HOLDOUT_TEST = [
     "Mix_raj_Batch_01",
 ]
 
+#: Sessions pinned to VAL. Not a redundant knob - it is the one that decides
+#: which checkpoint you keep.
+#:
+#: Left to the allocator, val came out as two onion-only drives: 572 frames with
+#: essentially no weeds in them. `checkpoint_best_total.pth` is selected on val,
+#: so that run would have kept whichever epoch was best at ONIONS and never once
+#: looked at weed recall - the exact way a mixed model becomes a crop detector
+#: that ignores weeds, while every number on the page goes up.
+#:
+#: One mixed drive here fixes it: mixed frames carry both classes, so val
+#: measures the crop-vs-weed decision itself rather than half of it.
+HOLDOUT_VAL = [
+    "Visit2_20260210_164614",
+]
+
 CONFIG = dict(
     BASE,
     SOURCES=[{"DATUMARO_ROOT": p, "IMAGES_ROOT": p} for p in SOURCES_ROOTS],
@@ -144,6 +159,7 @@ CONFIG = dict(
     SPLIT_MODE="auto",
     SPLIT_GRANULARITY="auto",
     HOLDOUT_TEST_SESSIONS=HOLDOUT_TEST,
+    HOLDOUT_VAL_SESSIONS=HOLDOUT_VAL,
 
     # Scene stratification earns its keep here and nowhere else: a split that
     # put every onion frame in train and every weed frame in val would report a

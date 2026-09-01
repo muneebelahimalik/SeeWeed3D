@@ -1047,3 +1047,47 @@ def test_a_batch_folder_name_is_not_a_mismatch():
         {"Mix_raj_Batch_01": {"Mix_raj Batch 01"}}) == []
     assert prep.folder_id_mismatch_warning(
         {"vid3_20260108_110444": {"vid3_20260108_110444"}}) == []
+
+
+# --------------------------------------------------------------------------- #
+# val is the split that picks the checkpoint. A class with no instances there
+# is not scored at all, and the mean AP rises as the model forgets it.
+# --------------------------------------------------------------------------- #
+def test_a_class_absent_from_val_is_named_with_what_it_costs():
+    lines = "\n".join(prep.unmeasurable_classes_warning(
+        {"train": ["w1"], "val": ["onion1"], "test": ["t1"]},
+        {"w1": {"grass_weed": 400, CROP_CLASS: 10},
+         "onion1": {CROP_CLASS: 900},
+         "t1": {"grass_weed": 50}}))
+    assert "grass_weed" in lines
+    assert "checkpoint chosen on val" in lines
+    assert "HOLDOUT_VAL_SESSIONS" in lines
+
+
+def test_no_warning_when_val_covers_every_class():
+    assert prep.unmeasurable_classes_warning(
+        {"train": ["a"], "val": ["b"]},
+        {"a": {"grass_weed": 5, CROP_CLASS: 5},
+         "b": {"grass_weed": 2, CROP_CLASS: 2}}) == []
+
+
+def test_a_class_nobody_has_is_not_reported_as_missing_from_val():
+    """It is absent from the dataset, not from val - a different problem with
+    a different fix, and reporting it here would be noise."""
+    assert prep.unmeasurable_classes_warning(
+        {"train": ["a"], "val": ["b"]},
+        {"a": {CROP_CLASS: 5}, "b": {CROP_CLASS: 2}}) == []
+
+
+def test_no_warning_without_a_val_split():
+    assert prep.unmeasurable_classes_warning({"train": ["a"]}, {"a": {}}) == []
+
+
+def test_the_warning_counts_instances_not_scene_labels():
+    """A scene hint is a description someone typed; instances are the thing
+    itself. An onion_only session that happens to carry weeds still measures
+    them."""
+    assert prep.unmeasurable_classes_warning(
+        {"train": ["a"], "val": ["onion_with_weeds"]},
+        {"a": {"grass_weed": 100, CROP_CLASS: 100},
+         "onion_with_weeds": {CROP_CLASS: 900, "grass_weed": 3}}) == []
