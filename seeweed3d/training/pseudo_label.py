@@ -130,6 +130,22 @@ WEIGHTS = {
 }
 
 
+def veg_of(bgr, cfg=None):
+    """The vegetation prior for one frame, with this module's defaults.
+
+    Lifted out of frame_quality so a caller that also wants PER-INSTANCE
+    quality computes it once and passes it to both, instead of duplicating five
+    threshold defaults at the call site - where they would drift and quietly
+    make the two measurements answer slightly different questions."""
+    c = dict(cfg or {})
+    proc = white_balance(bgr, 1.15) if c.get("WHITE_BALANCE", True) else bgr
+    return vegetation_mask(proc,
+                           c.get("EXG_THRESHOLD", 0.05),
+                           c.get("VEG_MIN_SATURATION", 40),
+                           c.get("VEG_MORPH_KERNEL", 3),
+                           c.get("VEG_MIN_COMPONENT_PX", 150))
+
+
 def frame_quality(bgr, masks, scores, n_suppressed=0, veg=None, cfg=None):
     """Per-frame pseudo-label quality. Returns a dict of components + `score`.
 
@@ -178,6 +194,129 @@ def frame_quality(bgr, masks, scores, n_suppressed=0, veg=None, cfg=None):
     return {**parts, "score": round(score, 4), "n_instances": n,
             "pred_px": pred_px, "veg_px": veg_px,
             "gates_failed": failed, "empty": veg_px == 0}
+
+
+def instance_quality(mask, veg, score=None):
+    """One instance's mask quality: how much of it is actually vegetation.
+
+    The per-instance analogue of frame_quality's veg_precision, and chosen for
+    the same reason: it is not the model's opinion. A mask that has grown into
+    the soil around a plant scores low here whatever confidence the model
+    attached to it.
+
+    It cannot see the other half - a mask that stops short of the plant looks
+    perfect by this measure - so it is a floor on quality, not a grade. That is
+    still enough to answer "is this class masked worse than that one", which is
+    the question nothing here could answer before."""
+    m = np.asarray(mask, bool)
+    area = int(m.sum())
+    if not area:
+        return {"veg_precision": 0.0, "confidence": float(score or 0.0),
+                "area_px": 0}
+    v = np.asarray(veg, bool)
+    both = int((m & v).sum()) if v.shape == m.shape else 0
+    return {"veg_precision": both / area,
+            "confidence": float(score if score is not None else 1.0),
+            "area_px": area}
+
+
+def class_quality(records):
+    """Per-class aggregate over instance_quality dicts tagged with a class.
+
+    `records` is [(class_name, quality_dict), ...]. Returns
+    {class: {n, veg_precision, confidence}} using MEDIANS - a handful of
+    instances is enough for one blown mask to drag a mean somewhere the class
+    never was."""
+    by = {}
+    for cls, q in records:
+        by.setdefault(cls, []).append(q)
+    out = {}
+    for cls, qs in by.items():
+        out[cls] = {
+            "n": len(qs),
+            "veg_precision": float(np.median([q["veg_precision"] for q in qs])),
+            "confidence": float(np.median([q["confidence"] for q in qs])),
+        }
+    return out
+
+
+#: Below this many instances a class's median is one or two plants, and reading
+#: a spread off it would be reading noise. Mirrors splits.MIN_INSTANCES_FOR_BALANCE.
+MIN_INSTANCES_FOR_CLASS_QUALITY = 20
+
+#: A gap in median mask quality between the best and worst class wide enough to
+#: be worth acting on rather than watching.
+CLASS_SPREAD_NOTABLE = 0.15
+
+
+def format_class_quality(per_class, min_n=MIN_INSTANCES_FOR_CLASS_QUALITY):
+    """The per-class mask-quality table, worst first.
+
+    Worst first because the weak class is the one that decides what to annotate
+    next, and a table sorted the other way buries it under the class that
+    already works."""
+    if not per_class:
+        return ""
+    L = ["", "  MASK QUALITY BY CLASS  (how much of each mask is really "
+         "vegetation)",
+         f"    {'class':<28}{'instances':>10}{'veg':>8}{'conf':>8}"]
+    for cls in sorted(per_class, key=lambda c: per_class[c]["veg_precision"]):
+        v = per_class[cls]
+        thin = "" if v["n"] >= min_n else "  (too few to read)"
+        L.append(f"    {cls:<28}{v['n']:>10}{v['veg_precision']:>7.0%}"
+                 f"{v['confidence']:>8.2f}{thin}")
+    L += class_quality_note(per_class, min_n=min_n)
+    return "\n".join(L)
+
+
+def class_quality_note(per_class, spread=CLASS_SPREAD_NOTABLE,
+                       min_n=MIN_INSTANCES_FOR_CLASS_QUALITY):
+    """What a per-class quality spread means, and what NOT to do about it.
+
+    The tempting response to "primrose masks are good and grass masks are not"
+    is to pseudo-label the primrose instances and drop the rest. That is the
+    one response that makes it worse, twice over:
+
+      * a dropped instance is not absent, it is BACKGROUND. The frame then
+        teaches that a grass weed is soil - a false negative the model learns
+        to reproduce, and on a weeder a false negative is an untreated weed.
+      * it feeds the concentration loop balance_by_class exists to stop. The
+        model masks its dominant class best, so that class supplies the most
+        pseudo-labels, so it grows more dominant. Selecting by instance removes
+        the frame-level cap that currently bounds this, because a frame stops
+        being 'one frame of class X' and becomes 'five of X and none of Y'.
+
+    The weak class needs MORE supervision, and the frames where it is masked
+    badly are exactly the ones a person should correct. That is what review/ is
+    for, and it is where the round's gradient already lives."""
+    usable = {c: v for c, v in per_class.items() if v["n"] >= min_n}
+    if len(usable) < 2:
+        return []
+    best = max(usable, key=lambda c: usable[c]["veg_precision"])
+    worst = min(usable, key=lambda c: usable[c]["veg_precision"])
+    gap = usable[best]["veg_precision"] - usable[worst]["veg_precision"]
+    if gap < spread:
+        return ["    (no class is masked much better than another - a "
+                "per-class split would be",
+                "     selecting noise.)"]
+    return [
+        f"    {best} is masked {gap:.0%} better than {worst}. That is a real "
+        f"difference, and the",
+        f"    useful response is NOT to pseudo-label {best} alone:",
+        f"      * a {worst} instance you drop is not absent, it is BACKGROUND. "
+        f"The frame then",
+        f"        teaches that a {worst} is soil - and an untreated weed is "
+        f"what that costs.",
+        f"      * it feeds the concentration loop: the model masks its "
+        f"strongest class best, so",
+        f"        that class supplies the most pseudo-labels, so it grows "
+        f"stronger. Per-instance",
+        f"        selection also escapes the frame-level cap that bounds this "
+        f"today.",
+        f"    {worst} needs MORE supervision, not less. Correct the frames "
+        f"where it is masked",
+        f"    badly - that is what review/ is for, and it is where this "
+        f"round's gradient is."]
 
 
 def classify(quality, accept=ACCEPT_SCORE, review=REVIEW_SCORE):
