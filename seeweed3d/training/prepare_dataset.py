@@ -31,7 +31,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common.ontology import CLASSES  # noqa: E402
+from common.ontology import CLASSES, CROP_CLASS  # noqa: E402
 from common.session_meta import parse_session_id  # noqa: E402
 from training import datumaro_multitask as dmm  # noqa: E402
 from training import seg_dataset as sd  # noqa: E402
@@ -116,6 +116,42 @@ def unmeasurable_classes_warning(split_map, per_session_classes, split="val"):
         f"      Pin a session containing them with HOLDOUT_VAL_SESSIONS, or "
         f"read every number\n"
         f"      from this build as being about the other classes only.\n"]
+
+
+def scene_annotation_mismatch_warning(infos, per_session_classes):
+    """A drive whose SCENE says weeds are present and whose LABELS have none.
+
+    A `mixed` session with zero weed instances is not a mixed session that
+    happened to be clean - it is a mixed session where only the crop was
+    annotated. Every real weed in it is then unlabelled, and unlabelled is not
+    neutral: in detection those pixels supervise as BACKGROUND, so the frames
+    teach that a weed among onions is soil.
+
+    That is the worst place to teach it. A weed among onions is the exact
+    situation the machine exists to handle, and the drive that should teach the
+    decision teaches its opposite instead.
+
+    The reverse case matters too: a `weed_only` drive with crop instances, or
+    with no weed instances at all, means the scene hint and the export disagree
+    and one of them is wrong."""
+    out = []
+    for info in infos or []:
+        counts = (per_session_classes or {}).get(info.session_id) or {}
+        weeds = sum(n for c, n in counts.items() if c != CROP_CLASS)
+        if not counts:
+            continue
+        if info.scene in ("mixed", "weed_only") and not weeds:
+            out.append(
+                f"  [!] {info.session_id} is scene {info.scene!r} but has NO "
+                f"weed instances -\n"
+                f"      only {CROP_CLASS} was annotated. Its real weeds are "
+                f"unlabelled, and unlabelled\n"
+                f"      is not neutral: those pixels train as BACKGROUND, so "
+                f"this drive teaches that\n"
+                f"      a weed among onions is soil - the opposite of the "
+                f"decision it should teach.\n"
+                f"      Annotate its weeds, or drop it from this build.")
+    return out
 
 
 def folder_id_mismatch_warning(session_sources):
@@ -1089,6 +1125,10 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             print(f"\n  Split granularity: {split_info['granularity']} "
                   f"({split_info['n_units']} independent unit(s)) - val and "
                   f"test share no day with training.")
+
+        for line in scene_annotation_mismatch_warning(
+                infos, report.per_session):
+            print(line)
 
         rep = sp.scene_representation(split_map, infos)
         print("\n  Scene representation (sessions per split):")

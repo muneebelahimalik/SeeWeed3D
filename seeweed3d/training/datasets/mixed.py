@@ -114,10 +114,20 @@ HOLDOUT_TEST = [
 #: looked at weed recall - the exact way a mixed model becomes a crop detector
 #: that ignores weeds, while every number on the page goes up.
 #:
-#: One mixed drive here fixes it: mixed frames carry both classes, so val
-#: measures the crop-vs-weed decision itself rather than half of it.
+#: A mixed drive was the obvious pin and it did NOT work: Visit2_20260210_164614
+#: is scene "mixed" and carries zero weed instances, because only the crop was
+#: ever annotated there. The scene said the weeds are in the picture; the export
+#: said nobody labelled them.
+#:
+#: So this pins the one session whose weed labels a PERSON checked. 60 frames is
+#: small for a validation set, and a small honest one beats 572 frames that
+#: cannot score the class the machine exists to find.
+#:
+#: It costs training the only fully hand-corrected weed drive. That is the right
+#: way round: val decides which checkpoint survives, so it should hold the
+#: labels you trust most, not the ones you can spare.
 HOLDOUT_VAL = [
-    "Visit2_20260210_164614",
+    "vid2_20260108_122731",
 ]
 
 CONFIG = dict(
