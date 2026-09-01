@@ -977,3 +977,23 @@ def test_shared_session_warning_names_the_folders_that_collide():
 def test_no_shared_session_warning_when_each_session_has_one_source():
     assert prep.shared_session_warning({"a": {"x"}, "b": {"y"}}) == []
     assert prep.shared_session_warning({}) == []
+
+
+def test_session_source_table_names_every_session_and_its_folder():
+    """The diagnostic that was missing: a session whose id came from its
+    filenames was invisible in the output, so an id identifying nothing looked
+    exactly like one identifying a drive."""
+    lines = "\n".join(prep.session_source_table(
+        {"frame": {"some_export"}, "vid3_x": {"vid3_x"}},
+        {"frame": 383, "vid3_x": 2}))
+    assert "frame" in lines and "383" in lines and "some_export" in lines
+    assert "vid3_x" in lines
+
+
+def test_session_source_table_shows_an_unresolved_session_readably():
+    lines = "\n".join(prep.session_source_table({"": {"batch"}}, {"": 4}))
+    assert "<unresolved>" in lines
+
+
+def test_session_source_table_is_empty_without_sessions():
+    assert prep.session_source_table({}, {}) == []
