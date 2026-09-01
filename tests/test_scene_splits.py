@@ -158,3 +158,36 @@ def test_existing_error_cases_are_unchanged():
         sp.assign_splits([])
     with pytest.raises(sp.SplitError):
         sp.assign_splits([_s("a_20260101_100000", "mixed")], 0.6, 0.6)
+
+
+def test_seam_separation_uses_the_builds_session_ids(tmp_path):
+    """Without session_of it re-derives the session from the filename - an
+    older copy of a rule the build has already applied, and the two disagree.
+    A CVAT-renamed batch reported as 'frame' while the build called it
+    Mix_raj_Batch_01, so one drive appeared under two names in one report."""
+    ids = {"frame_000001": "Mix_raj_Batch_01",
+           "frame_000002": "Mix_raj_Batch_01",
+           "frame_000009": "Mix_raj_Batch_01"}
+    sep = sp.seam_separation(
+        {"train": ["frame_000001"], "val": ["frame_000009"], "test": []},
+        session_of=ids)
+    assert list(sep["val"]) == ["Mix_raj_Batch_01"]
+    assert sep["val"]["Mix_raj_Batch_01"] == 8
+
+
+def test_seam_separation_falls_back_to_the_filename_without_a_map():
+    """Callers that never had ids keep working; the fallback is just no longer
+    the only behaviour."""
+    sep = sp.seam_separation(
+        {"train": ["vid3_20260108_110444_000001"],
+         "val": ["vid3_20260108_110444_000009"], "test": []})
+    assert list(sep["val"]) == ["vid3_20260108_110444"]
+
+
+def test_two_renamed_batches_do_not_merge_into_one_seam_group():
+    """The consequence: merged, a seam BETWEEN two batches is invisible."""
+    ids = {"frame_000001": "Batch_01", "frame_000002": "Batch_02"}
+    sep = sp.seam_separation(
+        {"train": ["frame_000001"], "val": ["frame_000002"], "test": []},
+        session_of=ids)
+    assert sep["val"] == {}, "different sessions share no training frames"

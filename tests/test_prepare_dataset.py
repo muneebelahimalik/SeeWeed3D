@@ -1136,3 +1136,70 @@ def test_a_session_with_no_annotations_at_all_is_not_reported():
     assert prep.scene_annotation_mismatch_warning(
         [_Info("empty", "mixed")], {"empty": {}}) == []
     assert prep.scene_annotation_mismatch_warning([_Info("x", "mixed")], {}) == []
+
+
+# --------------------------------------------------------------------------- #
+# A holdout must survive the fallback to frame blocks. It stopped surviving
+# exactly when the split got WORSE - the moment least likely to be re-checked.
+# --------------------------------------------------------------------------- #
+def _multi_session_export(tmp_path, name, sessions, frames_per=9):
+    items = []
+    for sid in sessions:
+        for f in range(frames_per):
+            items.append({
+                "id": f"{sid}_{f:06d}",
+                "image": {"path": f"{sid}_{f:06d}.png", "size": [480, 640]},
+                "annotations": [
+                    {"id": 1, "type": "polygon", "label_id": L["wild_radish"],
+                     "group": 1, "points": _sq(20, 20, 60), "z_order": 0,
+                     "attributes": {"lep_visibility": "visible",
+                                    "targetable": "yes"}},
+                    {"id": 2, "type": "points", "label_id": L["weed_LEP"],
+                     "group": 1, "points": [50.0, 50.0], "z_order": 0,
+                     "attributes": {}},
+                    {"id": 3, "type": "polygon", "label_id": L[CROP_CLASS],
+                     "group": 2, "points": _sq(200, 150, 80), "z_order": 0,
+                     "attributes": {}}]})
+    doc = {"info": {},
+           "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                                "attributes": []}
+                                               for n in LABELS],
+                                    "attributes": []}},
+           "items": items}
+    root = tmp_path / name
+    (root / "annotations").mkdir(parents=True)
+    (root / "annotations" / "default.json").write_text(json.dumps(doc))
+    return root
+
+
+def test_a_pinned_holdout_is_not_block_split(tmp_path):
+    """Before this, a session pinned to test was cut into thirds and two of
+    them went into TRAINING - the crop-safety test set silently becoming
+    training data."""
+    root = _multi_session_export(tmp_path, "exp",
+                                 ["sess00", "sess01", "sess02"])
+    _, split_map, rows = prep.build(
+        root, tmp_path / "images", tmp_path / "out", val_fraction=0.2,
+        test_fraction=0.2, seed=1, strict=False, split_mode="frame_block",
+        holdout_test=["sess02"], gap_frames=1)
+    where = {r["item_id"]: r["split"] for r in rows}
+    pinned = {k: v for k, v in where.items() if k.startswith("sess02")}
+    assert pinned, "the pinned session still contributes frames"
+    assert set(pinned.values()) == {"test"}, (
+        f"every frame of a pinned session belongs to test, got "
+        f"{sorted(set(pinned.values()))}")
+    assert "sess02" in split_map["test"]
+    assert "sess02" not in split_map["train"]
+
+
+def test_unpinned_sessions_are_still_block_split(tmp_path):
+    """Pinning one session must not turn the whole build into a session
+    split - the fallback exists because that was impossible."""
+    root = _multi_session_export(tmp_path, "exp",
+                                 ["sess00", "sess01", "sess02"])
+    _, _, rows = prep.build(
+        root, tmp_path / "images", tmp_path / "out", val_fraction=0.2,
+        test_fraction=0.2, seed=1, strict=False, split_mode="frame_block",
+        holdout_test=["sess02"], gap_frames=1)
+    free = {r["split"] for r in rows if r["item_id"].startswith("sess00")}
+    assert len(free) > 1, "an unpinned session spans more than one split"
