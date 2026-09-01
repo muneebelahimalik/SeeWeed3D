@@ -879,7 +879,7 @@ def _lay_out(ids, sizes, gap, order):
 MIN_SEAM_SEPARATION = 60
 
 
-def seam_separation(split_frames, frame_index_of=None):
+def seam_separation(split_frames, frame_index_of=None, session_of=None):
     """How far apart the splits actually are, in VIDEO frames.
 
     A gap is expressed in POOL frames, and the pool is usually strided - so
@@ -896,6 +896,13 @@ def seam_separation(split_frames, frame_index_of=None):
     video frame index; the default reads the trailing number of the id, which
     is the extractor's own convention.
 
+    session_of: {frame_id: session_id}. PASS IT. Without it the session is
+    re-derived from the filename here, which is a second, older copy of a rule
+    the build has already applied - and the two disagree. A CVAT-renamed batch
+    reports as session "frame" in this table while the build calls it
+    Mix_raj_Batch_01, so one drive appears under two names in one report; and
+    two such batches merge into a single group, hiding a seam between them.
+
     Returns {"test": {session: min_distance}, "val": {...}} - sessions with
     nothing in a split are absent rather than reported as infinitely far."""
     if frame_index_of is None:
@@ -906,9 +913,10 @@ def seam_separation(split_frames, frame_index_of=None):
         for fid in ids or ():
             idx = frame_index_of(fid)
             if idx >= 0:
+                sess = (session_of or {}).get(fid)
                 # `<camera>_<date>_<time>_<index>` - the session is everything
-                # before the trailing index.
-                out[str(fid).rsplit("_", 1)[0]].append(idx)
+                # before the trailing index. Fallback only.
+                out[sess or str(fid).rsplit("_", 1)[0]].append(idx)
         return out
 
     train = by_session(split_frames.get("train"))

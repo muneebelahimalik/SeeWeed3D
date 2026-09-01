@@ -1157,8 +1157,19 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         # Blocks WITHIN each session, so every session - and therefore every
         # class - is represented in train and in val.
         split_mode = "frame_block"
+        # AN EXPLICIT HOLDOUT SURVIVES THE FALLBACK. Block-splitting every
+        # session ignored holdout_val/holdout_test entirely, so a session pinned
+        # to test was cut into thirds and two of them went into training - the
+        # holdout silently becoming training data at the moment the split got
+        # WORSE, which is exactly when it is least likely to be re-checked.
+        pinned = {}
+        for split, names in (("val", holdout_val), ("test", holdout_test)):
+            for s in names or ():
+                pinned[s] = split
         by_session = {}
         for f in sorted(frames, key=lambda f: f.item_id):
+            if f.session_id in pinned:
+                continue
             by_session.setdefault(f.session_id, []).append(f.item_id)
         # What each frame CONTAINS, so the block layout can be chosen for class
         # balance instead of hashed. Ground truth only - no model is consulted.
@@ -1168,21 +1179,32 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             by_session, val_fraction, test_fraction, gap_frames=gap_frames,
             n_blocks=blocks_per_session, seed=seed,
             class_counts_by_frame=counts_by_frame)
-        split_map = {"train": [i.session_id for i in infos], "val": [],
-                     "test": []}
+        split_map = {"train": [i.session_id for i in infos
+                               if i.session_id not in pinned],
+                     "val": [s for s, k in pinned.items() if k == "val"],
+                     "test": [s for s, k in pinned.items() if k == "test"]}
         where = {}
         for split in ("train", "val", "test"):
             for item in frame_split[split]:
                 where[item] = split
+        for f in frames:
+            if f.session_id in pinned:
+                where[f.item_id] = pinned[f.session_id]
         chosen = split_mode_wanted == "frame_block"
         head = ("SPLIT BY CONTIGUOUS FRAME BLOCKS (requested)" if chosen
                 else f"SESSION-LEVEL SPLIT NOT USED: {reason}")
         print(f"\n  [!] {head}.")
         print(f"      {blocks_per_session} block(s) per session, "
               f"{gap_frames}-frame gap at each seam:")
+        n_pinned = Counter(pinned[f.session_id] for f in frames
+                           if f.session_id in pinned)
         print(f"        train={len(frame_split['train'])} "
-              f"val={len(frame_split['val'])} test={len(frame_split['test'])} "
+              f"val={len(frame_split['val']) + n_pinned['val']} "
+              f"test={len(frame_split['test']) + n_pinned['test']} "
               f"(dropped as buffer: {len(frame_split['_dropped_gap'])})")
+        if pinned:
+            print(f"      Held out WHOLE, not block-split: " + ", ".join(
+                f"{s} -> {k}" for s, k in sorted(pinned.items())))
         if frame_split.get("_train_only_sessions"):
             print(f"      Too short to block-split, so wholly in train: "
                   f"{', '.join(frame_split['_train_only_sessions'])}")
@@ -1192,7 +1214,12 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         # curation ran. That distinction decides whether this split measures
         # anything, and it is invisible in the configuration. So measure it.
         by_split = {s: list(frame_split[s]) for s in ("train", "val", "test")}
-        sep = sp.seam_separation(by_split)
+        # The build's session ids, not the filename heuristic seam_separation
+        # would otherwise fall back to - which reports a CVAT-renamed batch as
+        # session "frame" while every other line of this build calls it by its
+        # folder, and merges two such batches into one group.
+        sep = sp.seam_separation(
+            by_split, session_of={f.item_id: f.session_id for f in frames})
         rows = [(k, s, d) for k in ("val", "test")
                 for s, d in sorted((sep.get(k) or {}).items())]
         if rows:
