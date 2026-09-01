@@ -267,6 +267,19 @@ CONFIG = {
     # printed metric would tell you.
     "STRATIFY_BY_SCENE": True,
 
+    # WHAT EACH SESSION IS, for sessions whose meta/session.json cannot say.
+    # {session_id: "onion_only" | "weed_only" | "mixed"}.
+    #
+    # A hand-curated batch is a folder of frames, not a recording the
+    # extractor produced, so it has no meta/ and never will. Without a scene
+    # it is "unknown" and drops out of stratification - and the mixed batch is
+    # exactly the session whose scene matters most, being the only one where
+    # the crop-vs-weed decision is exercised at all. Name it here.
+    #
+    # Use the ids from the SESSIONS IN THIS BUILD table, not folder names:
+    # the two can differ, and a hint that matches nothing does nothing.
+    "SCENE_HINTS": {},
+
     # -- How the split is made -------------------------------------------------
     # "auto"        try whole sessions; fall back to frame blocks when that is
     #               impossible (one session, or a class living only in a
@@ -444,6 +457,7 @@ def main(cfg=None):
         holdout_test=c.get("HOLDOUT_TEST_SESSIONS") or (),
         holdout_val=c.get("HOLDOUT_VAL_SESSIONS") or (),
         stratify_by_scene=c.get("STRATIFY_BY_SCENE", True),
+        scene_hints=c.get("SCENE_HINTS") or {},
     )
     print("\nNext: edit seeweed3d/training/train_model.py and run it.\n")
 
