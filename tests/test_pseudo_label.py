@@ -235,3 +235,90 @@ def test_the_report_explains_a_recall_gate_failure():
 
 def test_the_report_survives_an_empty_run():
     pl.format_report(pl.summarise([]))
+
+
+# --------------------------------------------------------------------------- #
+# Per-class mask quality: "primrose masks are good, the others are not" made
+# into a number, and the reason that observation must NOT become a filter.
+# --------------------------------------------------------------------------- #
+def _veg(h=40, w=40, box=(5, 5, 20)):
+    v = np.zeros((h, w), bool)
+    x, y, s = box
+    v[y:y + s, x:x + s] = True
+    return v
+
+
+def test_instance_quality_scores_a_mask_that_grew_into_the_soil():
+    veg = _veg()
+    tight = np.zeros((40, 40), bool)
+    tight[5:25, 5:25] = True                      # exactly the plant
+    loose = np.zeros((40, 40), bool)
+    loose[5:35, 5:35] = True                      # plant plus a lot of soil
+    assert pl.instance_quality(tight, veg)["veg_precision"] == pytest.approx(1.0)
+    assert pl.instance_quality(loose, veg)["veg_precision"] < 0.5
+
+
+def test_instance_quality_does_not_use_the_models_confidence_as_quality():
+    """The whole point of the vegetation terms is that they are not the model's
+    opinion. A confident bad mask must still score badly."""
+    veg = _veg()
+    bad = np.zeros((40, 40), bool)
+    bad[30:38, 30:38] = True                      # entirely on soil
+    q = pl.instance_quality(bad, veg, score=0.99)
+    assert q["veg_precision"] == 0.0 and q["confidence"] == pytest.approx(0.99)
+
+
+def test_instance_quality_survives_an_empty_mask():
+    assert pl.instance_quality(np.zeros((40, 40), bool), _veg())["area_px"] == 0
+
+
+def test_class_quality_uses_medians_not_means():
+    """A handful of instances is enough for one blown mask to drag a mean
+    somewhere the class never was."""
+    good = {"veg_precision": 0.9, "confidence": 0.8, "area_px": 100}
+    blown = {"veg_precision": 0.0, "confidence": 0.8, "area_px": 100}
+    per = pl.class_quality([("grass_weed", good)] * 4 + [("grass_weed", blown)])
+    assert per["grass_weed"]["veg_precision"] == pytest.approx(0.9)
+    assert per["grass_weed"]["n"] == 5
+
+
+def _spread(best=0.95, worst=0.55, n=40):
+    return {"cutleaf_evening_primrose": {"n": n, "veg_precision": best,
+                                         "confidence": 0.8},
+            "grass_weed": {"n": n, "veg_precision": worst, "confidence": 0.7}}
+
+
+def test_a_real_class_spread_says_do_not_pseudo_label_the_strong_class_alone():
+    note = "\n".join(pl.class_quality_note(_spread()))
+    assert "grass_weed" in note and "BACKGROUND" in note
+    assert "concentration loop" in note
+    assert "MORE supervision" in note and "review/" in note
+
+
+def test_a_small_class_spread_is_called_noise_rather_than_acted_on():
+    note = "\n".join(pl.class_quality_note(_spread(best=0.90, worst=0.85)))
+    assert "selecting noise" in note
+    assert "BACKGROUND" not in note
+
+
+def test_a_thin_class_is_not_read_for_a_spread():
+    """Two instances of a class have a median, and it means nothing."""
+    per = _spread(n=3)
+    assert pl.class_quality_note(per) == []
+
+
+def test_the_table_puts_the_worst_class_first():
+    """The weak class decides what to annotate next; sorting the other way
+    buries it under the class that already works."""
+    txt = pl.format_class_quality(_spread())
+    body = [l for l in txt.splitlines() if "weed" in l or "primrose" in l]
+    assert body[0].strip().startswith("grass_weed")
+
+
+def test_the_table_marks_a_class_too_thin_to_read():
+    txt = pl.format_class_quality(_spread(n=3))
+    assert "too few to read" in txt
+
+
+def test_no_table_without_instances():
+    assert pl.format_class_quality({}) == ""

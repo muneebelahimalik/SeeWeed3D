@@ -556,6 +556,7 @@ def _score(session, images_root, pred_dir):
 
     roots = [images_root, str(pred_dir), str(pred_dir / "cvat_ready")]
     qualities, per_frame, descriptors, order = [], {}, [], []
+    inst_records = []
     print(f"  scoring {len(doc.get('images', []))} frame(s) from {session}")
 
     for im in sorted(doc.get("images", []), key=lambda i: i["file_name"]):
@@ -570,6 +571,10 @@ def _score(session, images_root, pred_dir):
             continue
 
         h, w = bgr.shape[:2]
+        # Computed ONCE and shared by the frame score and the per-instance
+        # scores, so the two cannot end up answering slightly different
+        # questions about the same picture.
+        veg = pl.veg_of(bgr)
         union = np.zeros((h, w), np.uint8)
         polys, classes, areas, scores = [], [], [], []
         for a in anns_by_image.get(im["id"], []):
@@ -578,14 +583,23 @@ def _score(session, images_root, pred_dir):
             if not poly:
                 continue
             pts = np.asarray(poly, np.float64).reshape(-1, 2)
+            cls = cat_name.get(a["category_id"], "")
+            score = float(a.get("score", 1.0))
             if len(pts) >= 3:
                 cv2.fillPoly(union, [np.round(pts).astype(np.int32)], 1)
+                # One instance at a time, released immediately: a full-frame
+                # mask per instance held for a session is the shape that has
+                # already killed a run here.
+                one = np.zeros((h, w), np.uint8)
+                cv2.fillPoly(one, [np.round(pts).astype(np.int32)], 1)
+                inst_records.append(
+                    (cls, pl.instance_quality(one.astype(bool), veg, score)))
             polys.append(poly)
-            classes.append(cat_name.get(a["category_id"], ""))
+            classes.append(cls)
             areas.append(float(a.get("area", 0.0)))
-            scores.append(float(a.get("score", 1.0)))
+            scores.append(score)
 
-        q = pl.frame_quality(bgr, [union.astype(bool)], scores)
+        q = pl.frame_quality(bgr, [union.astype(bool)], scores, veg=veg)
         q["frame"] = fn
         qualities.append(q)
         per_frame[fn] = {"image_path": str(img), "shape": (h, w),
@@ -595,7 +609,8 @@ def _score(session, images_root, pred_dir):
         order.append(fn)
 
     return {"names": names, "qualities": qualities, "per_frame": per_frame,
-            "descriptors": descriptors, "order": order}
+            "descriptors": descriptors, "order": order,
+            "class_quality": pl.class_quality(inst_records)}
 
 
 def _emit(session, scored, pred_dir, out, n_hand, budget):
@@ -603,6 +618,7 @@ def _emit(session, scored, pred_dir, out, n_hand, budget):
     qualities, per_frame = scored["qualities"], scored["per_frame"]
     summary = pl.summarise(qualities, ACCEPT, REVIEW)
     print(pl.format_report(summary, n_hand=n_hand, budget=budget))
+    print(pl.format_class_quality(scored.get("class_quality") or {}))
 
     buckets = {"accept": [], "review": [], "skip": []}
     for q in qualities:
@@ -741,6 +757,7 @@ def _finish(session, scored, pred_dir, out, n_hand, budget, summary, buckets,
               "infer_stride": INFER_STRIDE, "min_frame_gap": MIN_FRAME_GAP,
               "pseudo_budget": budget,
               "summary": summary,
+              "class_quality": scored.get("class_quality") or {},
               "written": {"accept": n_img, "review": r_img,
                           "accept_instances": n_ann, "review_instances": r_ann},
               "accepted": sorted(accepted),
