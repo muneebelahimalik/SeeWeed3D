@@ -422,3 +422,47 @@ def test_two_batches_get_different_session_ids(tmp_path):
     a = dm.batch_session_id(tmp_path / "Mix_raj_Batch 01" / "annotations" / "d.json")
     b = dm.batch_session_id(tmp_path / "Mix_raj_Batch 02" / "annotations" / "d.json")
     assert a != b
+
+
+def test_cvats_frame_000001_naming_does_not_become_a_session_called_frame(tmp_path):
+    """CVAT renames uploaded images to frame_000001.png. That parses perfectly
+    and yields the session id "frame" - a bucket EVERY such batch lands in,
+    silently merging unrelated drives into one session. It broke the first real
+    mixed build: the batch's frames became 'frame' and the holdout never
+    matched."""
+    doc = _doc([_item(item_id="frame_000001", path="frame_000001.png")])
+    frames, _ = dm.load_datumaro(_write(tmp_path, doc),
+                                 fallback_session="Mix_raj_Batch_01")
+    assert frames[0].session_id == "Mix_raj_Batch_01"
+
+
+def test_a_real_session_name_still_beats_the_folder(tmp_path):
+    """The rule is not 'the folder always wins' - it is 'the filename must
+    actually name a session'. vid3_20260108_103135 does; frame does not."""
+    doc = _doc([_item(item_id="vid3_20260108_103135_000012",
+                      path="vid3_20260108_103135_000012.png")])
+    frames, _ = dm.load_datumaro(_write(tmp_path, doc),
+                                 fallback_session="Mix_raj_Batch_01")
+    assert frames[0].session_id == "vid3_20260108_103135"
+
+
+def test_without_a_fallback_a_weak_id_is_still_better_than_nothing(tmp_path):
+    """Only when there is a folder to prefer does the stricter test apply -
+    otherwise the alternative is an unresolvable_session error."""
+    doc = _doc([_item(item_id="frame_000001", path="frame_000001.png")])
+    frames, _ = dm.load_datumaro(_write(tmp_path, doc))
+    assert frames[0].session_id == "frame"
+
+
+def test_two_frame_named_batches_do_not_merge(tmp_path):
+    """The consequence that matters: without this they are one session, and a
+    split puts near-copies of the same plant on both sides of it."""
+    ids = []
+    for folder in ("Batch 01", "Batch 02"):
+        d = tmp_path / folder
+        d.mkdir()
+        doc = _doc([_item(item_id="frame_000001", path="frame_000001.png")])
+        p = _write(d, doc)
+        frames, _ = dm.load_datumaro(p, fallback_session=dm.batch_session_id(p))
+        ids.append(frames[0].session_id)
+    assert ids == ["Batch_01", "Batch_02"]

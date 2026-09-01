@@ -59,6 +59,39 @@ def _write_json(path, doc, indent=2):
         json.dump(doc, fh, indent=indent)
 
 
+def shared_session_warning(session_sources):
+    """A session id claimed by more than one export folder.
+
+    GENERIC_STEMS catches the name this went wrong under - CVAT's
+    `frame_000001.png` - but it is a list, and the next tool will invent a name
+    that is not on it. This catches the consequence instead of the cause: two
+    unrelated exports feeding one session id is what actually lets a split put
+    near-copies of the same plant on both sides.
+
+    A warning, not an error. One session legitimately spans two CVAT tasks when
+    an export was re-cut, and refusing to build would be wrong there - but it is
+    never something to discover later from a validation score that was too
+    good."""
+    shared = {s: sorted(v) for s, v in (session_sources or {}).items()
+              if len(v) > 1}
+    if not shared:
+        return []
+    out = [f"\n  [!] {len(shared)} session id(s) are claimed by more than one "
+           f"export folder:"]
+    for sess, folders in sorted(shared.items()):
+        out.append(f"        {sess!r} <- " + ", ".join(folders))
+    out += [
+        "      That is correct only if one drive really was annotated across "
+        "several CVAT",
+        "      tasks. If they are different drives, they are now ONE session: "
+        "the split can",
+        "      put near-copies of the same plant on both sides of it, and the "
+        "score that",
+        "      follows is too good for a reason nothing in the output would "
+        "show.\n"]
+    return out
+
+
 def ignore_region_warning(frames):
     """Say what actually happens to ignore_region, because it is not what the
     label means.
@@ -616,23 +649,34 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
     # with no session cannot be placed in a leak-free split. Each export folder
     # names its own fallback, so two batches can never be merged into one
     # session by accident. Frames that DO name their session keep it.
-    foldered = Counter()
+    foldered, example, session_sources = Counter(), {}, {}
     for f in ann_files:
         batch_id = dmm.batch_session_id(f)
         got, report = dmm.load_datumaro(f, contract, report=report,
                                         fallback_session=batch_id)
         for rec in got:
             origin.setdefault(rec.item_id, []).append(str(f))
+            session_sources.setdefault(rec.session_id or "", set()).add(
+                Path(f).parent.parent.name if Path(f).parent.name == "annotations"
+                else Path(f).parent.name)
             if rec.session_id == batch_id:
                 foldered[batch_id] += 1
+                # One real filename per fallback. Without it "read as session
+                # 'Mix_raj_Batch_01'" is unverifiable, and the way this goes
+                # wrong is that the id is plausible and wrong.
+                example.setdefault(batch_id,
+                                   Path(rec.image_path or rec.item_id).name)
         frames.extend(got)
     for batch_id, n in sorted(foldered.items()):
-        print(f"  [i] {n} frame(s) do not name a session in their filename; "
-              f"read as session {batch_id!r}\n"
-              f"      after the export folder. Correct if they came from "
-              f"several drives - one\n"
-              f"      session id over frames metres apart lets a split put "
-              f"near-copies on both sides.")
+        print(f"  [i] {n} frame(s) do not name a session in their filename "
+              f"(e.g. {example.get(batch_id, '?')});\n"
+              f"      read as session {batch_id!r} after the export folder. "
+              f"Correct if they came\n"
+              f"      from several drives - one session id over frames metres "
+              f"apart lets a split\n"
+              f"      put near-copies on both sides.")
+    for line in shared_session_warning(session_sources):
+        print(line)
 
     # -- keep only hand-verified frames --------------------------------------
     # FIRST, before duplicate detection and before validation. A frame you never
