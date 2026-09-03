@@ -376,10 +376,16 @@ def _selected_stems(sess, spec, pdz):
         frames += got
     if not frames:
         return None
-    try:
-        kept, _ = pdz.select_frames(frames, spec, None)
-    except SystemExit:
+    # NARROW THE SPEC TO THIS EXPORT first. select_frames refuses a spec naming
+    # a session it cannot see, and this walks one session at a time - so the
+    # shared INCLUDE_FRAMES raised on every session it did not mention. It was
+    # caught and turned into "no filtering", which happened to be right for
+    # vid2 and would have silently audited all 326 frames of a drive the spec
+    # restricted to 75.
+    sub = pdz.spec_for_sessions(spec, {r.session_id for r in frames})
+    if not sub:
         return None
+    kept, _ = pdz.select_frames(frames, sub, None)
     return {Path(r.image_path or r.item_id).stem for r in kept}
 
 

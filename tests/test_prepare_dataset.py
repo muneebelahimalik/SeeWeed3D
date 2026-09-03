@@ -1270,3 +1270,54 @@ def test_no_call_out_when_several_sessions_supply_training_weeds():
 
 def test_the_table_is_empty_without_an_assignment():
     assert prep.split_by_session_table({}, {}) == []
+
+
+# --------------------------------------------------------------------------- #
+# A spec written for a whole build, applied to one export at a time.
+# --------------------------------------------------------------------------- #
+def test_spec_for_sessions_keeps_only_the_tokens_this_export_can_answer():
+    """compose_mixed walks one export at a time, so the shared spec naming both
+    drives errored on whichever one it was not currently reading."""
+    spec = "vid2_20260108_122731:*,vid3_20260108_110444:1-75"
+    assert prep.spec_for_sessions(spec, {"vid2_20260108_122731"}) == \
+        "vid2_20260108_122731:*"
+    assert prep.spec_for_sessions(spec, {"vid3_20260108_110444"}) == \
+        "vid3_20260108_110444:1-75"
+
+
+def test_spec_for_sessions_keeps_unscoped_tokens():
+    """They apply to every session by definition, so no export can be the
+    wrong one for them."""
+    assert prep.spec_for_sessions("1-20", {"anything"}) == "1-20"
+    assert prep.spec_for_sessions("1-20,vid2:*", {"vid2"}) == "1-20,vid2:*"
+
+
+def test_spec_for_sessions_returns_empty_when_nothing_applies():
+    """The caller decides what that means - and for a per-export tool 'this
+    spec does not address you' is not the same as 'select nothing'."""
+    assert prep.spec_for_sessions("vid9:*", {"vid2"}) == ""
+
+
+def test_spec_for_sessions_does_not_treat_a_drive_letter_as_a_scope():
+    """The same rule parse_frame_spec applies: E:\\... is a path, not a
+    session called 'E'."""
+    assert prep.spec_for_sessions(r"E:\data\frames", {"vid2"}) == r"E:\data\frames"
+
+
+def test_spec_for_sessions_passes_an_empty_spec_through():
+    assert prep.spec_for_sessions("", {"vid2"}) == ""
+    assert prep.spec_for_sessions(None, {"vid2"}) == ""
+
+
+def test_the_narrowed_spec_is_accepted_by_select_frames(tmp_path):
+    """The end-to-end point: what comes out must be usable where the whole
+    spec raised."""
+    root = _one_session_export(tmp_path, "sess00", "task0", frames_per=4)
+    files = prep.find_annotation_files(root)
+    frames, _ = prep.dmm.load_datumaro(files[0])
+    whole = "sess00:1-2,sess99:*"
+    with pytest.raises(SystemExit, match="sess99"):
+        prep.select_frames(frames, whole, None)
+    sub = prep.spec_for_sessions(whole, {f.session_id for f in frames})
+    kept, _ = prep.select_frames(frames, sub, None)
+    assert len(kept) == 2
