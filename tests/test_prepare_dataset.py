@@ -1234,3 +1234,39 @@ def test_the_summary_does_not_claim_a_pinned_session_spans_every_split(
     out = capsys.readouterr().out
     assert "Every session contributes to every split" not in out
     assert "sess02 in test" in out
+
+
+# --------------------------------------------------------------------------- #
+# Which session is actually training the model, and on what.
+# --------------------------------------------------------------------------- #
+def test_the_table_counts_frames_and_weeds_per_session_per_split():
+    where = {"a_1": "train", "a_2": "val", "b_1": "train", "b_2": "test"}
+    sess = {"a_1": "driveA", "a_2": "driveA", "b_1": "driveB", "b_2": "driveB"}
+    lines = "\n".join(prep.split_by_session_table(
+        where, sess, {"a_1": 40, "a_2": 5, "b_1": 0, "b_2": 0}))
+    assert "driveA" in lines and "driveB" in lines
+    assert "1 (40)" in lines, "frames and weed instances are both shown"
+
+
+def test_a_single_weed_bearing_training_session_is_called_out():
+    """The case the split totals hide: all of a build's weed supervision from
+    ONE drive, because the other weed session was pinned to val and the
+    'mixed' drives turned out to carry no weed labels."""
+    where = {"w_1": "train", "o_1": "train", "o_2": "val"}
+    sess = {"w_1": "weeds1", "o_1": "onions1", "o_2": "onions1"}
+    lines = "\n".join(prep.split_by_session_table(
+        where, sess, {"w_1": 60, "o_1": 0, "o_2": 0}))
+    assert "every training weed comes from ONE session" in lines
+    assert "weeds1" in lines
+
+
+def test_no_call_out_when_several_sessions_supply_training_weeds():
+    where = {"w_1": "train", "x_1": "train"}
+    sess = {"w_1": "weeds1", "x_1": "weeds2"}
+    lines = "\n".join(prep.split_by_session_table(
+        where, sess, {"w_1": 60, "x_1": 20}))
+    assert "ONE session" not in lines
+
+
+def test_the_table_is_empty_without_an_assignment():
+    assert prep.split_by_session_table({}, {}) == []
