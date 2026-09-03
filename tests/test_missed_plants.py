@@ -219,3 +219,72 @@ def test_a_mask_falling_well_short_of_its_plant_is_reported():
     veg = _blob(50, 50, 60)
     claimed = _blob(62, 62, 36)                  # 12px short on two sides
     assert unclaimed_blobs(veg, claimed)[0] >= 1
+
+
+# --------------------------------------------------------------------------
+# The other direction: a mask that reaches PAST its plant. Invisible from the
+# union, because covering soil takes nothing away from it.
+# --------------------------------------------------------------------------
+def test_a_mask_covering_soil_is_invisible_to_the_union_check():
+    """The reason it needed its own measurement. A mask twice the size of its
+    plant leaves nothing unclaimed - the union check reports a perfect frame."""
+    bgr = np.zeros((H, W, 3), np.uint8)
+    veg = _blob(50, 50, 20)                       # a small plant
+    fat = _blob(40, 40, 60)                       # a mask 9x its area
+    rec, _ = mp.audit_frame(bgr, fat, veg=veg, instances=[fat])
+    assert rec["n_missed"] == 0, "nothing is unclaimed - the union looks clean"
+    assert rec["n_soil_masks"] == 1, "but the mask is mostly soil"
+
+
+def test_a_tight_mask_is_not_reported_as_claiming_soil():
+    bgr = np.zeros((H, W, 3), np.uint8)
+    veg = _blob(50, 50, 40)
+    rec, _ = mp.audit_frame(bgr, veg, veg=veg, instances=[_blob(50, 50, 40)])
+    assert rec["n_soil_masks"] == 0
+    assert rec["median_instance_veg"] == pytest.approx(1.0)
+
+
+def test_the_soil_threshold_is_forgiving_by_default():
+    """A polygon around a thin curved leaf encloses soil however carefully it
+    is drawn, and erring large on crop masks is project policy. Only a badly
+    blobby mask should trip this."""
+    bgr = np.zeros((H, W, 3), np.uint8)
+    veg = _blob(50, 50, 30)                       # 900 px of plant
+    mask = _blob(48, 48, 44)                      # 1936 px -> 46% vegetation
+    rec, _ = mp.audit_frame(bgr, mask, veg=veg, instances=[mask])
+    assert rec["n_soil_masks"] == 0, "46% vegetation is normal for thin foliage"
+
+
+def test_both_failure_modes_are_counted_in_one_frame():
+    bgr = np.zeros((H, W, 3), np.uint8)
+    veg = _blob(20, 20, 20) | _blob(150, 150, 40)
+    fat = _blob(10, 10, 60)                       # swallows the first plant
+    rec, _ = mp.audit_frame(bgr, fat, veg=veg, instances=[fat])
+    assert rec["n_soil_masks"] == 1               # too big here
+    assert rec["n_missed"] == 1                   # and missed the other plant
+
+
+def test_an_empty_mask_is_not_counted_as_claiming_soil():
+    bgr = np.zeros((H, W, 3), np.uint8)
+    veg = _blob(50, 50, 30)
+    rec, _ = mp.audit_frame(bgr, veg, veg=veg,
+                            instances=[np.zeros((H, W), bool)])
+    assert rec["n_soil_masks"] == 0
+
+
+def test_the_report_shows_both_directions():
+    per = {"f0": {"n_missed": 2, "missed_px": 900, "veg_px": 9000,
+                  "missed_frac": 0.1, "n_instances": 12, "n_soil_masks": 3,
+                  "median_instance_veg": 0.7}}
+    txt = mp.format_report({"vid3": per})
+    assert "MASK TOO SMALL" in txt and "MASK TOO BIG" in txt
+    assert "swallowed an adjacent weed" in txt
+    assert "trains that weed as CROP" in txt
+
+
+def test_draw_marks_a_soil_claiming_mask_differently():
+    bgr = np.zeros((H, W, 3), np.uint8)
+    tight, fat = _blob(20, 20, 30), _blob(120, 120, 40)
+    vis = mp.draw(bgr, tight | fat, np.zeros((H, W), bool),
+                  instances=[tight, fat], soil_idx=[1])
+    assert vis.shape == bgr.shape
