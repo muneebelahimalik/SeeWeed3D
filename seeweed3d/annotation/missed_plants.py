@@ -86,6 +86,19 @@ WORST_FRAMES = 15
 DILATE_PX = CLAIM_DILATE_PX
 MIN_BLOB_PX = MIN_UNCLAIMED_BLOB_PX
 
+#: A mask less than this fraction vegetation is reported as claiming soil.
+#:
+#: DELIBERATELY FORGIVING, because a low number here is often correct. A polygon
+#: around a thin curved onion leaf or a grass blade encloses a lot of soil no
+#: matter how carefully it is drawn, and this project's own policy is to "err
+#: large on onion masks" so the crop is over- rather than under-protected.
+#:
+#: What it is looking for is the other end: a mask so blobby it has swallowed
+#: the soil AND whatever was growing in it. An onion mask that has absorbed an
+#: adjacent weed trains that weed as crop, which protects it from ever being
+#: shot - the mirror of a missed weed and just as expensive.
+MIN_INSTANCE_VEG = 0.35
+
 OUT_ROOT = r"E:\Dataset_Vidalia\audits"
 
 # #############################################################################
@@ -94,16 +107,46 @@ OUT_ROOT = r"E:\Dataset_Vidalia\audits"
 
 C_CLAIMED = (0, 165, 255)     # orange: what somebody annotated
 C_MISSED = (0, 0, 255)        # red: vegetation nobody claimed
+C_SOIL_MASK = (0, 220, 255)   # yellow: a mask that is mostly soil
 
 
 def audit_frame(bgr, claimed, dilate_px=DILATE_PX, min_blob_px=MIN_BLOB_PX,
-                veg=None):
-    """One frame: how many plant-shaped things nobody labelled."""
+                veg=None, instances=None, min_instance_veg=None):
+    """One frame, BOTH ways a mask and its plant can disagree.
+
+    A mask can fall short of its plant or reach past it, and the two are
+    different mistakes with different costs:
+
+        vegetation nobody claimed   a plant trained as background - on a weeder,
+                                    a weed that never gets treated.
+        a mask claiming soil        boundary slop at best; at worst an onion
+                                    mask grown so blobby it has swallowed an
+                                    adjacent weed, which trains the weed as
+                                    crop and protects it from ever being shot.
+
+    Only the first is visible from the union of masks, because a mask covering
+    soil takes nothing away from the union. So the second is measured per
+    INSTANCE - how much of each mask is actually vegetation - which is the same
+    quantity pseudo_label uses to judge a prediction, applied here to a human's
+    polygon."""
     veg = pl.veg_of(bgr) if veg is None else veg
+    floor = (MIN_INSTANCE_VEG if min_instance_veg is None
+             else float(min_instance_veg))
     n, px, mask = unclaimed_blobs(veg, claimed, dilate_px, min_blob_px)
     veg_px = int(np.asarray(veg, bool).sum())
+
+    precisions, soil_idx = [], []
+    for i, m in enumerate(instances or []):
+        q = pl.instance_quality(m, veg)
+        precisions.append(q["veg_precision"])
+        if q["area_px"] and q["veg_precision"] < floor:
+            soil_idx.append(i)
     return {"n_missed": n, "missed_px": px, "veg_px": veg_px,
-            "missed_frac": (px / veg_px) if veg_px else 0.0}, mask
+            "missed_frac": (px / veg_px) if veg_px else 0.0,
+            "n_instances": len(precisions), "n_soil_masks": len(soil_idx),
+            "median_instance_veg": (float(np.median(precisions))
+                                    if precisions else 1.0),
+            "soil_idx": soil_idx}, mask
 
 
 def verdict(per_frame, unsafe=UNSAFE_BLOBS):
@@ -140,8 +183,15 @@ def summarise(per_frame):
     n = len(per_frame)
     tot = sum(v["n_missed"] for v in per_frame.values())
     with_any = sum(1 for v in per_frame.values() if v["n_missed"])
+    soil = sum(v.get("n_soil_masks", 0) for v in per_frame.values())
+    insts = sum(v.get("n_instances", 0) for v in per_frame.values())
+    med = [v["median_instance_veg"] for v in per_frame.values()
+           if v.get("n_instances")]
     return {"frames": n, "missed_blobs": tot, "frames_with_missed": with_any,
-            "mean_blobs_per_frame": (tot / n) if n else 0.0}
+            "mean_blobs_per_frame": (tot / n) if n else 0.0,
+            "instances": insts, "soil_masks": soil,
+            "soil_mask_rate": (soil / insts) if insts else 0.0,
+            "median_instance_veg": float(np.median(med)) if med else 1.0}
 
 
 def worst(per_frame, n=WORST_FRAMES):
@@ -155,9 +205,15 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
     for sess, per_frame in sorted(by_session.items()):
         s = summarise(per_frame)
         L += ["", f"  {sess}",
-              f"    {s['frames']} frame(s), {s['missed_blobs']} unlabelled "
-              f"plant-shaped patch(es) in {s['frames_with_missed']} frame(s)",
-              f"    mean {s['mean_blobs_per_frame']:.2f} per frame"]
+              f"    {s['frames']} frame(s), {s['instances']} annotated "
+              f"instance(s)",
+              f"    MASK TOO SMALL  {s['missed_blobs']} unlabelled plant-shaped "
+              f"patch(es) in {s['frames_with_missed']} frame(s)"
+              f"  (mean {s['mean_blobs_per_frame']:.2f}/frame)",
+              f"    MASK TOO BIG    {s['soil_masks']} mask(s) under "
+              f"{int(MIN_INSTANCE_VEG * 100)}% vegetation "
+              f"({s['soil_mask_rate']:.1%}); median mask is "
+              f"{s['median_instance_veg']:.0%} vegetation"]
         listed = worst(per_frame, 8)
         if listed:
             L.append("    worst:")
@@ -167,6 +223,16 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
                          f"{v['missed_frac']:>8.0%} of its vegetation")
         L += [f"    VERDICT: {verdict(per_frame, unsafe)}"]
     L += ["",
+          "  [i] MASK TOO BIG is the forgiving half. A polygon around a thin "
+          "onion leaf or a",
+          "      grass blade encloses soil however carefully it is drawn, and "
+          "erring large on",
+          "      crop masks is this project's own policy. It is looking for the "
+          "other end: a",
+          "      mask so blobby it swallowed an adjacent weed, which trains "
+          "that weed as CROP",
+          "      and protects it from ever being shot.",
+          "",
           "  [i] a patch is a PLACE TO LOOK, not a proven missed weed. The "
           "vegetation prior",
           "      calls moss, algae and green debris vegetation, and misses "
@@ -179,16 +245,30 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
     return "\n".join(L + [""])
 
 
-def draw(bgr, claimed, missed):
-    """Annotated plants outlined orange, unclaimed vegetation filled red."""
+def draw(bgr, claimed, missed, instances=None, soil_idx=None):
+    """Both failure modes in one picture, because they are fixed differently.
+
+    orange   an annotated plant
+    yellow   a mask that is mostly soil - too big, or around something thin
+    red      vegetation nobody claimed - too small, or missed entirely
+    """
     import cv2
     out = bgr.copy()
     fill = out.copy()
     fill[np.asarray(missed, bool)] = C_MISSED
     out = cv2.addWeighted(fill, 0.45, out, 0.55, 0.0)
-    m = np.asarray(claimed, bool).astype(np.uint8)
-    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(out, cnts, -1, C_CLAIMED, 2)
+    soil = set(soil_idx or ())
+    if instances:
+        for i, m in enumerate(instances):
+            cnts, _ = cv2.findContours(np.asarray(m, bool).astype(np.uint8),
+                                       cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, cnts, -1,
+                             C_SOIL_MASK if i in soil else C_CLAIMED, 2)
+    else:
+        cnts, _ = cv2.findContours(np.asarray(claimed, bool).astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, cnts, -1, C_CLAIMED, 2)
     return out
 
 
@@ -231,10 +311,11 @@ def main():
             if bgr is None:
                 continue
             h, w = bgr.shape[:2]
+            per_inst = [rasterise(polys, h, w) for _, polys, _ in insts]
             claimed = np.zeros((h, w), bool)
-            for _, polys, _ in insts:
-                claimed |= rasterise(polys, h, w)
-            rec, mask = audit_frame(bgr, claimed)
+            for m in per_inst:
+                claimed |= m
+            rec, mask = audit_frame(bgr, claimed, instances=per_inst)
             if rec["n_missed"] >= MIN_BLOBS_TO_REPORT:
                 per_frame[stem] = rec
                 records[f"{sess.name}/{stem}"] = (str(img), claimed.shape)
@@ -254,15 +335,17 @@ def main():
             if bgr is None:
                 continue
             h, w = bgr.shape[:2]
+            got = load_polygons(Path(img_path).parent.parent).get(stem, [])
+            per_inst = [rasterise(polys, h, w) for _, polys, _ in got]
             claimed = np.zeros((h, w), bool)
-            for _, polys, _ in load_polygons(Path(img_path).parent.parent
-                                             ).get(stem, []):
-                claimed |= rasterise(polys, h, w)
-            _, mask = audit_frame(bgr, claimed)
+            for m in per_inst:
+                claimed |= m
+            rec, mask = audit_frame(bgr, claimed, instances=per_inst)
             name = key.replace("/", "__") + ".jpg"
             cv2.imwrite(str(out_dir / "worst" / name),
-                        cv2.resize(draw(bgr, claimed, mask), None,
-                                   fx=0.5, fy=0.5))
+                        cv2.resize(draw(bgr, claimed, mask, per_inst,
+                                        rec.get("soil_idx")),
+                                   None, fx=0.5, fy=0.5))
             written.append(name)
 
     report = format_report(by_session, out_dir)

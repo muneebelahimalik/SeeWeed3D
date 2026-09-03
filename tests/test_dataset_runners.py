@@ -368,6 +368,12 @@ def test_the_mixed_build_imports_its_sources_rather_than_repeating_them():
     from training.datasets import mixed, onions
     roots = [s["DATUMARO_ROOT"] for s in mixed.CONFIG["SOURCES"]]
     for p in list(weeds.WEED_SESSIONS) + list(onions.ONION_SESSIONS):
+        if p in mixed.CUTOUT_ONLY_SESSIONS:
+            # The one legitimate way a drive leaves this build: its frames
+            # carry unlabelled plants, so it supplies INSTANCES through
+            # compose_mixed instead of backgrounds. Still a deliberate list,
+            # still one edit - just a different one.
+            continue
         assert p in roots, p
 
 
@@ -468,3 +474,42 @@ def test_the_mixed_holdout_names_sessions_the_build_can_produce():
     for sid in mixed.HOLDOUT_TEST:
         assert "\\" not in sid and "/" not in sid and " " not in sid, (
             f"{sid!r} looks like a path; HOLDOUT_TEST takes session ids")
+
+
+# --------------------------------------------------------------------------- #
+# A drive is either a source of whole frames or a source of cut-outs. Being
+# both trains its instances twice - once in situ, once pasted - and puts near
+# copies of the same plant on both sides of a split.
+# --------------------------------------------------------------------------- #
+def test_a_cutout_only_drive_is_not_also_a_whole_frame_source():
+    from training.datasets import mixed
+    for p in mixed.CUTOUT_ONLY_SESSIONS:
+        assert p not in mixed.SOURCES_ROOTS, (
+            f"{p} is listed as cut-out-only but still supplies whole frames. "
+            f"Its unlabelled plants would train as background, which is the "
+            f"reason it was moved.")
+
+
+def test_a_cutout_only_drive_is_not_named_in_include_frames():
+    """INCLUDE_FRAMES naming a session the build no longer reads is not
+    harmless: _reject_silently_dropped_sessions treats a named session as one
+    you asked for, so the build would refuse rather than explain."""
+    from training.datasets import mixed
+    import ntpath
+    import training.datumaro_multitask as dmm
+
+    spec = mixed.CONFIG.get("INCLUDE_FRAMES") or ""
+    for p in mixed.CUTOUT_ONLY_SESSIONS:
+        sid = dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
+        assert sid not in spec, f"{sid} is cut-out-only but named in INCLUDE_FRAMES"
+
+
+def test_every_cutout_only_drive_is_a_compose_source():
+    """Otherwise its instances reach nothing at all and the drive is simply
+    deleted from the project without anyone deciding that."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    for p in mixed.CUTOUT_ONLY_SESSIONS:
+        assert p in cm.WEED_SOURCES, (
+            f"{p} supplies neither frames nor cut-outs - it has silently left "
+            f"the dataset. Add it to compose_mixed.WEED_SOURCES.")

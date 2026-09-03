@@ -71,7 +71,31 @@ MIXED_SESSIONS = [
     r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
 ]
 
-SOURCES_ROOTS = list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
+#: DRIVES USED ONLY AS COMPOSITING SOURCES, never as whole training frames.
+#:
+#: annotation/missed_plants.py found unlabelled plant-shaped vegetation in 60%
+#: of vid2_20260108_122731's frames and 25% of vid3_20260108_110444's. Trained
+#: whole, those frames teach that the plants nobody labelled are soil - a weed
+#: that never gets treated.
+#:
+#: A CUT-OUT DOES NOT CARRY THAT. It is the pixels inside a mask somebody drew;
+#: whatever the annotator missed in the rest of the frame never enters the
+#: dataset. So these drives keep supplying weeds - through compose_mixed.py,
+#: which pastes their instances into screened onion backgrounds - and stop
+#: supplying backgrounds.
+#:
+#: WHAT IT COSTS: real weed-beside-weed context, real dense-patch lighting, and
+#: these drives' own soil. Composites place instances individually against onion
+#: rows, so the model stops seeing what a weed-only field looks like. Move a
+#: drive back out of this list the day its annotation is finished.
+CUTOUT_ONLY_SESSIONS = [
+    r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
+    r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
+]
+
+SOURCES_ROOTS = [p for p in
+                 list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
+                 if p not in CUTOUT_ONLY_SESSIONS]
 
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
 OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
@@ -140,9 +164,10 @@ CONFIG = dict(
     #
     # Positions are 1-based and CVAT's slider is 0-based. Run with
     # LIST_FRAMES = True once after editing and confirm the ids.
+    #: The two weed drives are absent because they are CUTOUT_ONLY_SESSIONS -
+    #: their instances arrive through compose_mixed.py's output instead. Add
+    #: that synthetic session to MIXED_SESSIONS and name it here too.
     INCLUDE_FRAMES=("Mix_raj_Batch_01:*,"
-                    "vid2_20260108_122731:*,"
-                    "vid3_20260108_110444:1-75,"
                     "Visit1_20260108_133306:*,"
                     "Visit1_20260108_134015:*,"
                     "vid3_20260108_132749:*"),
