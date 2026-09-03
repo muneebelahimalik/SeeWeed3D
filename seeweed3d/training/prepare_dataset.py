@@ -183,6 +183,46 @@ def folder_id_mismatch_warning(session_sources):
     return out
 
 
+def split_by_session_table(where, session_of, weed_counts=None):
+    """Which session contributed how many frames to each split - and its weeds.
+
+    The build already reports split totals and per-class balance, and neither
+    answers "what is training actually seeing". With a frame-block split every
+    session is spread across all three, so the totals hide the case that
+    matters here: all of a build's weed supervision coming from ONE drive
+    because the other weed session was pinned to val and the "mixed" drives
+    turned out to carry no weed labels.
+
+    Weeds are counted separately from frames because a session can contribute a
+    quarter of the frames and none of the decision the model exists to make."""
+    rows = {}
+    for item, split in (where or {}).items():
+        sess = (session_of or {}).get(item) or "?"
+        r = rows.setdefault(sess, {"train": 0, "val": 0, "test": 0,
+                                   "weeds": {"train": 0, "val": 0, "test": 0}})
+        if split in r:
+            r[split] += 1
+            r["weeds"][split] += int((weed_counts or {}).get(item, 0))
+    if not rows:
+        return []
+    L = ["", "  FRAMES PER SESSION PER SPLIT  (weed instances in brackets)",
+         f"    {'session':<30}{'train':>14}{'val':>14}{'test':>14}"]
+    for sess in sorted(rows):
+        r = rows[sess]
+        cells = ""
+        for s in ("train", "val", "test"):
+            cells += f"{r[s]} ({r['weeds'][s]})".rjust(14)
+        L.append(f"    {sess[:29]:<30}{cells}")
+    trained = [s for s, r in rows.items() if r["weeds"]["train"] > 0]
+    if len(trained) == 1:
+        L += [f"    [!] every training weed comes from ONE session "
+              f"({trained[0]}). Its labels,",
+              f"        its lighting and its species mix are the whole of what "
+              f"this model will",
+              f"        learn a weed to be."]
+    return L
+
+
 def shared_session_warning(session_sources):
     """A session id claimed by more than one export folder.
 
@@ -1245,6 +1285,12 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         # concentrated in one split - under-trained AND over-weighted in the
         # score at the same time. That is invisible in a per-class AP table,
         # which is why it is printed here, where the split can still be changed.
+        for line in split_by_session_table(
+                where, {f.item_id: f.session_id for f in frames},
+                {f.item_id: sum(1 for i in f.instances if not i.is_crop)
+                 for f in frames}):
+            print(line)
+
         bal = sp.class_balance(by_split, counts_by_frame)
         print(f"\n      Class balance (share of each class's instances):")
         print(f"        {'class':<28}{'train':>7}{'val':>7}{'test':>7}"
