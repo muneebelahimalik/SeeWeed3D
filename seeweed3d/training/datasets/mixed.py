@@ -190,6 +190,9 @@ CONFIG = dict(
     # Ids come from the SESSIONS IN THIS BUILD table, which is NOT always the
     # export folder name: vid3_20260108_132749's frames live in a folder called
     # Visit1_20260108_132749.
+    #: The Visit2 entries are gone with the Mix_2_Visit_2 campaign - see
+    #: onions.py. They were scene "mixed" carrying no weed labels, which is the
+    #: combination that trains real weeds as background.
     SCENE_HINTS={
         "Mix_raj_Batch_01": "mixed",
         "vid2_20260108_122731": "weed_only",

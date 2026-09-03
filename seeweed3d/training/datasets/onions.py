@@ -42,9 +42,19 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 
 #: WHERE THE ANNOTATED ONION FRAMES ARE. Either a session folder holding
 #: annotations/ + rgb/, or a folder whose CHILDREN are session folders.
+#: Mix_2_Visit_2 IS NOT AN ONION CAMPAIGN and was removed. It is a MIXED
+#: recording that had the ONION prelabeler run over it, and that prelabeler can
+#: emit exactly one label - so every onion in those 592 frames is labelled and
+#: every weed is left as background. Training on them teaches that a weed among
+#: onions is soil, which is the one thing this system must not learn. The mask
+#: quality was reported as poor as well, so the frames were costing boundary
+#: accuracy on top of it.
+#:
+#: They are not deleted, they are RECLASSIFIED. Put the campaign in mixed.py's
+#: MIXED_SESSIONS the day its weeds are annotated - it is genuine contact data
+#: and the most valuable annotation work available.
 ONION_SESSIONS = [
     r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
-    r"E:\Dataset_Vidalia\Mix_2_Visit_2_20260210_\sessions",
 ]
 
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
