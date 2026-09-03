@@ -42,8 +42,8 @@ data at all, and it is not hypothetical - this project has already found three
 
 So every candidate background is screened against the vegetation prior first:
 vegetation not covered by an annotated mask means something is growing there
-that nobody labelled, and the frame is rejected. UNCLAIMED_VEG_MAX is the only
-gate that can make this whole module counterproductive if set carelessly.
+that nobody labelled, and the frame is rejected. UNCLAIMED_BLOBS_MAX is the
+only gate that can make this whole module counterproductive if set carelessly.
 
 CONTACT IS THE POINT, SO CONTACT IS MEASURED
 ---------------------------------------------
@@ -77,6 +77,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 from common.ontology import CLASSES, CROP_CLASS, LEP_LABEL  # noqa: E402
 from common.run_dirs import stamped  # noqa: E402
+from common.vegetation import unclaimed_blobs  # noqa: E402
 from training import pseudo_label as pl  # noqa: E402
 
 # #############################################################################
@@ -116,7 +117,7 @@ SOURCE_FRAMES = ("vid2_20260108_122731:*,"
                  "vid3_20260108_110444:1-75")
 
 #: WHERE THE BACKGROUNDS COME FROM. Onion drives - real soil, real rows, real
-#: crop geometry. Every one is screened before use; see UNCLAIMED_VEG_MAX.
+#: crop geometry. Every one is screened before use; see UNCLAIMED_BLOBS_MAX.
 ONION_BACKGROUNDS = [
     r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
 ]
@@ -138,18 +139,27 @@ N_IMAGES = 200
 CONTACT_MIX = {
     "isolated": 0.10,     # > 100 px from any onion
     "near": 0.15,         # 30-100 px
-    "very_near": 0.25,    # 1-30 px
-    "touching": 0.30,     # adjacent, no overlap
+    "very_near": 0.25,    # 4-30 px
+    "touching": 0.30,     # within 4 px, no overlap
     "overlap": 0.20,      # foliage overlaps
 }
 
 #: Band edges in pixels, matched to CONTACT_MIX. Distance is measured from the
 #: pasted weed's mask to the nearest annotated onion pixel.
+#: `touching` was ONE PIXEL WIDE and it did not work. The first real run asked
+#: for 30% touching and achieved 4%, rejecting 145 of 159 attempts - while
+#: very_near and overlap came out over target by exactly the amount that went
+#: missing, because that is where the failed attempts landed.
+#:
+#: A one-pixel window is not a physical distinction at 2208 px. Two plants whose
+#: foliage is 2 px apart are touching by any reading, and mask quantisation
+#: alone moves a boundary further than that. The band is now 4 px wide, which
+#: still means contact and can actually be hit.
 CONTACT_BANDS = {
     "isolated": (100, 10 ** 9),
     "near": (30, 100),
-    "very_near": (1, 30),
-    "touching": (0, 1),
+    "very_near": (4, 30),
+    "touching": (0, 4),
     "overlap": (-10 ** 9, 0),
 }
 
@@ -173,14 +183,18 @@ MAX_WEED_HIDDEN = 0.35
 #: and not of a field.
 WEED_IN_FRONT_P = 0.7
 
-#: THE SAFETY GATE. Maximum fraction of a background's vegetation that is NOT
-#: covered by an annotated mask.
+#: THE SAFETY GATE. How many plant-shaped patches of vegetation may sit outside
+#: every annotation before a background is refused.
 #:
-#: Unclaimed vegetation means a plant nobody labelled. Compositing onto such a
+#: A patch nobody labelled is a plant nobody labelled. Compositing onto such a
 #: frame teaches that an unlabelled plant is background while an identical
-#: pasted one is a target, which is precisely the confusion this module exists
-#: to remove. 0.15 leaves room for mask boundary slop and stray leaf tips.
-UNCLAIMED_VEG_MAX = 0.15
+#: pasted one is a target - precisely the confusion this module exists to
+#: remove.
+#:
+#: 1 rather than 0 because the vegetation prior calls moss, algae and green
+#: debris vegetation, so a single patch is as likely to be a fleck as a plant.
+#: Two or more is a pattern.
+UNCLAIMED_BLOBS_MAX = 1
 
 #: Pixels of alpha ramp at the cut-out edge. 1-2 keeps the plant interior
 #: untouched while removing the hard sticker edge a network will happily learn.
@@ -256,21 +270,30 @@ def unclaimed_vegetation(veg, claimed):
     return float((veg & ~np.asarray(claimed, bool)).sum()) / total
 
 
-def background_ok(veg, claimed, max_unclaimed=UNCLAIMED_VEG_MAX):
-    """(ok, fraction, reason) for one candidate background.
+def background_ok(veg, claimed, max_blobs=UNCLAIMED_BLOBS_MAX):
+    """(ok, n_blobs, reason) for one candidate background.
 
     A frame with unlabelled plants in it must never become a composite
     background: the composite would then hold a labelled weed and an unlabelled
     one side by side, teaching that the same plant is both a target and soil.
-    That is worse than generating nothing."""
-    frac = unclaimed_vegetation(veg, claimed)
-    if not np.asarray(veg, bool).any():
-        return False, frac, "no vegetation at all - nothing to composite against"
-    if frac > max_unclaimed:
-        return False, frac, (
-            f"{frac:.0%} of its vegetation is not covered by any annotation, so "
-            f"something is growing there that nobody labelled")
-    return True, frac, ""
+    That is worse than generating nothing.
+
+    COUNTS PLANT-SHAPED PATCHES, not a fraction. The first real run rejected two
+    backgrounds at 19% and 21% unclaimed - which is the signature of masks drawn
+    a couple of pixels inside their leaves, not of a missing plant. A fraction is
+    wrong in both directions here: 19% can mean nothing missing, and a genuine
+    missed seedling among forty labelled plants is under 2%. missed_plants.py
+    settled this on real geometry, and the two must not disagree about the same
+    frame."""
+    veg = np.asarray(veg, bool)
+    if not veg.any():
+        return False, 0, "no vegetation at all - nothing to composite against"
+    n, _, _ = unclaimed_blobs(veg, claimed)
+    if n > max_blobs:
+        return False, n, (
+            f"{n} plant-shaped patch(es) of vegetation are not covered by any "
+            f"annotation, so something is growing there that nobody labelled")
+    return True, n, ""
 
 
 def contact_distance(weed_mask, onion_union):
@@ -768,7 +791,7 @@ def main():
         claimed = np.zeros((h, w), bool)
         for m in onion_masks:
             claimed |= m
-        ok, frac, why = background_ok(pl.veg_of(bgr), claimed)
+        ok, n_unclaimed, why = background_ok(pl.veg_of(bgr), claimed)
         if not ok:
             rejected[why] = rejected.get(why, 0) + 1
             continue
@@ -794,7 +817,7 @@ def main():
     if not items:
         raise SystemExit(
             "ERROR: every background was rejected and nothing was written.\n"
-            "The usual cause is UNCLAIMED_VEG_MAX: onion frames whose weeds "
+            "The usual cause is UNCLAIMED_BLOBS_MAX: onion frames whose weeds "
             "were never\nannotated cannot be composite backgrounds, because "
             "the result would teach that\nan unlabelled plant is soil and an "
             "identical pasted one is a target.")
@@ -812,7 +835,7 @@ def main():
         "n_instances": len(all_records), "bands": bands,
         "rejected": rejected, "seed": SEED,
         "contact_mix": CONTACT_MIX, "contact_bands": CONTACT_BANDS,
-        "unclaimed_veg_max": UNCLAIMED_VEG_MAX,
+        "unclaimed_blobs_max": UNCLAIMED_BLOBS_MAX,
         "weed_sources": [str(s) for s in WEED_SOURCES],
         "onion_backgrounds": [str(s) for s in ONION_BACKGROUNDS],
         "label_provenance": "synthetic",

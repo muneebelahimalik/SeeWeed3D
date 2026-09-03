@@ -43,27 +43,31 @@ def _box(y, x, hh, ww, h=H, w=W):
 def test_a_background_with_unlabelled_vegetation_is_refused():
     """The failure this exists to prevent: a composite where one plant is a
     target and an identical unlabelled one is background."""
-    veg = _disc(30, 30, 12) | _disc(90, 90, 12)     # two plants
-    claimed = _disc(30, 30, 12)                     # only one annotated
-    ok, frac, why = cm.background_ok(veg, claimed)
+    veg = _disc(30, 30, 12) | _disc(80, 80, 12) | _disc(30, 90, 12)
+    claimed = _disc(30, 30, 12)                     # only one of three
+    ok, n, why = cm.background_ok(veg, claimed)
     assert not ok
-    assert frac > 0.4
+    assert n == 2, "two plant-shaped patches nobody claimed"
     assert "nobody labelled" in why
 
 
 def test_a_fully_annotated_background_is_accepted():
     veg = _disc(30, 30, 12)
-    ok, frac, why = cm.background_ok(veg, _disc(30, 30, 12))
-    assert ok and frac == pytest.approx(0.0) and why == ""
+    ok, n, why = cm.background_ok(veg, _disc(30, 30, 12))
+    assert ok and n == 0 and why == ""
 
 
 def test_mask_boundary_slop_does_not_reject_a_good_background():
     """A mask a couple of pixels inside the leaf is normal annotation, not an
-    unlabelled plant. A screen that fired on it would reject everything."""
-    veg = _disc(60, 60, 20)
-    claimed = _disc(60, 60, 19)
-    ok, frac, _ = cm.background_ok(veg, claimed)
-    assert ok, f"rejected a 1px-tight mask at {frac:.0%} unclaimed"
+    unlabelled plant. The first real run rejected two onion backgrounds at 19%
+    and 21% unclaimed - which is a rim, not a missing plant, and is exactly why
+    the gate counts patches instead of a fraction now."""
+    veg = _disc(60, 60, 24)
+    claimed = _disc(60, 60, 21)
+    ok, n, _ = cm.background_ok(veg, claimed)
+    frac = cm.unclaimed_vegetation(veg, claimed)
+    assert frac > 0.15, "the rim really is a large fraction"
+    assert ok and n == 0, "and still no missing plant"
 
 
 def test_a_background_with_no_vegetation_is_refused():
@@ -71,6 +75,16 @@ def test_a_background_with_no_vegetation_is_refused():
     'isolated' and the composite teaches nothing about contact."""
     ok, _, why = cm.background_ok(np.zeros((H, W), bool), np.zeros((H, W), bool))
     assert not ok and "no vegetation" in why
+
+
+def test_a_single_patch_is_tolerated_but_two_are_not():
+    """The prior calls moss and green debris vegetation, so one patch is as
+    likely a fleck as a plant. Two is a pattern."""
+    claimed = _disc(30, 30, 12)
+    one = claimed | _disc(80, 80, 12)
+    two = one | _disc(30, 90, 12)
+    assert cm.background_ok(one, claimed)[0]
+    assert not cm.background_ok(two, claimed)[0]
 
 
 def test_unclaimed_vegetation_is_a_fraction_of_vegetation_not_of_the_frame():
@@ -413,3 +427,28 @@ def test_the_report_shows_the_achieved_bands():
 def test_the_report_names_rejections():
     txt = cm.format_report(1, 1, {"near": 1}, {"nobody labelled it": 7}, 9, 1)
     assert "nobody labelled it" in txt and "7" in txt
+
+
+def test_touching_is_wide_enough_to_actually_hit():
+    """The first real run asked for 30% touching and achieved 4%, rejecting
+    145 of 159 attempts, because the band was ONE PIXEL wide. Its neighbours
+    came out over target by the amount that went missing - that is where the
+    failures landed."""
+    lo, hi = cm.CONTACT_BANDS["touching"]
+    assert hi - lo >= 3, "a 1px window is not a physical distinction at 2208px"
+
+
+def test_the_bands_still_tile_the_line_after_widening():
+    """Widening one band must not leave a distance no band claims, or an
+    achieved placement would be silently unclassifiable."""
+    edges = sorted(cm.CONTACT_BANDS.values())
+    for (lo1, hi1), (lo2, _) in zip(edges, edges[1:]):
+        assert hi1 == lo2, f"gap or overlap between {hi1} and {lo2}"
+
+
+def test_a_placement_a_few_pixels_from_an_onion_is_touching():
+    onion = _box(40, 40, 30, 30)
+    weed = _box(40, 72, 10, 10)          # 2 px clear of it
+    d = cm.contact_distance(weed, onion)
+    assert 0 <= d < 4
+    assert cm.band_of(d) == "touching"
