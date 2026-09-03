@@ -168,3 +168,51 @@ def distance_peaks(mask, rel_threshold=0.5, min_separation_px=15, max_peaks=32,
         peaks.append((loc, float(v)))
         cv2.circle(work, loc, int(max(min_separation_px, v)), 0, -1)
     return peaks
+
+
+#: How far a mask may fall short of its plant before the shortfall counts as
+#: something unlabelled. A hand-drawn polygon sits a pixel or two inside the
+#: leaf it traces, and a rim that thin is annotation slop, not a missed plant.
+CLAIM_DILATE_PX = 4
+
+#: Smallest unclaimed blob worth calling a plant. Below this it is a leaf tip
+#: outside its own mask, a speck of moss, or a green fleck of debris - and a
+#: report full of those is one nobody reads.
+MIN_UNCLAIMED_BLOB_PX = 300
+
+
+def unclaimed_blobs(veg, claimed, dilate_px=CLAIM_DILATE_PX,
+                    min_blob_px=MIN_UNCLAIMED_BLOB_PX):
+    """Plant-sized patches of vegetation that no annotation covers.
+
+    Returns (n_blobs, unclaimed_px, mask).
+
+    A COUNT OF BLOBS, not a fraction of vegetation. The two answer different
+    questions and only one of them is useful: a frame whose masks all sit two
+    pixels inside their leaves has a large unclaimed FRACTION and nothing
+    missing, while a frame with one unlabelled seedling among forty labelled
+    plants has a tiny fraction and a real hole in it. Dilating the claimed mask
+    absorbs the rim; a minimum blob size discards the flecks; what survives is
+    the shape of a plant nobody labelled.
+
+    It cannot tell you a blob IS a missed plant - the vegetation prior calls
+    moss, algae and green debris vegetation too, and misses dark seedlings
+    entirely. It tells you where to look."""
+    import cv2
+    veg = np.asarray(veg, bool)
+    claimed = np.asarray(claimed, bool)
+    if dilate_px > 0 and claimed.any():
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                      (2 * dilate_px + 1,) * 2)
+        claimed = cv2.dilate(claimed.astype(np.uint8), k).astype(bool)
+    left = veg & ~claimed
+    if not left.any():
+        return 0, 0, left
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(left.astype(np.uint8), 8)
+    keep = np.zeros_like(left)
+    blobs = 0
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] >= min_blob_px:
+            keep[lbl == i] = True
+            blobs += 1
+    return blobs, int(keep.sum()), keep
