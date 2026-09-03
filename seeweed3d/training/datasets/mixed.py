@@ -76,58 +76,39 @@ SOURCES_ROOTS = list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
 OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
 
-#: Sessions that must never enter training.
+#: EMPTY ON PURPOSE THIS ROUND, and it costs something real - read on.
 #:
-#: THIS SHOULD NOT BE EMPTY IN A MIXED BUILD. With several sessions across two
-#: campaigns there is no excuse for splitting within a drive, and a held-out
-#: drive is the only thing that makes round N comparable with round N-1. Pin the
-#: same list in mine_pool's HOLDOUT_SESSIONS - a test asserts they agree.
+#: Mix_raj_Batch_01 was pinned here as the only crop-safety test set. Seven
+#: frames turned out to be too few to measure with AND too few to spare: it is
+#: also the only hand-annotated contact data that exists, so holding it out
+#: bought a ruler nobody could read while starving the one thing training
+#: cannot get anywhere else.
 #:
-#: THE CONTACT BATCH IS THE ONE REAL CANDIDATE, and it is a genuine trade.
+#: So every hand-annotated frame trains this round. THE COST: no independent
+#: measurement of the crop-vs-weed decision. val and test come from the same
+#: drives as train (frame blocks), so their numbers are an upper bound and the
+#: contact case is not measured at all.
 #:
-#: It is hand corrected, it holds both classes in one frame, and it is small.
-#: As TRAINING data it is the only thing that teaches the onion/weed boundary,
-#: and a handful of frames of that is still the most valuable data in the
-#: project. As a TEST set it is the only honest crop-safety measurement that
-#: exists: every other number here is computed on weed-only or onion-only
-#: frames, or against unreviewed prelabels, and neither can see a crop mistake
-#: at a boundary at all.
-#:
-#: Hold it out until there is a second batch. An untested crop-safety claim is
-#: the failure this project keeps designing against, and a model that trained
-#: on its only contact frames cannot be asked whether it is safe. Move it into
-#: MIXED_SESSIONS the day Batch 02 exists to take its place here.
-#:
-#: The batch's own frame count decides whether that is even possible: below
-#: roughly 20 frames it is too small to measure with AND too small to train on,
-#: and the answer is more annotation rather than a choice between the two.
+#: That is the right trade only because the replacement is already the plan: a
+#: properly annotated mixed set, whose first job is to come back here.
 HOLDOUT_TEST = [
-    "Mix_raj_Batch_01",
 ]
 
-#: Sessions pinned to VAL. Not a redundant knob - it is the one that decides
-#: which checkpoint you keep.
+#: EMPTY THIS ROUND, for the same reason as HOLDOUT_TEST.
 #:
-#: Left to the allocator, val came out as two onion-only drives: 572 frames with
-#: essentially no weeds in them. `checkpoint_best_total.pth` is selected on val,
-#: so that run would have kept whichever epoch was best at ONIONS and never once
-#: looked at weed recall - the exact way a mixed model becomes a crop detector
-#: that ignores weeds, while every number on the page goes up.
+#: vid2_20260108_122731 is 60 frames of hand-corrected weeds - the cleanest weed
+#: labels in the project. Pinning it to val made val honest and made training
+#: poorer at exactly the class training is thinnest on.
 #:
-#: A mixed drive was the obvious pin and it did NOT work: Visit2_20260210_164614
-#: is scene "mixed" and carries zero weed instances, because only the crop was
-#: ever annotated there. The scene said the weeds are in the picture; the export
-#: said nobody labelled them.
+#: With 142 hand-annotated frames in total (7 mixed + 60 weed + 75 weed) there
+#: is no allocation that gives both a usable training set and an independent
+#: validation set. Splitting them buys a val set too small to separate a real
+#: improvement from noise, and pays for it out of the only good data there is.
 #:
-#: So this pins the one session whose weed labels a PERSON checked. 60 frames is
-#: small for a validation set, and a small honest one beats 572 frames that
-#: cannot score the class the machine exists to find.
-#:
-#: It costs training the only fully hand-corrected weed drive. That is the right
-#: way round: val decides which checkpoint survives, so it should hold the
-#: labels you trust most, not the ones you can spare.
+#: So this round trains on all of it and does not pretend to measure. The next
+#: annotated mixed batch becomes the holdout, and these numbers become
+#: comparable to something.
 HOLDOUT_VAL = [
-    "vid2_20260108_122731",
 ]
 
 CONFIG = dict(
@@ -139,6 +120,32 @@ CONFIG = dict(
     # whole decision, so a class left out here is a class the deployed model
     # scores as background.
     KEEP_CLASSES=list(CLASSES),
+
+    # EVERY SESSION NAMED EXPLICITLY, because an empty spec means "use every
+    # frame in every export" and the exports are not all reviewed to the same
+    # standard.
+    #
+    # vid3_20260108_110444 is the whole reason this is not empty: 326 frames in
+    # the export, 75 of them corrected in CVAT and 251 never opened. Those 251
+    # carry SAM's own guesses with SAM's own class choices, and merging them
+    # here would train the mixed model on the weed model's unreviewed output
+    # while the manifest implied a person had checked it. weeds.py already
+    # restricts this drive the same way; the two builds now agree.
+    #
+    # The onion drives are named with `:*` deliberately rather than left to an
+    # unscoped token. They ARE unreviewed - the crop class is prelabels
+    # throughout, which LABEL_PROVENANCE records - but they are unreviewed
+    # UNIFORMLY, which is a different thing from an export where some frames
+    # were corrected and the rest were not.
+    #
+    # Positions are 1-based and CVAT's slider is 0-based. Run with
+    # LIST_FRAMES = True once after editing and confirm the ids.
+    INCLUDE_FRAMES=("Mix_raj_Batch_01:*,"
+                    "vid2_20260108_122731:*,"
+                    "vid3_20260108_110444:1-75,"
+                    "Visit1_20260108_133306:*,"
+                    "Visit1_20260108_134015:*,"
+                    "vid3_20260108_132749:*"),
 
     # MERGED, not dropped, and the build's own counts are why.
     #

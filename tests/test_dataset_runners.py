@@ -422,29 +422,42 @@ def test_every_new_configured_path_is_absolute():
 # --------------------------------------------------------------------------- #
 # The mixed build, and the one decision it makes about the contact batch
 # --------------------------------------------------------------------------- #
-def test_the_contact_batch_is_held_out_not_trained_on():
-    """The hand-annotated mixed batch is the only data that can measure crop
-    safety at a boundary: every other number is computed on weed-only or
-    onion-only frames, or against unreviewed prelabels, and none of those can
-    see a crop mistake where the two plants touch.
+def test_a_second_contact_batch_means_one_of_them_is_held_out():
+    """With ONE hand-annotated mixed batch, training on it is defensible: seven
+    frames are too few to measure with and too few to spare, and the round is
+    honest about having no independent crop-safety number.
 
-    Training on it spends the only test set in the project. That is a defensible
-    trade the day a second batch exists to replace it - and this test is what
-    makes it a decision rather than a drift."""
+    With TWO, holding none out is an oversight rather than a trade - there is
+    now something to spare, and a crop-safety claim with no ruler behind it is
+    the failure this project keeps designing against. This fires the day Batch
+    02 lands, which is the moment the decision should be revisited."""
     from training.datasets import mixed
+    import ntpath
     import training.datumaro_multitask as dmm
 
-    # ntpath, not Path: these configs name Windows drives, and on posix
-    # Path() treats the whole string as a single segment.
-    import ntpath
     batch_ids = {dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
                  for p in mixed.MIXED_SESSIONS}
-    if not batch_ids:
-        pytest.skip("no mixed batch configured yet")
+    if len(batch_ids) < 2:
+        pytest.skip("one contact batch: training on it is the documented trade")
     assert batch_ids & set(mixed.HOLDOUT_TEST), (
-        "a mixed contact batch is in MIXED_SESSIONS but not in HOLDOUT_TEST. "
-        "Training on it spends the only crop-safety test set that exists; if "
-        "that is deliberate, name the batch that replaces it here.")
+        f"{len(batch_ids)} contact batches and none held out. With more than "
+        f"one there is something to spare, and a crop-safety number needs a "
+        f"set the model never trained on.")
+
+
+def test_training_on_the_only_contact_batch_is_recorded_as_a_trade():
+    """The state above is only acceptable because it is deliberate. If the
+    holdout is empty while a contact batch is trained on, the file has to say
+    why - otherwise the next person reads an empty list as an oversight and
+    'fixes' it, or worse, quotes a val number as a crop-safety result."""
+    from training.datasets import mixed
+    src = Path(mixed.__file__).read_text(encoding="utf-8")
+    if mixed.MIXED_SESSIONS and not mixed.HOLDOUT_TEST:
+        head = src[:src.index("HOLDOUT_TEST = [")]
+        assert "EMPTY ON PURPOSE" in head, (
+            "HOLDOUT_TEST is empty while a contact batch trains, and nothing "
+            "above it says that was chosen")
+        assert "no independent" in head.lower()
 
 
 def test_the_mixed_holdout_names_sessions_the_build_can_produce():
