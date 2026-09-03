@@ -87,14 +87,33 @@ from training import pseudo_label as pl  # noqa: E402
 #: Prelabels are the wrong source: a composite made from a machine mask is a
 #: machine mask with extra steps, and the whole value here is that the pasted
 #: instance is TRUE.
+#: A CUT-OUT SOURCE IS NOT THE SAME AS A TRAINING FRAME, and that difference is
+#: the reason to use one. A cut-out carries only the pixels somebody drew a mask
+#: around; whatever the annotator MISSED in that frame never enters the dataset
+#: at all. Used as a whole frame the same miss trains as background, teaching
+#: that a plant of that size is soil.
+#:
+#: So a drive whose annotation is known to be incomplete belongs here and NOT in
+#: mixed.py's INCLUDE_FRAMES. Run annotation/missed_plants.py to find out which
+#: it is rather than guessing - that audit exists to decide exactly this.
+#:
+#: The cost of cut-out-only: real weed-beside-weed context, real dense-patch
+#: lighting and the drive's own soil all stay behind. Prefer whole frames when
+#: the audit says they are clean.
 WEED_SOURCES = [
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
+    r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
 ]
 
 #: Which frames of those sessions were actually corrected, in the same
 #: `<session>:<range>` form make_dataset uses. Empty means every frame, which is
 #: right only when the whole export was reviewed.
-SOURCE_FRAMES = ""
+#:
+#: vid3_20260108_110444 has 326 frames and 75 corrected ones. Cutting instances
+#: out of the other 251 would build the bank from SAM's own guesses, and a
+#: composite made from a machine mask is a machine mask with extra steps.
+SOURCE_FRAMES = ("vid2_20260108_122731:*,"
+                 "vid3_20260108_110444:1-75")
 
 #: WHERE THE BACKGROUNDS COME FROM. Onion drives - real soil, real rows, real
 #: crop geometry. Every one is screened before use; see UNCLAIMED_VEG_MAX.
