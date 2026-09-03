@@ -439,6 +439,37 @@ def parse_frame_spec(spec):
     return groups
 
 
+def spec_for_sessions(spec, sessions):
+    """The part of a frame spec that applies to `sessions`, or "".
+
+    select_frames REFUSES a spec naming a session it cannot see, which is right
+    for a dataset build: every export is merged first, so an unknown name there
+    is a typo that would silently select nothing. It is wrong for a tool that
+    walks one export at a time - the same spec is then correct for one file and
+    "names a session not in this export" for the next.
+
+    So a per-export caller narrows the spec first. Unscoped tokens are kept
+    because they apply to every session by definition; an empty result means
+    this export is not addressed by the spec at all, and the caller decides
+    whether that means everything or nothing."""
+    if not spec:
+        return ""
+    want = {s for s in sessions if s}
+    out = []
+    for token in str(spec).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        head, sep, _ = token.partition(":")
+        # A drive letter is not a session scope - the same rule parse_frame_spec
+        # applies, so "E:\\..." is treated as unscoped rather than as a session.
+        if sep and len(head) > 1 and head in want:
+            out.append(token)
+        elif not sep or len(head) <= 1:
+            out.append(token)
+    return ",".join(out)
+
+
 def select_frames(frames, include=None, exclude=None):
     """Keep only hand-verified frames. Returns (kept, dropped).
 

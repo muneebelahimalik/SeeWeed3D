@@ -576,8 +576,14 @@ def load_bank(sources, include_frames="", max_instances=600, rng=None):
         for f in pdz.find_annotation_files(root):
             frames, _ = dmm.load_datumaro(
                 f, fallback_session=dmm.batch_session_id(f))
-            if include_frames:
-                frames, _ = pdz.select_frames(frames, include_frames, None)
+            # NARROW THE SPEC TO THIS EXPORT. select_frames refuses a spec
+            # naming a session it cannot see - correct for a build, where every
+            # export is merged first, and wrong here: SOURCE_FRAMES names both
+            # drives, so applying it whole to vid2's export errored on vid3.
+            sub = pdz.spec_for_sessions(
+                include_frames, {r.session_id for r in frames})
+            if sub:
+                frames, _ = pdz.select_frames(frames, sub, None)
             for rec in frames:
                 img = _find_image(Path(rec.image_path or rec.item_id).stem,
                                   [root / "rgb", root,
