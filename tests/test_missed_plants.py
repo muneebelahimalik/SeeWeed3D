@@ -175,3 +175,47 @@ def test_draw_marks_missed_vegetation_and_outlines_what_was_claimed():
     vis = mp.draw(bgr, _blob(20, 20, 40), _blob(120, 120, 40))
     assert vis.shape == bgr.shape
     assert vis[140, 140, 2] > vis[140, 140, 0], "missed vegetation drawn red"
+
+
+# --------------------------------------------------------------------------
+# A rim is told from a plant by WHERE it sits, not by how big it is. Getting
+# that wrong biases the check against contact - the case that matters most.
+# --------------------------------------------------------------------------
+def test_a_rim_can_be_bigger_than_a_seedling_and_still_not_be_one():
+    """A 2px rim around a 40px plant is 304 px - larger than many real
+    seedlings. Size alone cannot separate them, which is why the test is
+    positional."""
+    veg = _blob(50, 50, 40)
+    claimed = _blob(52, 52, 36)
+    rim_px = int((veg & ~claimed).sum())
+    assert rim_px > 300, "the rim really is bigger than the size floor"
+    assert unclaimed_blobs(veg, claimed)[0] == 0
+
+
+def test_a_small_unlabelled_plant_TOUCHING_a_labelled_one_is_still_found():
+    """The bias worth avoiding. Thresholding on area after subtracting the
+    slop band eats the near edge of anything adjacent, so an 18x18 seedling
+    against a labelled plant drops under the floor and vanishes - and a weed
+    touching a crop is the exact case this project exists to get right."""
+    labelled = _blob(50, 50, 60)
+    veg = labelled | _blob(50, 110, 18)          # 324 px, flush against it
+    n, _, mask = unclaimed_blobs(veg, labelled)
+    assert n == 1
+    assert mask[58, 118], "the touching seedling is what got marked"
+
+
+def test_the_same_seedling_is_found_touching_or_apart():
+    """Adjacency must not change whether a plant counts - otherwise the audit
+    under-reports exactly where contact scenes are densest."""
+    labelled = _blob(50, 50, 60)
+    touching = unclaimed_blobs(labelled | _blob(50, 110, 18), labelled)[0]
+    apart = unclaimed_blobs(labelled | _blob(50, 140, 18), labelled)[0]
+    assert touching == apart == 1
+
+
+def test_a_mask_falling_well_short_of_its_plant_is_reported():
+    """A rim wider than the slop band is not slop - it is a mask that missed
+    a third of its own plant, and that is worth seeing."""
+    veg = _blob(50, 50, 60)
+    claimed = _blob(62, 62, 36)                  # 12px short on two sides
+    assert unclaimed_blobs(veg, claimed)[0] >= 1

@@ -181,19 +181,39 @@ CLAIM_DILATE_PX = 4
 MIN_UNCLAIMED_BLOB_PX = 300
 
 
+#: A patch this much OUTSIDE the annotation-slop band is a plant rather than a
+#: rim. See unclaimed_blobs for why this is a share and not another distance.
+MIN_OUTSIDE_BAND_FRAC = 0.10
+
+
 def unclaimed_blobs(veg, claimed, dilate_px=CLAIM_DILATE_PX,
-                    min_blob_px=MIN_UNCLAIMED_BLOB_PX):
+                    min_blob_px=MIN_UNCLAIMED_BLOB_PX,
+                    outside_frac=MIN_OUTSIDE_BAND_FRAC):
     """Plant-sized patches of vegetation that no annotation covers.
 
     Returns (n_blobs, unclaimed_px, mask).
 
     A COUNT OF BLOBS, not a fraction of vegetation. The two answer different
-    questions and only one of them is useful: a frame whose masks all sit two
-    pixels inside their leaves has a large unclaimed FRACTION and nothing
-    missing, while a frame with one unlabelled seedling among forty labelled
-    plants has a tiny fraction and a real hole in it. Dilating the claimed mask
-    absorbs the rim; a minimum blob size discards the flecks; what survives is
-    the shape of a plant nobody labelled.
+    questions and only one of them is useful. Measured on real geometry: masks
+    drawn two pixels inside their leaves leave 19% of vegetation unclaimed and
+    nothing missing, while one unlabelled seedling among twenty-five labelled
+    plants is 1.7% and a real hole. A fraction gate gets BOTH of those wrong,
+    and in opposite directions, because its denominator grows with everything
+    you labelled correctly - so labelling more plants properly makes a fixed
+    miss look smaller.
+
+    HOW A RIM IS TOLD FROM A PLANT. Not by size: a two-pixel rim around a 40 px
+    plant is 304 px, bigger than many seedlings. It is told by WHERE it sits.
+    A rim lies entirely inside a narrow band along the mask boundary; a plant
+    nobody labelled extends past it. So a component is discarded when almost all
+    of it falls inside that band, whatever its area.
+
+    Thresholding on area AFTER subtracting the band would be the obvious
+    implementation and it is biased in the worst possible direction: it eats the
+    near edge of anything adjacent, so an 18x18 seedling TOUCHING a labelled
+    plant drops under the size floor and disappears - and a weed touching a crop
+    is the exact case this project exists to get right. Measuring the whole
+    component and testing only where it lies keeps it.
 
     It cannot tell you a blob IS a missed plant - the vegetation prior calls
     moss, algae and green debris vegetation too, and misses dark seedlings
@@ -201,10 +221,11 @@ def unclaimed_blobs(veg, claimed, dilate_px=CLAIM_DILATE_PX,
     import cv2
     veg = np.asarray(veg, bool)
     claimed = np.asarray(claimed, bool)
+    band = claimed
     if dilate_px > 0 and claimed.any():
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                       (2 * dilate_px + 1,) * 2)
-        claimed = cv2.dilate(claimed.astype(np.uint8), k).astype(bool)
+        band = cv2.dilate(claimed.astype(np.uint8), k).astype(bool)
     left = veg & ~claimed
     if not left.any():
         return 0, 0, left
@@ -212,7 +233,13 @@ def unclaimed_blobs(veg, claimed, dilate_px=CLAIM_DILATE_PX,
     keep = np.zeros_like(left)
     blobs = 0
     for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] >= min_blob_px:
-            keep[lbl == i] = True
-            blobs += 1
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < min_blob_px:
+            continue
+        comp = lbl == i
+        outside = int((comp & ~band).sum())
+        if outside / area < outside_frac:
+            continue                      # a rim along a mask, not a plant
+        keep |= comp
+        blobs += 1
     return blobs, int(keep.sum()), keep
