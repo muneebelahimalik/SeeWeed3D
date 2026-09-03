@@ -67,6 +67,23 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: EXPORT FOLDER NAME as the session id and says so - check that line if the
 #: batch came from several drives, because one id over frames metres apart lets
 #: a split put near-copies on both sides of it.
+#: Mix_raj_Batch_01 IS WHOLE FRAMES, and missed_plants.py disagrees. The audit
+#: scored it worst of the three drives - 47 unlabelled plant-shaped patches per
+#: frame, every frame - and its verdict says to use it as a cut-out source only.
+#:
+#: That verdict is overruled DELIBERATELY. Those seven frames went through CVAT
+#: by hand several times, and a person who looked at a frame repeatedly is
+#: better evidence than a colour prior that cannot tell a seedling from moss.
+#: The audit is a heuristic for drives nobody has inspected; this one has been.
+#:
+#: It is also the only hand-annotated data in the project holding onions and
+#: weeds in the same frame, and a cut-out would throw away exactly the thing
+#: that makes it valuable - the two classes TOGETHER, at their real distances,
+#: in one real scene. Compositing already supplies pasted contact; only this
+#: supplies observed contact.
+#:
+#: Revisit if the overlays in the audit's worst/ folder show those patches
+#: landing on real plants rather than on moss and debris.
 MIXED_SESSIONS = [
     r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
 ]

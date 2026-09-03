@@ -513,3 +513,28 @@ def test_every_cutout_only_drive_is_a_compose_source():
         assert p in cm.WEED_SOURCES, (
             f"{p} supplies neither frames nor cut-outs - it has silently left "
             f"the dataset. Add it to compose_mixed.WEED_SOURCES.")
+
+
+def test_the_contact_batch_is_not_a_compositing_source():
+    """Synthetic contact is weed cut-outs on onion backgrounds. The hand-
+    annotated mixed batch is neither: cutting it up would discard the only
+    thing that makes it valuable - both classes together, at their real
+    distances, in one real scene. Compositing supplies pasted contact; only
+    this supplies observed contact."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    for p in mixed.MIXED_SESSIONS:
+        assert p not in cm.WEED_SOURCES, f"{p} is a training frame, not a bank"
+        assert p not in cm.ONION_BACKGROUNDS
+
+
+def test_overruling_the_audit_on_a_drive_is_written_down():
+    """missed_plants scores Mix_raj worst and says to use it as cut-outs only.
+    Training on it anyway is a judgement about who looked at the frames - and
+    an unexplained contradiction between a tool's verdict and the config is how
+    someone later 'fixes' the config back."""
+    from training.datasets import mixed
+    src = Path(mixed.__file__).read_text(encoding="utf-8")
+    head = src[:src.index("MIXED_SESSIONS = [")]
+    assert "missed_plants.py disagrees" in head
+    assert "overruled" in head.lower()
