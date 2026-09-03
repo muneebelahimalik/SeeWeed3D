@@ -1066,6 +1066,13 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
               f"extract_sessions.py's INPUT_ROOTS (onion_only | weed_only | "
               f"mixed) so splits can be balanced by scene.")
 
+    # Whether a drive's labels match what its scene claims is a property of the
+    # ANNOTATIONS, not of the split - so it prints before a split mode is even
+    # chosen. Inside the session-split branch it never fired in the fallback,
+    # which is precisely where this dataset ended up.
+    for line in scene_annotation_mismatch_warning(infos, report.per_session):
+        print(line)
+
     # A session-level split is the ONLY one that measures generalisation, so it
     # is tried first - but it is not always possible or even safe, and both
     # failure modes are silent unless checked. `reason` stays None while the
@@ -1125,10 +1132,6 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
             print(f"\n  Split granularity: {split_info['granularity']} "
                   f"({split_info['n_units']} independent unit(s)) - val and "
                   f"test share no day with training.")
-
-        for line in scene_annotation_mismatch_warning(
-                infos, report.per_session):
-            print(line)
 
         rep = sp.scene_representation(split_map, infos)
         print("\n  Scene representation (sessions per split):")
@@ -1288,9 +1291,18 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                       f"the gap is not buying independence and can be spent on "
                       f"balance, which is achievable.")
 
-        print(f"      Every session contributes to every split, so no class is "
-              f"missing from training and the test set is drawn from ALL of "
-              f"your data.")
+        if pinned:
+            # No longer true of the pinned ones, and saying it anyway would
+            # describe the holdout as if it were block-split - the exact thing
+            # that was silently happening before it was pinned.
+            print(f"      Every session EXCEPT the pinned one(s) contributes "
+                  f"to every split. The pinned\n"
+                  f"      sessions are whole and separate: "
+                  f"{', '.join(f'{s} in {k}' for s, k in sorted(pinned.items()))}.")
+        else:
+            print(f"      Every session contributes to every split, so no class "
+                  f"is missing from training and the test set is drawn from "
+                  f"ALL of your data.")
         print(f"      What it CANNOT tell you: val and test share each "
               f"session's lighting, soil, growth stage and field. A model that "
               f"scores well here has been shown to work on ground it has seen "

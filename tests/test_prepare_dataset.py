@@ -1203,3 +1203,34 @@ def test_unpinned_sessions_are_still_block_split(tmp_path):
         holdout_test=["sess02"], gap_frames=1)
     free = {r["split"] for r in rows if r["item_id"].startswith("sess00")}
     assert len(free) > 1, "an unpinned session spans more than one split"
+
+
+def test_the_scene_mismatch_warning_fires_in_frame_block_mode_too(tmp_path,
+                                                                  capsys):
+    """It is a property of the ANNOTATIONS, not of the split. Placed inside the
+    session-split branch it never fired in the fallback - which is exactly
+    where the real dataset ended up, so the finding was invisible on the run
+    that mattered."""
+    root = _multi_session_export(tmp_path, "exp", ["sess00", "sess01"])
+    prep.build(root, tmp_path / "images", tmp_path / "out", val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               split_mode="frame_block", keep_classes=[CROP_CLASS],
+               scene_hints={"sess00": "mixed", "sess01": "mixed"},
+               gap_frames=1)
+    out = capsys.readouterr().out
+    assert "is scene 'mixed' but has NO weed instances" in out
+
+
+def test_the_summary_does_not_claim_a_pinned_session_spans_every_split(
+        tmp_path, capsys):
+    """Saying 'every session contributes to every split' with a holdout pinned
+    describes it as if it were block-split - the thing that was silently
+    happening before it was pinned."""
+    root = _multi_session_export(tmp_path, "exp",
+                                 ["sess00", "sess01", "sess02"])
+    prep.build(root, tmp_path / "images", tmp_path / "out", val_fraction=0.2,
+               test_fraction=0.2, seed=1, strict=False,
+               split_mode="frame_block", holdout_test=["sess02"], gap_frames=1)
+    out = capsys.readouterr().out
+    assert "Every session contributes to every split" not in out
+    assert "sess02 in test" in out
