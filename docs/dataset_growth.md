@@ -360,7 +360,7 @@ size.
 
 | Technique | Verdict |
 |---|---|
-| **Synthetic / copy-paste** | Deliberately absent from every augmentation preset, and it stays absent. Pasting an onion between frames fabricates crop geometry no field produced, and this is a crop-**safety** model. The same argument keeps Mosaic and MixUp out. |
+| **Copy-paste as an augmentation preset** | Deliberately absent, and it stays absent. Pasting an onion between frames fabricates crop geometry no field produced, and this is a crop-**safety** model. The same argument keeps Mosaic and MixUp out. **This is a rule about pasting the CROP.** Pasting weed cut-outs *into* real onion frames is a separate, offline dataset-construction step that fabricates no crop geometry — every onion, row and shadow is the one the camera recorded. See [mixed-scene strategy](mixed_dataset_strategy.md) and `annotation/compose_mixed.py`. |
 | **SAM-refined boundaries** | SAM 3 could tighten human polygons. But `onion_boundary_f = 0.78` and mask IoU is not what limits you — *recall* is. Better boundaries on plants you already find buys almost nothing. |
 | **Self-training on the crop** | See §5. Not a scheduling question — a correctness one. |
 | **Tiling for small objects** | Genuinely promising, genuinely a bigger change. Revisit when small-weed recall is still binding after another 200 frames. |

@@ -179,6 +179,40 @@ already computes it, so pasted instances keep valid geometry channels.
 each other, real shadow interaction, real co-adapted growth. They bootstrap the
 contact case; they do not retire it. **Never validate on them.**
 
+### The background screen decides whether this helps or hurts
+
+Implemented in `annotation/compose_mixed.py`. One gate matters more than every
+compositing detail combined.
+
+A background is usable only if **everything green in it is already labelled**.
+Paste a labelled weed into a frame that also holds an *unlabelled* one and the
+composite teaches the exact confusion it was built to remove: two visually
+identical plants, one a target, one background. That is worse than generating
+nothing.
+
+This is not hypothetical — the mixed build found three `Mix_2_Visit_2` drives
+that are mixed scenes annotated for the crop alone. So every candidate
+background is screened against the vegetation prior first, and vegetation not
+covered by an annotated mask rejects the frame (`UNCLAIMED_VEG_MAX`).
+
+Contact is **measured, not assumed**: each composite targets a band
+(`isolated` → `near` → `very_near` → `touching` → `overlap`), and the band it
+achieved is computed from the finished masks and recorded per instance. A run
+that cannot report its achieved distribution cannot be ablated against.
+
+Note also that the onion masks these are composited against are SAM prelabels,
+so "distance to crop" is a distance to a machine label — a bound on what a
+contact band means here, not a reason to skip it.
+
+### Copy-paste as augmentation is still refused
+
+[Dataset growth](dataset_growth.md) rules copy-paste out of every augmentation
+preset. That rule is about pasting the **crop**, which would fabricate row
+spacing and planting geometry no field produced. Weed-into-onion compositing
+fabricates no crop geometry: every onion, furrow and shadow is the one the
+camera recorded. The two positions are consistent, and the direction is the
+reason.
+
 ---
 
 ## The sequence

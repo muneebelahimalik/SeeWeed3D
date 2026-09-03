@@ -1,0 +1,803 @@
+#!/usr/bin/env python3
+"""
+SeeWeed3D - synthesise MIXED scenes: real weed cut-outs into real onion frames.
+
+    python -m seeweed3d.annotation.compose_mixed
+
+THE GAP THIS CLOSES, AND NOTHING ELSE
+--------------------------------------
+Every measurement in this project points at one hole. crop_risk showed the weed
+model claiming onion tissue almost everywhere it looked. The mixed build's own
+warnings showed why nothing can fix that from data: the sessions that contain
+onions and weeds TOGETHER are three drives where only the crop was annotated,
+plus seven hand-annotated frames. Seven frames cannot teach a decision boundary.
+
+Compositing closes exactly that gap and nothing else. It does not make more
+weeds, or more onions - there is plenty of both. It makes the one thing the
+recordings do not contain: a weed at a known distance from an onion, with both
+masks correct.
+
+WEED INTO ONION, NEVER ONION INTO WEED
+---------------------------------------
+An onion scene carries row spacing, planting geometry, furrows, crop shadows and
+naturally overlapping onions - structure that would have to be synthesised, and
+would be synthesised wrongly. A weed cut-out carries a plant. So the real onion
+field stays intact and weeds are introduced into it.
+
+This is also why dataset_growth.md's rule against copy-paste is not violated
+here. That rule exists because "pasting an onion between frames fabricates crop
+geometry no field produced, and this is a crop-SAFETY model". Nothing here
+fabricates crop geometry: every onion, every row and every shadow is the one the
+camera recorded.
+
+THE SCREEN THAT MATTERS MORE THAN THE COMPOSITING
+--------------------------------------------------
+A background is only usable if everything green in it is already labelled.
+
+Paste a labelled weed into a frame that also contains an UNLABELLED weed and the
+result actively teaches the confusion it was built to fix: two visually
+identical plants, one a target, one background. That is worse than no synthetic
+data at all, and it is not hypothetical - this project has already found three
+"mixed" drives whose weeds were never annotated.
+
+So every candidate background is screened against the vegetation prior first:
+vegetation not covered by an annotated mask means something is growing there
+that nobody labelled, and the frame is rejected. UNCLAIMED_VEG_MAX is the only
+gate that can make this whole module counterproductive if set carelessly.
+
+CONTACT IS THE POINT, SO CONTACT IS MEASURED
+---------------------------------------------
+Placement is not random. Each composite targets a contact band - isolated, near,
+very near, touching, overlapping - and the band it ACHIEVED is measured from the
+masks and recorded per instance. A generator that says "we pasted weeds near
+onions" cannot be checked; one that reports the achieved distance distribution
+can.
+
+WHAT COMPOSITES ARE NOT
+-----------------------
+They have no real occlusion where plants grow through each other, no real shadow
+interaction, no co-adapted growth. They bootstrap the contact case; they do not
+retire it.
+
+NEVER VALIDATE ON THEM. They share this generator's blind spots, so a score
+computed on them measures the generator. The manifest says LABEL_PROVENANCE
+"synthetic" and the session is named so it cannot be mistaken for a recording.
+"""
+from __future__ import annotations
+
+import json
+import ntpath
+import random
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import numpy as np  # noqa: E402
+from common.ontology import CLASSES, CROP_CLASS, LEP_LABEL  # noqa: E402
+from common.run_dirs import stamped  # noqa: E402
+from training import pseudo_label as pl  # noqa: E402
+
+# #############################################################################
+# ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
+# #############################################################################
+
+#: WHERE THE WEED CUT-OUTS COME FROM. Sessions whose weed masks a PERSON drew.
+#: Prelabels are the wrong source: a composite made from a machine mask is a
+#: machine mask with extra steps, and the whole value here is that the pasted
+#: instance is TRUE.
+WEED_SOURCES = [
+    r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
+]
+
+#: Which frames of those sessions were actually corrected, in the same
+#: `<session>:<range>` form make_dataset uses. Empty means every frame, which is
+#: right only when the whole export was reviewed.
+SOURCE_FRAMES = ""
+
+#: WHERE THE BACKGROUNDS COME FROM. Onion drives - real soil, real rows, real
+#: crop geometry. Every one is screened before use; see UNCLAIMED_VEG_MAX.
+ONION_BACKGROUNDS = [
+    r"E:\Dataset_Vidalia\onions_20260108_1\sessions",
+]
+
+#: Where the composites are written: a session-shaped folder the dataset build
+#: can consume directly (rgb/ + annotations/default.json, Datumaro 1.0).
+OUT_ROOT = r"E:\Dataset_Vidalia\synthetic"
+
+#: HOW MANY. Start small and look at them. A thousand composites nobody opened
+#: is a thousand chances to train on a systematic artefact.
+N_IMAGES = 200
+
+#: THE POINT OF THE MODULE. Fractions must be > 0 in the bands you care about;
+#: they are normalised, so relative sizes are what matter.
+#:
+#: Weighted hard on purpose. `isolated` teaches weed appearance, which the weed
+#: sessions already teach perfectly well; `touching` and `overlap` teach the
+#: decision that nothing in the recordings teaches at all.
+CONTACT_MIX = {
+    "isolated": 0.10,     # > 100 px from any onion
+    "near": 0.15,         # 30-100 px
+    "very_near": 0.25,    # 1-30 px
+    "touching": 0.30,     # adjacent, no overlap
+    "overlap": 0.20,      # foliage overlaps
+}
+
+#: Band edges in pixels, matched to CONTACT_MIX. Distance is measured from the
+#: pasted weed's mask to the nearest annotated onion pixel.
+CONTACT_BANDS = {
+    "isolated": (100, 10 ** 9),
+    "near": (30, 100),
+    "very_near": (1, 30),
+    "touching": (0, 1),
+    "overlap": (-10 ** 9, 0),
+}
+
+#: How many weeds per composite. Real mixed frames are not one-weed scenes, and
+#: a model trained only on those learns that a frame contains exactly one.
+WEEDS_PER_IMAGE = (1, 4)
+
+#: A pasted weed may hide at most this fraction of an onion instance. Past it
+#: the onion becomes a sliver the annotation cannot honestly describe, and the
+#: composite is discarded rather than written with a mangled crop mask.
+MAX_ONION_HIDDEN = 0.35
+
+#: Fraction of the pasted weed that may be hidden by onion foliage in front of
+#: it. A weed with almost all of its body behind a leaf is not a useful
+#: supervised instance.
+MAX_WEED_HIDDEN = 0.35
+
+#: How often the pasted weed is drawn IN FRONT of the onion where they overlap.
+#: Not 1.0 on purpose: a generator that always puts the paste on top teaches
+#: "the pasted object is always in front", which is a property of the generator
+#: and not of a field.
+WEED_IN_FRONT_P = 0.7
+
+#: THE SAFETY GATE. Maximum fraction of a background's vegetation that is NOT
+#: covered by an annotated mask.
+#:
+#: Unclaimed vegetation means a plant nobody labelled. Compositing onto such a
+#: frame teaches that an unlabelled plant is background while an identical
+#: pasted one is a target, which is precisely the confusion this module exists
+#: to remove. 0.15 leaves room for mask boundary slop and stray leaf tips.
+UNCLAIMED_VEG_MAX = 0.15
+
+#: Pixels of alpha ramp at the cut-out edge. 1-2 keeps the plant interior
+#: untouched while removing the hard sticker edge a network will happily learn.
+FEATHER_PX = 2
+
+#: Match the cut-out's brightness to the patch it lands on, at most this far.
+#: Mild on purpose: enough to remove an obvious exposure jump, not enough to
+#: recolour a species out of recognition.
+ILLUMINATION_MATCH = 0.6
+
+#: Scale jitter. OFF by default and that is deliberate: the sources and the
+#: backgrounds come from the same rig at the same height, so a pasted weed is
+#: already at the right physical size, and random rescaling would invent plants
+#: at sizes that never grow. Widen it only with a metric reason.
+SCALE_JITTER = (1.0, 1.0)
+
+#: Rotation, degrees. Plants have no canonical heading seen from above.
+ROTATION_DEG = 180
+
+#: Deterministic output. Same seed, same composites.
+SEED = 1234
+
+# #############################################################################
+# ##  Nothing below here needs editing                                       ##
+# #############################################################################
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def normalised_mix(mix=None):
+    """CONTACT_MIX as fractions summing to 1, dropping the bands set to zero."""
+    m = {k: float(v) for k, v in (mix or CONTACT_MIX).items() if float(v) > 0}
+    total = sum(m.values())
+    if not total:
+        raise SystemExit(
+            "ERROR: CONTACT_MIX is all zeros - nothing to generate.\n"
+            "The bands that matter are 'touching' and 'overlap': they are the "
+            "only ones the recordings do not already contain.")
+    return {k: v / total for k, v in m.items()}
+
+
+def band_plan(n, mix=None, bands=None):
+    """`n` band names in the requested proportions, worst-case rounded up.
+
+    Returned as a list rather than sampled per image so the achieved mix is the
+    requested one rather than a draw from it - with 200 images a 10% band drawn
+    independently can come out at 5%."""
+    mix = normalised_mix(mix)
+    known = set(bands or CONTACT_BANDS)
+    unknown = sorted(set(mix) - known)
+    if unknown:
+        raise SystemExit(
+            f"ERROR: CONTACT_MIX names band(s) with no definition in "
+            f"CONTACT_BANDS: {', '.join(unknown)}.\n"
+            f"Known: {', '.join(sorted(known))}")
+    out = []
+    for name, frac in sorted(mix.items()):
+        out += [name] * int(round(frac * n))
+    while len(out) < n:
+        out.append(max(mix, key=mix.get))
+    return out[:n]
+
+
+def unclaimed_vegetation(veg, claimed):
+    """Fraction of vegetation no annotated mask covers.
+
+    The number the background screen is built on. 0 means every green pixel is
+    accounted for; 1 means nothing in the frame was annotated at all."""
+    veg = np.asarray(veg, bool)
+    total = int(veg.sum())
+    if not total:
+        return 0.0
+    return float((veg & ~np.asarray(claimed, bool)).sum()) / total
+
+
+def background_ok(veg, claimed, max_unclaimed=UNCLAIMED_VEG_MAX):
+    """(ok, fraction, reason) for one candidate background.
+
+    A frame with unlabelled plants in it must never become a composite
+    background: the composite would then hold a labelled weed and an unlabelled
+    one side by side, teaching that the same plant is both a target and soil.
+    That is worse than generating nothing."""
+    frac = unclaimed_vegetation(veg, claimed)
+    if not np.asarray(veg, bool).any():
+        return False, frac, "no vegetation at all - nothing to composite against"
+    if frac > max_unclaimed:
+        return False, frac, (
+            f"{frac:.0%} of its vegetation is not covered by any annotation, so "
+            f"something is growing there that nobody labelled")
+    return True, frac, ""
+
+
+def contact_distance(weed_mask, onion_union):
+    """Signed distance in pixels from a weed mask to the nearest onion pixel.
+
+    Negative means they overlap, and the magnitude is the overlapping area's
+    depth into the weed - so one number orders every band from `isolated`
+    through `touching` to `overlap` and the caller needs no special cases."""
+    import cv2
+    w = np.asarray(weed_mask, bool)
+    o = np.asarray(onion_union, bool)
+    if not w.any():
+        return float("inf")
+    if not o.any():
+        return float("inf")
+    overlap = int((w & o).sum())
+    if overlap:
+        # Depth of the overlap, so a graze and a burial are not the same band.
+        inside = cv2.distanceTransform((w & o).astype(np.uint8), cv2.DIST_L2, 3)
+        return -float(inside.max())
+    dist = cv2.distanceTransform((~o).astype(np.uint8), cv2.DIST_L2, 3)
+    return float(dist[w].min())
+
+
+def band_of(distance, bands=None):
+    """Which contact band a measured distance falls in, or None."""
+    for name, (lo, hi) in (bands or CONTACT_BANDS).items():
+        if lo <= distance < hi:
+            return name
+    return None
+
+
+def feathered_alpha(mask, px=FEATHER_PX):
+    """Alpha in [0,1]: 1 inside, ramping to 0 over `px` at the boundary.
+
+    The interior is left exactly 1. A blend that softens the whole instance
+    would hand the model a cue that pasted plants are blurry."""
+    import cv2
+    m = np.asarray(mask, bool).astype(np.uint8)
+    if px <= 0 or not m.any():
+        return m.astype(np.float32)
+    d = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+    return np.clip(d / float(px), 0.0, 1.0).astype(np.float32)
+
+
+def match_illumination(patch, target_patch, mask, strength=ILLUMINATION_MATCH):
+    """Nudge a cut-out's brightness toward the background it lands on.
+
+    Multiplicative on all three channels, so hue is preserved: a species is
+    partly identified by colour, and correcting exposure must not recolour the
+    plant into a different one."""
+    m = np.asarray(mask, bool)
+    if not m.any() or strength <= 0:
+        return patch
+    src = float(np.asarray(patch, np.float32)[m].mean())
+    dst = float(np.asarray(target_patch, np.float32)[m].mean()) if m.any() else src
+    if src <= 1e-6:
+        return patch
+    gain = 1.0 + strength * ((dst / src) - 1.0)
+    gain = float(np.clip(gain, 0.6, 1.6))
+    return np.clip(np.asarray(patch, np.float32) * gain, 0, 255).astype(np.uint8)
+
+
+def transform_cutout(rgb, mask, scale=1.0, rotation_deg=0.0, lep=None):
+    """Rotate and scale a cut-out, carrying its LEP through the same transform.
+
+    The LEP travels because it is the one annotation a composite gets for free
+    and could not otherwise buy: Stage B needs growth points, and a pasted weed
+    already has one if a person placed it."""
+    import cv2
+    m = np.asarray(mask, bool).astype(np.uint8)
+    h, w = m.shape[:2]
+    centre = (w / 2.0, h / 2.0)
+    M = cv2.getRotationMatrix2D(centre, float(rotation_deg), float(scale))
+    cos, sin = abs(M[0, 0]), abs(M[0, 1])
+    nw, nh = int(h * sin + w * cos), int(h * cos + w * sin)
+    M[0, 2] += nw / 2.0 - centre[0]
+    M[1, 2] += nh / 2.0 - centre[1]
+    out_rgb = cv2.warpAffine(rgb, M, (nw, nh), flags=cv2.INTER_LINEAR,
+                             borderValue=(0, 0, 0))
+    out_m = cv2.warpAffine(m, M, (nw, nh), flags=cv2.INTER_NEAREST,
+                           borderValue=0).astype(bool)
+    out_lep = None
+    if lep is not None:
+        p = np.array([float(lep[0]), float(lep[1]), 1.0])
+        out_lep = (float(M[0] @ p), float(M[1] @ p))
+    return out_rgb, out_m, out_lep
+
+
+def paste(bg, cutout_rgb, cutout_mask, top_left, feather=FEATHER_PX,
+          illumination=ILLUMINATION_MATCH):
+    """Composite one cut-out into a background. Returns (image, placed_mask).
+
+    `placed_mask` is full-frame, so every later step - contact distance, z-order,
+    the annotation itself - reads the same array rather than re-deriving where
+    the instance ended up."""
+    out = np.array(bg, copy=True)
+    H, W = out.shape[:2]
+    h, w = np.asarray(cutout_mask).shape[:2]
+    y0, x0 = int(top_left[0]), int(top_left[1])
+    ys0, xs0 = max(0, -y0), max(0, -x0)
+    y0, x0 = max(0, y0), max(0, x0)
+    ys1 = min(h, ys0 + (H - y0))
+    xs1 = min(w, xs0 + (W - x0))
+    if ys1 <= ys0 or xs1 <= xs0:
+        return out, np.zeros((H, W), bool)
+
+    sub_m = np.asarray(cutout_mask, bool)[ys0:ys1, xs0:xs1]
+    sub_rgb = np.asarray(cutout_rgb)[ys0:ys1, xs0:xs1]
+    y1, x1 = y0 + sub_m.shape[0], x0 + sub_m.shape[1]
+    dst = out[y0:y1, x0:x1]
+
+    src = match_illumination(sub_rgb, dst, sub_m, illumination)
+    a = feathered_alpha(sub_m, feather)[..., None]
+    out[y0:y1, x0:x1] = np.clip(src * a + dst * (1.0 - a), 0, 255).astype(np.uint8)
+
+    placed = np.zeros((H, W), bool)
+    placed[y0:y1, x0:x1] = sub_m
+    return out, placed
+
+
+def placement_candidates(onion_union, shape, band, rng, n=40,
+                         bands=None, margin=8):
+    """Top-left positions to try for a cut-out of `shape`, biased to `band`.
+
+    Candidates come from the distance transform: for a band that wants 30-100 px
+    of clearance, positions whose own distance-to-onion is in that range are
+    where a mask of that size can plausibly land. It is a bias, not a guarantee -
+    the achieved distance is measured afterwards and the placement is kept or
+    rejected on that."""
+    import cv2
+    o = np.asarray(onion_union, bool)
+    H, W = o.shape[:2]
+    h, w = int(shape[0]), int(shape[1])
+    if h >= H or w >= W:
+        return []
+    lo, hi = (bands or CONTACT_BANDS)[band]
+    dist = cv2.distanceTransform((~o).astype(np.uint8), cv2.DIST_L2, 3)
+
+    if hi <= 0:                      # overlap: anchor inside an onion
+        ys, xs = np.nonzero(o)
+    else:
+        want = (dist >= max(0.0, lo)) & (dist < min(hi, float(dist.max()) + 1))
+        ys, xs = np.nonzero(want)
+    if not len(ys):
+        return []
+
+    keep = rng.sample(range(len(ys)), min(n, len(ys)))
+    out = []
+    for i in keep:
+        # The anchor is where the plant MEETS THE GROUND, not the corner of its
+        # bounding box: a crown placed sensibly with leaves extending outward is
+        # a plant, and a bounding box centred anywhere is a sticker.
+        top = int(ys[i]) - h + max(1, h // 6)
+        left = int(xs[i]) - w // 2
+        top = int(np.clip(top, -margin, H - h + margin))
+        left = int(np.clip(left, -margin, W - w + margin))
+        out.append((top, left))
+    return out
+
+
+def visible_masks(onion_masks, weed_mask, weed_in_front):
+    """Masks as the camera would see them once one plant is behind the other.
+
+    Instance segmentation is annotated on what is VISIBLE, so whichever plant is
+    behind loses the overlapping pixels. Getting this backwards would paint an
+    onion's pixels as weed - and that is the error the whole system is built to
+    avoid, arriving through the training data instead of the model."""
+    weed = np.asarray(weed_mask, bool)
+    if weed_in_front:
+        return [np.asarray(m, bool) & ~weed for m in onion_masks], weed
+    behind = np.zeros_like(weed)
+    for m in onion_masks:
+        behind |= np.asarray(m, bool)
+    return [np.asarray(m, bool) for m in onion_masks], weed & ~behind
+
+
+def hidden_fraction(before, after):
+    """How much of an instance the composite took away."""
+    b = int(np.asarray(before, bool).sum())
+    if not b:
+        return 0.0
+    return 1.0 - int(np.asarray(after, bool).sum()) / b
+
+
+def summarise(records):
+    """Achieved contact bands and rejections, which is what makes this run
+    checkable rather than merely repeatable."""
+    bands, rejects = {}, {}
+    for r in records:
+        bands[r.get("band") or "?"] = bands.get(r.get("band") or "?", 0) + 1
+    return {"instances": len(records), "bands": dict(sorted(bands.items())),
+            "rejects": rejects}
+
+
+def format_report(n_images, n_inst, bands, rejected, backgrounds_seen,
+                  backgrounds_used, out_dir=None):
+    L = ["", "  Composited mixed scenes", "  " + "-" * 40,
+         f"  {n_images} image(s), {n_inst} pasted weed instance(s)",
+         f"  backgrounds: {backgrounds_used} used of {backgrounds_seen} "
+         f"screened", ""]
+    if bands:
+        L.append("  Achieved contact band (measured, not requested):")
+        for name, n in sorted(bands.items(), key=lambda kv: -kv[1]):
+            share = n / max(1, n_inst)
+            L.append(f"    {name:<14}{n:>7}{share:>8.0%}")
+    if rejected:
+        L += ["", "  Rejected:"]
+        for why, n in sorted(rejected.items(), key=lambda kv: -kv[1]):
+            L.append(f"    {n:>6}  {why}")
+    L += ["",
+          "  [i] provenance is SYNTHETIC. Train on these; never validate on",
+          "      them - a score computed on composites measures this "
+          "generator's",
+          "      blind spots, not the model.",
+          "  [i] the onion masks these were composited against are SAM "
+          "prelabels,",
+          "      so 'distance to crop' is a distance to a machine label."]
+    if out_dir:
+        L += ["", f"  -> {out_dir}"]
+    return "\n".join(L + [""])
+
+
+def datumaro_doc(items, classes=None):
+    """A Datumaro 1.0 document the dataset builder can read directly.
+
+    Datumaro rather than COCO because prepare_dataset refuses COCO, and it is
+    right to: COCO cannot carry shape groups, so every mask-to-LEP link would be
+    silently discarded - and a pasted weed's LEP is the annotation compositing
+    gets for free."""
+    names = list(classes or CLASSES) + [LEP_LABEL]
+    return {
+        "info": {"description": "SeeWeed3D SYNTHETIC COMPOSITE - weed cut-outs "
+                                "pasted into real onion frames. Not a "
+                                "recording. Train only; never validate.",
+                 "label_provenance": "synthetic",
+                 "date_created": datetime.now(timezone.utc).isoformat()},
+        "categories": {"label": {"labels": [{"name": n, "parent": "",
+                                             "attributes": []} for n in names],
+                                 "attributes": []}},
+        "items": items,
+    }
+
+
+def _item(item_id, image_name, h, w, instances, classes=None):
+    """One Datumaro item: polygons, plus a grouped LEP point where one rode in
+    with the cut-out."""
+    from annotation.mine_pool import mask_to_polygons
+
+    names = list(classes or CLASSES) + [LEP_LABEL]
+    idx = {n: i for i, n in enumerate(names)}
+    anns, ann_id, group = [], 1, 1
+    for inst in instances:
+        polys = mask_to_polygons(inst["mask"])
+        if not polys:
+            continue
+        for poly in polys:
+            anns.append({"id": ann_id, "type": "polygon",
+                         "label_id": idx[inst["class_name"]], "group": group,
+                         "points": [float(v) for v in poly], "z_order": 0,
+                         "attributes": dict(inst.get("attributes") or {})})
+            ann_id += 1
+        if inst.get("lep") is not None:
+            x, y = inst["lep"]
+            anns.append({"id": ann_id, "type": "points",
+                         "label_id": idx[LEP_LABEL], "group": group,
+                         "points": [float(x), float(y)], "z_order": 0,
+                         "attributes": {"lep_visibility": "visible"}})
+            ann_id += 1
+        group += 1
+    return {"id": item_id, "annotations": anns,
+            "image": {"path": image_name, "size": [int(h), int(w)]}}
+
+
+def _find_image(stem, roots):
+    for root in roots:
+        d = Path(root)
+        if not d.is_dir():
+            continue
+        for suf in sorted(IMAGE_SUFFIXES):
+            p = d / f"{stem}{suf}"
+            if p.is_file():
+                return p
+    return None
+
+
+def load_bank(sources, include_frames="", max_instances=600, rng=None):
+    """Hand-drawn weed cut-outs: RGB, mask, class, attributes and LEP.
+
+    Read through load_datumaro rather than by re-parsing, so a cut-out carries
+    exactly the attributes and the mask-to-LEP link the annotator produced -
+    including the contract fields the dataset build will later check."""
+    import cv2
+    from training import prepare_dataset as pdz
+    from training import datumaro_multitask as dmm
+
+    bank = []
+    for root in sources:
+        root = Path(root)
+        if not root.exists():
+            print(f"  [!] source does not exist, skipped: {root}")
+            continue
+        for f in pdz.find_annotation_files(root):
+            frames, _ = dmm.load_datumaro(
+                f, fallback_session=dmm.batch_session_id(f))
+            if include_frames:
+                frames, _ = pdz.select_frames(frames, include_frames, None)
+            for rec in frames:
+                img = _find_image(Path(rec.image_path or rec.item_id).stem,
+                                  [root / "rgb", root,
+                                   Path(rec.image_path).parent])
+                if img is None:
+                    continue
+                bgr = cv2.imread(str(img))
+                if bgr is None:
+                    continue
+                H, W = bgr.shape[:2]
+                for inst in rec.instances:
+                    if inst.class_name == CROP_CLASS:
+                        continue
+                    m = _mask_of(inst, H, W)
+                    ys, xs = np.nonzero(m)
+                    if len(xs) < 3:
+                        continue
+                    y0, y1 = int(ys.min()), int(ys.max()) + 1
+                    x0, x1 = int(xs.min()), int(xs.max()) + 1
+                    lep = None
+                    if inst.lep is not None:
+                        lep = (float(inst.lep.x) - x0, float(inst.lep.y) - y0)
+                    bank.append({
+                        "rgb": bgr[y0:y1, x0:x1].copy(),
+                        "mask": m[y0:y1, x0:x1].copy(),
+                        "class_name": inst.class_name,
+                        "attributes": dict(inst.attributes or {}),
+                        "lep": lep,
+                        "source": f"{rec.session_id}/{rec.item_id}",
+                    })
+    if rng and len(bank) > max_instances:
+        bank = rng.sample(bank, max_instances)
+    return bank
+
+
+def _mask_of(inst, h, w):
+    import cv2
+    m = np.zeros((h, w), np.uint8)
+    for poly in inst.polygons:
+        pts = np.asarray(poly, np.float64).reshape(-1, 2)
+        if len(pts) >= 3:
+            cv2.fillPoly(m, [np.round(pts).astype(np.int32)], 1)
+    return m.astype(bool)
+
+
+def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
+    """One composite. Returns (image, instances, records) or (None, None, why).
+
+    Pure apart from the RNG: every rejection is a returned reason rather than a
+    silent skip, because a generator that quietly drops most of its attempts
+    produces a dataset whose composition nobody can account for."""
+    c = dict(cfg or {})
+    out = np.array(bgr, copy=True)
+    onions = [np.asarray(m, bool) for m in onion_masks]
+    union = np.zeros(out.shape[:2], bool)
+    for m in onions:
+        union |= m
+    placed, records = [], []
+
+    for band in bands_wanted:
+        cut = rng.choice(cutouts)
+        scale = rng.uniform(*c.get("scale_jitter", SCALE_JITTER))
+        rot = rng.uniform(-c.get("rotation_deg", ROTATION_DEG),
+                          c.get("rotation_deg", ROTATION_DEG))
+        rgb_t, mask_t, lep_t = transform_cutout(cut["rgb"], cut["mask"],
+                                                scale, rot, cut.get("lep"))
+        spots = placement_candidates(union, mask_t.shape, band, rng)
+        if not spots:
+            records.append({"band": None, "reason": f"no {band} position"})
+            continue
+
+        for top, left in spots:
+            trial, pmask = paste(out, rgb_t, mask_t, (top, left),
+                                 c.get("feather", FEATHER_PX),
+                                 c.get("illumination", ILLUMINATION_MATCH))
+            if not pmask.any():
+                continue
+            dist = contact_distance(pmask, union)
+            if band_of(dist) != band:
+                continue
+            front = rng.random() < c.get("weed_in_front_p", WEED_IN_FRONT_P)
+            vis_onions, vis_weed = visible_masks(onions, pmask, front)
+            if hidden_fraction(pmask, vis_weed) > c.get("max_weed_hidden",
+                                                        MAX_WEED_HIDDEN):
+                continue
+            if any(hidden_fraction(a, b) > c.get("max_onion_hidden",
+                                                 MAX_ONION_HIDDEN)
+                   for a, b in zip(onions, vis_onions)):
+                continue
+
+            out = trial if front else _paste_behind(out, trial, pmask, union)
+            onions = vis_onions
+            placed.append({"class_name": cut["class_name"], "mask": vis_weed,
+                           "attributes": cut["attributes"],
+                           "lep": None if lep_t is None else
+                           (lep_t[0] + left, lep_t[1] + top)})
+            records.append({"band": band, "distance_px": round(dist, 2),
+                            "class_name": cut["class_name"],
+                            "in_front": bool(front), "source": cut["source"]})
+            break
+        else:
+            records.append({"band": None,
+                            "reason": f"no {band} placement passed the checks"})
+
+    if not placed:
+        return None, None, records
+    instances = [{"class_name": CROP_CLASS, "mask": m, "attributes": {}}
+                 for m in onions if m.any()] + placed
+    return out, instances, records
+
+
+def _paste_behind(original, pasted, weed_mask, onion_union):
+    """Keep onion pixels in front where the two overlap."""
+    out = np.array(pasted, copy=True)
+    behind = np.asarray(weed_mask, bool) & np.asarray(onion_union, bool)
+    out[behind] = np.asarray(original)[behind]
+    return out
+
+
+def main():
+    import cv2
+    from evaluation.crop_risk import load_polygons, rasterise
+
+    rng = random.Random(SEED)
+    out_dir = Path(stamped(OUT_ROOT, "synth_mixed"))
+    stamp = out_dir.name.replace("synth_mixed_", "")
+    session_id = f"synth_{stamp}00" if len(stamp) == 13 else f"synth_{stamp}"
+
+    print(f"\n  Building the weed cut-out bank from {len(WEED_SOURCES)} "
+          f"source(s)...")
+    bank = load_bank(WEED_SOURCES, SOURCE_FRAMES, rng=rng)
+    if not bank:
+        raise SystemExit(
+            "ERROR: no hand-drawn weed instances found under:\n  " +
+            "\n  ".join(str(s) for s in WEED_SOURCES) +
+            "\nCompositing from prelabels would make a machine mask with extra "
+            "steps.")
+    by_class = {}
+    for b in bank:
+        by_class[b["class_name"]] = by_class.get(b["class_name"], 0) + 1
+    print(f"  {len(bank)} cut-out(s): " +
+          ", ".join(f"{k} {v}" for k, v in sorted(by_class.items())))
+
+    backgrounds = []
+    for root in ONION_BACKGROUNDS:
+        p = Path(root)
+        if not p.is_dir():
+            continue
+        sessions = [p] if (p / "rgb").is_dir() else [
+            d for d in sorted(p.iterdir()) if d.is_dir()]
+        for sess in sessions:
+            gt = load_polygons(sess, want_class=CROP_CLASS)
+            for stem, insts in gt.items():
+                img = _find_image(stem, [sess / "rgb", sess])
+                if img is not None:
+                    backgrounds.append((img, insts))
+    if not backgrounds:
+        raise SystemExit(
+            "ERROR: no onion frames with annotations under:\n  " +
+            "\n  ".join(str(s) for s in ONION_BACKGROUNDS))
+    rng.shuffle(backgrounds)
+    print(f"  {len(backgrounds)} candidate background(s)")
+
+    (out_dir / "rgb").mkdir(parents=True, exist_ok=True)
+    (out_dir / "annotations").mkdir(parents=True, exist_ok=True)
+
+    plan = band_plan(N_IMAGES * int(np.mean(WEEDS_PER_IMAGE)), CONTACT_MIX)
+    rng.shuffle(plan)
+    items, all_records, rejected = [], [], {}
+    seen = used = 0
+    pi = 0
+
+    for img_path, onion_insts in backgrounds:
+        if len(items) >= N_IMAGES:
+            break
+        seen += 1
+        bgr = cv2.imread(str(img_path))
+        if bgr is None:
+            continue
+        h, w = bgr.shape[:2]
+        onion_masks = [rasterise(p, h, w) for _, p, _ in onion_insts]
+        claimed = np.zeros((h, w), bool)
+        for m in onion_masks:
+            claimed |= m
+        ok, frac, why = background_ok(pl.veg_of(bgr), claimed)
+        if not ok:
+            rejected[why] = rejected.get(why, 0) + 1
+            continue
+
+        k = rng.randint(*WEEDS_PER_IMAGE)
+        want = [plan[(pi + i) % len(plan)] for i in range(k)]
+        pi += k
+        image, instances, records = compose_one(
+            bgr, onion_masks, bank, want, rng)
+        all_records += [r for r in records if r.get("band")]
+        for r in records:
+            if not r.get("band"):
+                rejected[r.get("reason", "?")] = \
+                    rejected.get(r.get("reason", "?"), 0) + 1
+        if image is None:
+            continue
+
+        used += 1
+        name = f"{session_id}_{used:06d}.png"
+        cv2.imwrite(str(out_dir / "rgb" / name), image)
+        items.append(_item(Path(name).stem, name, h, w, instances))
+
+    if not items:
+        raise SystemExit(
+            "ERROR: every background was rejected and nothing was written.\n"
+            "The usual cause is UNCLAIMED_VEG_MAX: onion frames whose weeds "
+            "were never\nannotated cannot be composite backgrounds, because "
+            "the result would teach that\nan unlabelled plant is soil and an "
+            "identical pasted one is a target.")
+
+    (out_dir / "annotations" / "default.json").write_text(
+        json.dumps(datumaro_doc(items), indent=2), encoding="utf-8")
+    bands = {}
+    for r in all_records:
+        bands[r["band"]] = bands.get(r["band"], 0) + 1
+    report = format_report(len(items), len(all_records), bands, rejected,
+                           seen, used, out_dir)
+    print(report)
+    (out_dir / "compose_report.json").write_text(json.dumps({
+        "session_id": session_id, "n_images": len(items),
+        "n_instances": len(all_records), "bands": bands,
+        "rejected": rejected, "seed": SEED,
+        "contact_mix": CONTACT_MIX, "contact_bands": CONTACT_BANDS,
+        "unclaimed_veg_max": UNCLAIMED_VEG_MAX,
+        "weed_sources": [str(s) for s in WEED_SOURCES],
+        "onion_backgrounds": [str(s) for s in ONION_BACKGROUNDS],
+        "label_provenance": "synthetic",
+        "records": all_records,
+    }, indent=2), encoding="utf-8")
+    print(f"  Add it to mixed.py MIXED_SESSIONS, and set\n"
+          f"      SCENE_HINTS[{session_id!r}] = 'mixed'\n"
+          f"  Never put it in HOLDOUT_VAL or HOLDOUT_TEST.\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
