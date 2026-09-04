@@ -62,6 +62,18 @@ CONFIG = {
     # otherwise be fed to the model as pictures.
     "IMAGES": r"E:\Dataset_Vidalia\Weeds_1\auto_labels_weeds_6\vid3_20260108_110444\cvat_ready",
 
+    # OR a SPLIT of a built dataset, which IMAGES cannot express. Set DATASET
+    # to make_dataset.py's OUT_DIR and SPLIT to "test" and the frames come from
+    # seg_manifest.json instead of from a folder. DATASET wins when both are
+    # set.
+    #
+    # A split is not a directory. Its frames are scattered across every
+    # session, and train and test frames sit side by side in the same rgb/
+    # folder - so pointing IMAGES at a session and calling the result held-out
+    # is wrong, and wrong in the flattering direction.
+    "DATASET": "",
+    "SPLIT": "test",
+
     # 0 = every frame found. Otherwise the first N, which is usually what you
     # want the first time you point this at 4000 frames.
     "LIMIT": 20,
@@ -194,6 +206,47 @@ def find_images(spec, limit=0, stride=1):
             f"images, or a single image file.")
     files = files[::max(1, int(stride))]
     return files[:limit] if limit else files
+
+
+def split_images(dataset_dir, split, limit=0, stride=1, images_root=""):
+    """The frames of one SPLIT of a built dataset, resolved to real paths.
+
+    Pointing this at a folder cannot answer "what does it do on data it never
+    trained on": a split is a set of frames scattered across every session, not
+    a directory, and the frames of train and test sit side by side in the same
+    rgb/ folder. Reading them from seg_manifest.json is the only way to be sure
+    the pictures you are looking at are the held-out ones.
+
+    Uses the same resolver as eval_seg, so a frame found here is a frame that
+    was scored there - and a merged build's several sessions roots all work."""
+    from training.seg_dataset import resolve_image
+
+    man = Path(dataset_dir) / "seg_manifest.json"
+    if not man.exists():
+        raise SystemExit(
+            f"ERROR: {man} not found. DATASET should be the OUT_DIR that "
+            f"make_dataset.py wrote, the folder holding seg_manifest.json.")
+    doc = json.loads(man.read_text(encoding="utf-8"))
+    recs = [f for f in doc.get("frames", []) if f.get("split") == split]
+    if not recs:
+        have = sorted({f.get("split") for f in doc.get("frames", [])} - {None})
+        raise SystemExit(
+            f"ERROR: split {split!r} has no frames in {man}. "
+            f"This dataset has: {', '.join(have) or '(none)'}")
+    recs = sorted(recs, key=lambda r: str(r.get("image_path")))
+    recs = recs[::max(1, int(stride))]
+    if limit:
+        recs = recs[:limit]
+    root = images_root or doc.get("images_root") or "."
+    out = []
+    for r in recs:
+        try:
+            out.append(Path(resolve_image(r["image_path"], root,
+                                          r.get("session_id"),
+                                          r.get("export_dir"))))
+        except FileNotFoundError as e:
+            raise SystemExit(f"ERROR: {e}")
+    return out
 
 
 def _session_of(path):
@@ -364,7 +417,15 @@ def predict(cfg=None):
 
     c = dict(CONFIG if cfg is None else cfg)
     device = require_device(c["DEVICE"])
-    frames = find_images(c["IMAGES"], c.get("LIMIT", 0), c.get("STRIDE", 1))
+    if c.get("DATASET"):
+        frames = split_images(c["DATASET"], c.get("SPLIT", "test"),
+                              c.get("LIMIT", 0), c.get("STRIDE", 1),
+                              c.get("IMAGES_ROOT", ""))
+        print(f"  {len(frames)} frame(s) from split "
+              f"{c.get('SPLIT', 'test')!r} of {c['DATASET']}")
+    else:
+        frames = find_images(c["IMAGES"], c.get("LIMIT", 0),
+                             c.get("STRIDE", 1))
 
     ckpt = Path(c["CHECKPOINT"])
     if not ckpt.exists():
@@ -649,6 +710,10 @@ def main(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--images")
+    p.add_argument("--dataset", help="a built dataset's OUT_DIR; with --split, "
+                                     "runs on that split's frames instead of a "
+                                     "folder")
+    p.add_argument("--split", choices=["train", "val", "test"])
     p.add_argument("--checkpoint")
     p.add_argument("--out")
     p.add_argument("--backend", choices=["maskrcnn", "rfdetr"])
@@ -663,6 +728,7 @@ def main(argv=None):
 
     c = dict(CONFIG)
     for flag, key in (("images", "IMAGES"), ("checkpoint", "CHECKPOINT"),
+                      ("dataset", "DATASET"), ("split", "SPLIT"),
                       ("out", "OUT_DIR"), ("backend", "BACKEND"),
                       ("mode", "MODE"), ("device", "DEVICE"),
                       ("conf", "CONF"), ("limit", "LIMIT"),

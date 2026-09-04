@@ -257,3 +257,67 @@ def test_a_missing_checkpoint_points_at_the_trainer(tmp_path):
         pi.predict({**pi.CONFIG, "IMAGES": str(_session(tmp_path)),
                     "CHECKPOINT": str(tmp_path / "nope.pt"),
                     "OUT_DIR": str(tmp_path / "o"), "DEVICE": "cpu"})
+
+
+# --------------------------------------------------------------------------
+# Running on a SPLIT. A split is not a directory: its frames are scattered
+# across every session, and train and test frames sit side by side in the same
+# rgb/ folder - so pointing --images at a session and calling the result
+# held-out is wrong, and wrong in the flattering direction.
+# --------------------------------------------------------------------------
+def _built(tmp_path, splits=("train", "train", "val", "test")):
+    sess = _session(tmp_path, n=len(splits), with_depth=False)
+    ds = tmp_path / "dataset"
+    ds.mkdir()
+    frames = [{"image_path": f"vid1_2026/rgb/vid1_2026_{i + 1:06d}.png",
+               "session_id": "vid1_2026", "split": s}
+              for i, s in enumerate(splits)]
+    (ds / "seg_manifest.json").write_text(json.dumps(
+        {"classes": CLASSES, "images_root": str(sess.parent),
+         "frames": frames}), encoding="utf-8")
+    return ds
+
+
+def test_a_split_yields_only_its_own_frames(tmp_path):
+    ds = _built(tmp_path)
+    got = pi.split_images(ds, "test")
+    assert [p.name for p in got] == ["vid1_2026_000004.png"]
+    assert [p.name for p in pi.split_images(ds, "train")] == [
+        "vid1_2026_000001.png", "vid1_2026_000002.png"]
+
+
+def test_a_split_resolves_to_paths_that_exist(tmp_path):
+    """The manifest stores a relative path against an images_root, and a
+    merged build has several roots. A list of strings that do not open is
+    worse than an error."""
+    for p in pi.split_images(_built(tmp_path), "train"):
+        assert p.is_file()
+
+
+def test_limit_and_stride_apply_to_a_split(tmp_path):
+    ds = _built(tmp_path, ("test",) * 6)
+    assert len(pi.split_images(ds, "test", limit=2)) == 2
+    assert len(pi.split_images(ds, "test", stride=3)) == 2
+
+
+def test_an_empty_split_names_the_ones_that_exist(tmp_path):
+    """Silently running on nothing would produce an empty folder of overlays
+    that looks like 'the model found no weeds'."""
+    with pytest.raises(SystemExit) as e:
+        pi.split_images(_built(tmp_path, ("train", "val")), "test")
+    assert "test" in str(e.value) and "train" in str(e.value)
+
+
+def test_a_dataset_without_a_manifest_says_what_to_point_at(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        pi.split_images(tmp_path, "test")
+    assert "seg_manifest.json" in str(e.value)
+
+
+def test_dataset_wins_over_images_so_a_stale_folder_cannot_be_scored(tmp_path):
+    """Both keys have defaults, and IMAGES ships pointing at a real session.
+    If IMAGES won, asking for the test split would quietly run on a whole
+    drive the model trained on."""
+    import inspect
+    src = inspect.getsource(pi.predict)
+    assert src.index('c.get("DATASET")') < src.index('find_images(')
