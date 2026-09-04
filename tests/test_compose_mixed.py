@@ -796,3 +796,56 @@ def test_overlays_go_somewhere_else_if_asked(tmp_path):
     run = _run(tmp_path)
     cm.render_overlays(run, out_dir=tmp_path / "look", scale=1.0)
     assert (tmp_path / "look" / "synth_1.png").is_file()
+
+
+def test_no_band_colour_looks_like_the_crop():
+    """The first palette drew `touching` in (0,140,255) against a crop of
+    (0,165,255) - the same orange to within a shade, and `touching` is 30% of
+    the weeds. Half the pasted weeds were invisible and the composites read as
+    one-weed scenes when they hold four."""
+    for band, colour in cm.OVERLAY_BAND.items():
+        d = sum(abs(a - b) for a, b in zip(colour, cm.OVERLAY_CROP))
+        assert d > 120, f"{band} {colour} is the crop's colour {cm.OVERLAY_CROP}"
+
+
+def test_no_band_colour_is_grey():
+    """Grey outlines on grey-green soil are the other way to hide a weed."""
+    for band, (b, g, r) in cm.OVERLAY_BAND.items():
+        assert max(b, g, r) - min(b, g, r) > 60, f"{band} is grey"
+
+
+def test_every_band_has_its_own_colour():
+    assert len(set(cm.OVERLAY_BAND.values())) == len(cm.OVERLAY_BAND)
+    assert set(cm.OVERLAY_BAND) == set(cm.CONTACT_BANDS)
+
+
+def test_the_run_says_how_many_weeds_it_drew():
+    """'It looks like one or two weeds a frame' has two very different
+    answers - the generator pasted two, or it pasted four and you cannot see
+    them. Only counting separates those."""
+    txt = "\n".join(cm.count_note([4, 3, 5, 2], [200.0, 5000.0, 40000.0]))
+    assert "14 across 4 frame(s)" in txt
+    assert "mean 3.50" in txt and "min 2" in txt and "max 5" in txt
+
+
+def test_tiny_weeds_are_called_out_before_a_frame_is_called_empty():
+    """A pasted cut-out is not scaled: a real cotyledon is a few hundred px in
+    a 2.7 megapixel frame, and at overlay scale 0.5 that is a mark you miss."""
+    txt = "\n".join(cm.count_note([2], [200.0, 300.0, 90000.0]))
+    assert "2 of 3 are under 1500 px" in txt
+    assert "--scale 1.0" in txt
+
+
+def test_no_tiny_weeds_means_no_warning_about_them():
+    txt = "\n".join(cm.count_note([2], [40000.0, 90000.0]))
+    assert "under 1500 px" not in txt
+
+
+def test_polygon_area_is_the_enclosed_pixels():
+    square = [0, 0, 10, 0, 10, 10, 0, 10]
+    assert cm.polygon_area(square) == pytest.approx(100.0)
+    assert cm.polygon_area([0, 0, 1, 1]) == 0.0, "a line encloses nothing"
+
+
+def test_counting_survives_a_run_with_nothing_in_it():
+    assert cm.count_note([], []) == []

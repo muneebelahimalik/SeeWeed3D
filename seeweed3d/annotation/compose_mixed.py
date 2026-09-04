@@ -974,11 +974,20 @@ def _paste_behind(original, pasted, weed_mask, onion_union):
 #: else in this project: it is the one thing in the frame that must not be hit.
 OVERLAY_CROP = (0, 165, 255)
 OVERLAY_WEED = (60, 220, 60)
-OVERLAY_BAND = {"overlap": (60, 60, 235),      # red    - on the crop
-                "touching": (0, 140, 255),     # orange - against it
-                "very_near": (0, 220, 255),    # yellow
-                "near": (200, 200, 200),       # grey
-                "isolated": (160, 160, 160)}
+
+#: NO BAND MAY LOOK LIKE THE CROP, and none may look like soil. The first
+#: version drew `touching` in (0,140,255) - which is the crop's orange to
+#: within a shade, and `touching` is 30% of the weeds - and `near`/`isolated`
+#: in grey, on grey-green soil. Over half the pasted weeds were camouflaged,
+#: and the composites read as one-weed scenes when they hold four.
+#: Yellow is out for the same reason: (0,255,255) against the crop's
+#: (0,165,255) differs in one channel by 90, which is a shade of the same
+#: orange under a canopy shadow.
+OVERLAY_BAND = {"overlap": (60, 60, 235),      # red     - on the crop
+                "touching": (255, 0, 255),     # magenta - against it
+                "very_near": (255, 255, 0),    # cyan
+                "near": (255, 128, 0),         # blue
+                "isolated": (60, 220, 60)}     # green   - alone
 
 
 def instance_groups(item, classes=None):
@@ -1044,6 +1053,47 @@ def draw_composite(bgr, groups, bands=None, scale=1.0, labels=True):
     return out
 
 
+def polygon_area(points):
+    """Shoelace area of one flat [x, y, x, y, ...] polygon, in pixels."""
+    a = np.asarray(points, float).reshape(-1, 2)
+    if len(a) < 3:
+        return 0.0
+    x, y = a[:, 0], a[:, 1]
+    return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2)
+
+
+def count_note(per_frame, areas):
+    """How many weeds are actually in these frames, and how big they are.
+
+    "It looks like one or two weeds a frame" is a question about the PICTURE,
+    and it has two very different answers: the generator pasted one or two, or
+    it pasted four and you cannot see them. Only counting separates those, and
+    the second is the one that has been true here - half the palette used to
+    disappear into the crop colour and the soil.
+
+    Area is reported because a pasted cut-out is not scaled: a real cotyledon
+    from the source drive is a few hundred pixels in a 2.7 megapixel frame, and
+    at the default overlay scale of 0.5 its outline is a mark you can miss."""
+    if not per_frame:
+        return []
+    n = len(per_frame)
+    tot = sum(per_frame)
+    L = ["", f"  Weeds drawn: {tot} across {n} frame(s) "
+             f"(mean {tot / n:.2f}, min {min(per_frame)}, max {max(per_frame)})"]
+    if areas:
+        a = sorted(areas)
+        med = a[len(a) // 2]
+        tiny = sum(1 for v in a if v < 1500)
+        L.append(f"    weed area px: median {med:.0f}, smallest {a[0]:.0f}, "
+                 f"largest {a[-1]:.0f}")
+        if tiny:
+            L.append(f"    {tiny} of {len(a)} are under 1500 px - at overlay "
+                     f"scale 0.5 those are a few pixels of outline.")
+            L.append(f"    Pass --scale 1.0 before concluding a frame is "
+                     f"empty.")
+    return L
+
+
 def render_overlays(run_dir, out_dir=None, limit=0, stride=1, scale=0.5):
     """Draw a finished run's own annotations onto its frames.
 
@@ -1075,7 +1125,7 @@ def render_overlays(run_dir, out_dir=None, limit=0, stride=1, scale=0.5):
     out = Path(out_dir or (run / "overlays"))
     out.mkdir(parents=True, exist_ok=True)
 
-    n = 0
+    n, per_frame, areas = 0, [], []
     for item in items:
         stem = str(item.get("id"))
         img = run / "rgb" / f"{stem}.png"
@@ -1083,17 +1133,21 @@ def render_overlays(run_dir, out_dir=None, limit=0, stride=1, scale=0.5):
         if bgr is None:
             print(f"  [!] missing image, skipped: {img}")
             continue
-        pic = draw_composite(bgr, instance_groups(item, classes),
-                             bands.get(stem), scale)
+        groups = instance_groups(item, classes)
+        pic = draw_composite(bgr, groups, bands.get(stem), scale)
         cv2.imwrite(str(out / f"{stem}.png"), pic)
+        weeds = [g for g in groups if g[0] != CROP_CLASS]
+        per_frame.append(len(weeds))
+        areas += [polygon_area(p) for _, polys in weeds for p in polys]
         n += 1
     if not n:
         raise SystemExit(f"ERROR: nothing was drawn from {run}.")
+    print("\n".join(count_note(per_frame, areas)))
     print(f"\n  {n} overlay(s) -> {out}\n"
           f"  crop is orange and thickest; weeds are coloured by the contact "
           f"band they achieved\n"
-          f"  (red overlap, orange touching, yellow very_near, grey near and "
-          f"isolated).\n"
+          f"  (red overlap, magenta touching, cyan very_near, blue near, "
+          f"green isolated).\n"
           f"  WHAT TO LOOK FOR: a paste whose outline does not follow the "
           f"plant, a band label\n"
           f"  that disagrees with what you see, and light or shadow on the "

@@ -249,6 +249,20 @@ is whether the placement the report claims is the one you can see. A weed
 labelled `touching` sitting alone in bare soil is a generator bug no number in
 the report would show.
 
+Colours: red `overlap`, magenta `touching`, cyan `very_near`, blue `near`,
+green `isolated`, and the crop in orange, drawn thickest. **No band may look
+like the crop and none may look like soil** — the first palette drew `touching`
+in near-crop orange and `near`/`isolated` in grey, so over half the pasted
+weeds were camouflaged and the composites read as one-weed scenes when they
+hold four.
+
+The run also prints how many weeds it drew and their sizes, because *"it looks
+like one or two weeds a frame"* has two very different answers — the generator
+pasted two, or it pasted four and you can't see them. Cut-outs are **not
+scaled**, so a real cotyledon is a few hundred pixels in a 2.7 MP frame; at the
+default `--scale 0.5` that's a mark you can miss. Pass `--scale 1.0` before
+concluding a frame is empty.
+
 Three things only a person can check: an outline that doesn't follow the plant,
 a band label that disagrees with the picture, and light or shadow on the pasted
 weed that doesn't match the onions around it.
