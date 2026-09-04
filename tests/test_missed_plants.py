@@ -125,6 +125,74 @@ def test_the_verdict_threshold_is_the_configured_one():
 
 
 # --------------------------------------------------------------------------
+# A settled drive. This audit is a heuristic over a colour prior, and it
+# re-runs its opinion every time - so it has to be able to say "somebody
+# already decided this, here is what they chose" instead of arguing again.
+# --------------------------------------------------------------------------
+def test_a_settled_drive_leads_with_the_decision_not_the_recommendation():
+    v = mp.verdict(_frames([9] * 7), decided=(mp.WHOLE, "mixed.py, by hand"))
+    assert v.startswith("SETTLED"), (
+        "the decision has to come first - a reader who stops at the first "
+        "words must not come away thinking the drive is unused")
+    assert "OVERRULED" in v and "mixed.py, by hand" in v
+
+
+def test_a_settled_drive_still_shows_what_the_audit_would_have_said():
+    """Suppressing the recommendation would hide the disagreement, and the
+    disagreement is the information - it is what a reader needs to judge
+    whether the decision still holds."""
+    v = mp.verdict(_frames([9] * 7), decided=(mp.WHOLE, "because"))
+    assert "NOT SAFE AS WHOLE FRAMES" in v and "7 of 7" in v
+
+
+def test_a_decision_the_audit_agrees_with_is_not_called_an_overrule():
+    v = mp.verdict(_frames([9] * 7), decided=(mp.CUTOUT, "because"))
+    assert "agrees" in v and "OVERRULED" not in v
+
+
+def test_a_settled_drive_that_got_worse_can_still_say_so():
+    """The counts are never suppressed, so re-running this on a decided drive
+    is still how you learn the decision needs revisiting."""
+    clean = mp.verdict(_frames([0, 0]), decided=(mp.WHOLE, "because"))
+    dirty = mp.verdict(_frames([9] * 7), decided=(mp.WHOLE, "because"))
+    assert "agrees" in clean and "OVERRULED" in dirty
+
+
+def test_a_decision_reaches_the_drive_however_its_name_is_written():
+    """The folder is `Mix_raj_Batch 01` and the session id is
+    `Mix_raj_Batch_01`. A decision recorded against one that silently matches
+    nothing is worse than no decision at all."""
+    assert mp.decision_for("Mix_raj_Batch 01", {"Mix_raj_Batch_01": (mp.WHOLE, "x")})
+    assert mp.decision_for("Mix_raj_Batch_01", {"Mix_raj_Batch 01": (mp.WHOLE, "x")})
+    assert not mp.decision_for("vid2_20260108_122731",
+                               {"Mix_raj_Batch_01": (mp.WHOLE, "x")})
+
+
+def test_a_decision_about_a_drive_nobody_audits_is_reported_as_stale():
+    stale = mp.stale_decisions(["Mix_raj_Batch 01"],
+                               {"Mix_raj_Batch_01": (mp.WHOLE, "x"),
+                                "vid9_gone": (mp.CUTOUT, "x")})
+    assert stale == ["vid9_gone"]
+
+
+def test_every_decision_matches_what_the_mixed_build_actually_does():
+    """DECIDED records a decision; mixed.py MAKES it. If they drift, this file
+    starts printing a settled use that no build honours - which is exactly the
+    confident-and-wrong line it was added to remove."""
+    import ntpath
+    from training.datasets import mixed
+    for sess, (use, why) in mp.DECIDED.items():
+        cutout = any(mp._norm(sess) == mp._norm(ntpath.basename(p.rstrip("\\/")))
+                     for p in mixed.CUTOUT_ONLY_SESSIONS)
+        assert use == (mp.CUTOUT if cutout else mp.WHOLE), (
+            f"{sess} is recorded as {use!r} here but mixed.py "
+            f"{'excludes' if cutout else 'includes'} it as whole frames")
+        assert "mixed.py" in why, (
+            f"{sess}'s reason does not say where the decision lives, so "
+            f"nobody can go and change it")
+
+
+# --------------------------------------------------------------------------
 # the frame audit and the report
 
 
