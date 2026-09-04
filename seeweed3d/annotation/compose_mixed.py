@@ -165,7 +165,30 @@ CONTACT_BANDS = {
 
 #: How many weeds per composite. Real mixed frames are not one-weed scenes, and
 #: a model trained only on those learns that a frame contains exactly one.
-WEEDS_PER_IMAGE = (1, 4)
+#:
+#: RAISED FROM (1, 4). A composite carries every onion its background held -
+#: about 18 - so at a mean of 2.5 weeds the built dataset came out 30:1 crop to
+#: weed, and the three thin weed classes could not be measured at all. A mean
+#: of 4 is the cheapest lever on that ratio; N_IMAGES is the other, and the
+#: last run used 200 of 209 backgrounds it had merely LOOKED at, not all it
+#: has, so more composites are available if this is not enough.
+#:
+#: Do not push this far past what a field looks like. The model learns scene
+#: statistics as well as shapes, and a frame with fifteen weeds among eighteen
+#: onions teaches a weed density that no drive will ever show it.
+WEEDS_PER_IMAGE = (2, 6)
+
+#: MOST cut-outs to hold in the bank, or 0 for every one there is.
+#:
+#: This was buried as a function default of 600 while the two source drives
+#: hold about 3,300 annotated instances - so five sixths of the hand-drawn
+#: weeds in the project were being thrown away before compositing started, by
+#: a number nobody could see. It belongs here with the rest of the knobs.
+#:
+#: A bigger bank is the second half of the reuse fix: cut-outs are drawn
+#: without replacement, so reuse only begins once the pastes outnumber the
+#: bank. With 800 pastes and a bank of 3,300, it never does.
+BANK_MAX = 0
 
 #: A pasted weed may hide at most this fraction of an onion instance. Past it
 #: the onion becomes a sliver the annotation cannot honestly describe, and the
@@ -611,10 +634,17 @@ def reuse_note(records, bank_size=None):
               "the frame-block",
               "      split does not know that - so the same plant can sit in "
               "train and in val,",
-              "      where it measures memorisation. Its 'source_instance' "
-              "attribute is in the",
-              "      annotations; split on that, or raise the bank cap, before "
-              "quoting a weed score."]
+              "      where it measures memorisation. Cut-outs are drawn without "
+              "replacement, so",
+              "      this means the pastes OUTNUMBERED THE BANK: raise "
+              "BANK_MAX, lower",
+              "      WEEDS_PER_IMAGE, or split on the 'source_instance' "
+              "attribute in the",
+              "      annotations before quoting a weed score."]
+    else:
+        L += ["  [i] every paste is a different hand-drawn plant, so no weed "
+              "can appear on",
+              "      both sides of a split."]
     return L
 
 
@@ -711,12 +741,16 @@ def _find_image(stem, roots):
     return None
 
 
-def load_bank(sources, include_frames="", max_instances=600, rng=None):
+def load_bank(sources, include_frames="", max_instances=BANK_MAX, rng=None):
     """Hand-drawn weed cut-outs: RGB, mask, class, attributes and LEP.
 
     Read through load_datumaro rather than by re-parsing, so a cut-out carries
     exactly the attributes and the mask-to-LEP link the annotator produced -
-    including the contract fields the dataset build will later check."""
+    including the contract fields the dataset build will later check.
+
+    max_instances of 0 keeps every one. It used to default to 600 with the two
+    source drives holding some 3,300 between them, which discarded five sixths
+    of the project's hand-drawn weeds before compositing began."""
     import cv2
     from training import prepare_dataset as pdz
     from training import datumaro_multitask as dmm
@@ -768,9 +802,43 @@ def load_bank(sources, include_frames="", max_instances=600, rng=None):
                         "lep": lep,
                         "source": f"{rec.session_id}/{rec.item_id}",
                     })
-    if rng and len(bank) > max_instances:
+    if rng and max_instances and len(bank) > max_instances:
         bank = rng.sample(bank, max_instances)
     return bank
+
+
+class CutoutDrawer:
+    """Draws every hand-drawn plant once before it draws any of them twice.
+
+    rng.choice over the bank samples WITH REPLACEMENT, so 506 pastes were about
+    340 distinct plants and roughly 120 of them appeared in several composites -
+    the same pixels, moved and rotated. Frame-block splitting cannot see that:
+    it separates by frame index, and composites have no video order, so the
+    duplicates scattered at random across train, val and test and a memorised
+    weed became part of what the model was scored on.
+
+    Sampling without replacement removes it outright rather than making it less
+    likely, which is what a bigger bank alone would do. Reuse begins only when
+    the pastes outnumber the bank, and `cycles` counts how often that happened
+    so the run can say so instead of the next tool discovering it."""
+
+    def __init__(self, bank, rng):
+        self._bank = list(bank)
+        self._rng = rng
+        self._pool = []
+        self.cycles = 0
+
+    def __len__(self):
+        return len(self._bank)
+
+    def draw(self):
+        if not self._pool:
+            if not self._bank:
+                raise IndexError("the cut-out bank is empty")
+            self._pool = list(self._bank)
+            self._rng.shuffle(self._pool)
+            self.cycles += 1
+        return self._pool.pop()
 
 
 def _mask_of(inst, h, w):
@@ -804,8 +872,13 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
             cv2.Sobel(dist, cv2.CV_32F, 1, 0, ksize=3))
     placed, records = [], []
 
+    #: A bare list still works and draws without replacement WITHIN the frame;
+    #: only a drawer shared across frames can promise it for the whole run, and
+    #: main() makes exactly one.
+    drawer = cutouts if hasattr(cutouts, "draw") else CutoutDrawer(cutouts, rng)
+
     for band in bands_wanted:
-        cut = rng.choice(cutouts)
+        cut = drawer.draw()
         scale = rng.uniform(*c.get("scale_jitter", SCALE_JITTER))
         rot = rng.uniform(-c.get("rotation_deg", ROTATION_DEG),
                           c.get("rotation_deg", ROTATION_DEG))
@@ -902,6 +975,10 @@ def main():
         by_class[b["class_name"]] = by_class.get(b["class_name"], 0) + 1
     print(f"  {len(bank)} cut-out(s): " +
           ", ".join(f"{k} {v}" for k, v in sorted(by_class.items())))
+    #: ONE drawer for the whole run. Per-frame drawers would each start a fresh
+    #: pool, which promises no repeat within a composite and nothing at all
+    #: across them - and across them is where a split can be crossed.
+    drawer = CutoutDrawer(bank, rng)
 
     backgrounds = []
     for root in ONION_BACKGROUNDS:
@@ -953,7 +1030,7 @@ def main():
         want = [plan[(pi + i) % len(plan)] for i in range(k)]
         pi += k
         image, instances, records = compose_one(
-            bgr, onion_masks, bank, want, rng)
+            bgr, onion_masks, drawer, want, rng)
         kept_records = [r for r in records if r.get("band")]
         for r in records:
             if not r.get("band"):
