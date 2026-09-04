@@ -233,6 +233,28 @@ background held — about 18 — so a low weed count is what made the built data
 past what a field looks like; the model learns scene statistics as well as
 shapes.
 
+### Measuring on a drive too dirty to train on
+
+The first mixed run reported `small-weed recall (<=1500 px): - over 0
+instances` while **63% of the composites it trained on are under that
+threshold**. The case a laser weeder most needs was taught and never scored.
+
+A drive too dirty to *train* on whole is not too dirty to *measure* on. A
+missed annotation makes a correct detection look like a false positive, so it
+**understates** precision — the safe direction for a number that doesn't exist
+at all. It cannot inflate a score.
+
+`missed_plants` prints the cleanest available block of a cut-out drive, and the
+matching cut-out spec, as two lines to copy — into `mixed.WEED_TEST_FRAMES` and
+`compose_mixed.SOURCE_FRAMES` respectively. Two rules, both enforced by tests:
+
+1. **The block is contiguous.** These drives are video, so a weed in one frame
+   is the same plant in the next; scattered test frames sit among the frames
+   feeding the cut-out bank.
+2. **A buffer separates the block from the bank.** Disjoint is not enough — the
+   frame next to a test frame holds the same plant, so the score would be of
+   memorisation.
+
 ### Looking at what came out
 
 `compose_mixed` writes RGB and Datumaro, no pictures. To see a finished run's

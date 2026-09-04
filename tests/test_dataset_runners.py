@@ -488,8 +488,17 @@ def test_the_mixed_holdout_names_sessions_the_build_can_produce():
 # copies of the same plant on both sides of a split.
 # --------------------------------------------------------------------------- #
 def test_a_cutout_only_drive_is_not_also_a_whole_frame_source():
+    """The one allowed exception is a drive whose TEST BLOCK is pinned - and
+    even then INCLUDE_FRAMES must hold it to that block, or the whole drive
+    walks back in through the exception."""
     from training.datasets import mixed
+    spec = mixed.CONFIG.get("INCLUDE_FRAMES") or ""
     for p in mixed.CUTOUT_ONLY_SESSIONS:
+        if p in mixed._TEST_ROOTS:
+            assert mixed.WEED_TEST_FRAMES in spec
+            assert f"{mixed.WEED_TEST_SESSION}:*" not in spec, (
+                "the test block became the whole drive")
+            continue
         assert p not in mixed.SOURCES_ROOTS, (
             f"{p} is listed as cut-out-only but still supplies whole frames. "
             f"Its unlabelled plants would train as background, which is the "
@@ -507,6 +516,8 @@ def test_a_cutout_only_drive_is_not_named_in_include_frames():
     spec = mixed.CONFIG.get("INCLUDE_FRAMES") or ""
     for p in mixed.CUTOUT_ONLY_SESSIONS:
         sid = dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
+        if sid == mixed.WEED_TEST_SESSION:
+            continue
         assert sid not in spec, f"{sid} is cut-out-only but named in INCLUDE_FRAMES"
 
 
@@ -621,3 +632,75 @@ def test_the_composite_run_trains_only():
     if not mixed.SYNTH_SESSION:
         pytest.skip("no composite run configured")
     assert mixed.SYNTH_SESSION in (mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])
+
+
+# --------------------------------------------------------------------------- #
+# A cut-out drive can give up a block of frames to MEASURE on. The block and
+# the cut-out bank must not touch: these drives are video, so a weed in one
+# frame is the same plant in the next, and a bank frame beside a test frame
+# means the model is scored on a plant it trained on.
+# --------------------------------------------------------------------------- #
+def _positions(spec, session):
+    from training.prepare_dataset import parse_frame_spec
+    pos, _ = parse_frame_spec(spec).get(session, (set(), []))
+    return set(pos)
+
+
+def test_the_weed_test_block_is_not_in_the_cutout_bank():
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    if not mixed.WEED_TEST_FRAMES:
+        pytest.skip("no weed test block pinned")
+    sess = mixed.WEED_TEST_SESSION
+    test = _positions(mixed.WEED_TEST_FRAMES, sess)
+    bank = _positions(cm.SOURCE_FRAMES, sess)
+    assert test, f"{mixed.WEED_TEST_FRAMES} selects no positions"
+    assert not (test & bank), (
+        f"frames {sorted(test & bank)} of {sess} are both measured on and cut "
+        f"up into the training bank")
+
+
+def test_a_buffer_separates_the_test_block_from_the_bank():
+    """Adjacent frames of a drive are the same ground. Disjoint is not enough:
+    the frame next to a test frame holds the same plant."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    from annotation.missed_plants import TEST_BUFFER
+    if not mixed.WEED_TEST_FRAMES:
+        pytest.skip("no weed test block pinned")
+    sess = mixed.WEED_TEST_SESSION
+    test = _positions(mixed.WEED_TEST_FRAMES, sess)
+    bank = _positions(cm.SOURCE_FRAMES, sess)
+    if not bank:
+        return
+    gap = min(abs(t - b) for t in test for b in bank)
+    assert gap > TEST_BUFFER, (
+        f"the nearest bank frame is {gap} frame(s) from the test block; "
+        f"{TEST_BUFFER} are needed")
+
+
+def test_the_weed_test_block_is_contiguous():
+    from training.datasets import mixed
+    if not mixed.WEED_TEST_FRAMES:
+        pytest.skip("no weed test block pinned")
+    pos = sorted(_positions(mixed.WEED_TEST_FRAMES, mixed.WEED_TEST_SESSION))
+    assert pos == list(range(pos[0], pos[-1] + 1)), (
+        "a scattered test set sits among the bank frames, and video frames "
+        "either side of it hold the same plants")
+
+
+def test_the_weed_test_block_goes_to_test_and_nowhere_else():
+    from training.datasets import mixed
+    if not mixed.WEED_TEST_FRAMES:
+        pytest.skip("no weed test block pinned")
+    assert mixed.WEED_TEST_SESSION in mixed.HOLDOUT_TEST
+    assert mixed.WEED_TEST_SESSION not in (
+        mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])
+
+
+def test_pinning_nothing_leaves_the_cutout_drives_fully_out():
+    from training.datasets import mixed
+    if mixed.WEED_TEST_FRAMES:
+        pytest.skip("a weed test block is pinned")
+    assert mixed._TEST_ROOTS == []
+    assert mixed.HOLDOUT_TEST == []
