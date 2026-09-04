@@ -606,17 +606,19 @@ def summarise(records):
 
 
 def reuse_note(records, bank_size=None):
-    """How many DISTINCT hand-drawn plants those pastes actually are.
+    """How much of this set is genuinely different plants, at two granularities.
 
-    Cut-outs are drawn with replacement, so 506 pastes is not 506 plants. The
-    duplicates are the same pixels rotated and moved, and a frame-block split
-    scatters them at random across train, val and test - so a weed the model
-    memorised in training can be most of what it is scored on. Nothing else in
-    the pipeline can see this: the split reasons about frame INDEX, and a
-    composite set has no video order for an index to mean anything.
+    CUT-OUTS is the strict one: the same cut-out pasted twice is the same
+    pixels, moved and rotated. Drawing without replacement holds it at one
+    each, and repeats mean only that the pastes outnumbered the bank.
 
-    Reported here because this is where it is cheap to fix - a bigger bank, or
-    fewer pastes, before 200 frames exist and get built into a dataset."""
+    SOURCE FRAMES is the honest one, and it is always the smaller number. The
+    weed drives are VIDEO: consecutive frames show the same ground, so one
+    physical weed becomes a fresh instance in every frame it appears in, and a
+    bank of 3,842 cut-outs drawn from 131 frames is nothing like 3,842 plants.
+    No id in this pipeline can tell which instances are the same plant, so the
+    frame count is the closest available bound - and the true number of plants
+    is below it, not above."""
     srcs = [r.get("source") for r in records if r.get("source")]
     if not srcs:
         return []
@@ -625,10 +627,16 @@ def reuse_note(records, bank_size=None):
     repeated = sum(1 for n in counts.values() if n > 1)
     most = max(counts.values())
     L = ["", f"  Cut-out reuse: {len(srcs)} paste(s) from {len(uniq)} distinct "
-             f"hand-drawn plant(s)"
+             f"cut-out(s)"
              + (f" (bank held {bank_size})" if bank_size else ""),
-         f"    {repeated} plant(s) pasted more than once; the most-reused "
+         f"    {repeated} cut-out(s) pasted more than once; the most-reused "
          f"appears {most} time(s)"]
+    frames = {r.get("source_frame") for r in records if r.get("source_frame")}
+    if frames:
+        L += [f"    drawn from {len(frames)} source frame(s) of video, so the "
+              f"number of DISTINCT",
+              f"    PLANTS is below that - one weed recurs in every frame it "
+              f"was driven past."]
     if repeated:
         L += ["  [!] a reused cut-out is the SAME PIXELS in several frames, and "
               "the frame-block",
@@ -642,9 +650,11 @@ def reuse_note(records, bank_size=None):
               "attribute in the",
               "      annotations before quoting a weed score."]
     else:
-        L += ["  [i] every paste is a different hand-drawn plant, so no weed "
-              "can appear on",
-              "      both sides of a split."]
+        L += ["  [i] every paste is a different cut-out, so no weed's exact "
+              "pixels appear on",
+              "      both sides of a split. Plants recurring across source "
+              "frames still can -",
+              "      which is one more reason never to validate on these."]
     return L
 
 
@@ -782,7 +792,7 @@ def load_bank(sources, include_frames="", max_instances=BANK_MAX, rng=None):
                 if bgr is None:
                     continue
                 H, W = bgr.shape[:2]
-                for inst in rec.instances:
+                for i, inst in enumerate(rec.instances):
                     if inst.class_name == CROP_CLASS:
                         continue
                     m = _mask_of(inst, H, W)
@@ -800,7 +810,13 @@ def load_bank(sources, include_frames="", max_instances=BANK_MAX, rng=None):
                         "class_name": inst.class_name,
                         "attributes": dict(inst.attributes or {}),
                         "lep": lep,
-                        "source": f"{rec.session_id}/{rec.item_id}",
+                        #: THE INSTANCE, not the frame. Without the index
+                        #: every weed in one source frame shared an id, so
+                        #: the reuse report counted source FRAMES and read
+                        #: 794 pastes from 131 plants on a run where every
+                        #: paste really was a different cut-out.
+                        "source": f"{rec.session_id}/{rec.item_id}#{i}",
+                        "source_frame": f"{rec.session_id}/{rec.item_id}",
                     })
     if rng and max_instances and len(bank) > max_instances:
         bank = rng.sample(bank, max_instances)
@@ -932,7 +948,8 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
                            (lep_t[0] + left, lep_t[1] + top)})
             records.append({"band": band, "distance_px": round(achieved, 2),
                             "class_name": cut["class_name"],
-                            "in_front": bool(front), "source": cut["source"]})
+                            "in_front": bool(front), "source": cut["source"],
+                            "source_frame": cut.get("source_frame")})
             break
         else:
             records.append({"band": None,

@@ -280,6 +280,22 @@ CONFIG = {
     # the two can differ, and a hint that matches nothing does nothing.
     "SCENE_HINTS": {},
 
+    # SESSIONS THAT MUST NEVER REACH VAL OR TEST, whatever their length.
+    #
+    # SYNTHETIC COMPOSITES, above all. A score computed on a composite measures
+    # the generator's blind spots and not the model: its pasted weeds come from
+    # drives that also train, its backgrounds were screened by the same
+    # vegetation prior the model is being asked to beat, and its contact was
+    # arranged rather than observed. Every document in this project says never
+    # to validate on them - this is where that becomes true rather than
+    # advisory, because the block splitter will otherwise put a share of every
+    # session into val exactly as it is designed to.
+    #
+    # THE COST IS REAL AND WORTH SAYING: whatever is pinned here stops
+    # contributing to the measurement, so if it holds most of a class, that
+    # class becomes unmeasurable. The build reports which classes those are.
+    "TRAIN_ONLY_SESSIONS": [],
+
     # -- How the split is made -------------------------------------------------
     # "auto"        try whole sessions; fall back to frame blocks when that is
     #               impossible (one session, or a class living only in a
@@ -458,6 +474,7 @@ def main(cfg=None):
         holdout_val=c.get("HOLDOUT_VAL_SESSIONS") or (),
         stratify_by_scene=c.get("STRATIFY_BY_SCENE", True),
         scene_hints=c.get("SCENE_HINTS") or {},
+        train_only_sessions=c.get("TRAIN_ONLY_SESSIONS") or (),
     )
     print("\nNext: edit seeweed3d/training/train_model.py and run it.\n")
 

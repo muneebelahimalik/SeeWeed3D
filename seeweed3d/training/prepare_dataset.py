@@ -646,7 +646,7 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
           include_frames=None, exclude_frames=None, stratify_by_scene=True,
           scene_hints=None,
           split_mode="auto", blocks_per_session=1,
-          split_granularity="auto"):
+          split_granularity="auto", train_only_sessions=()):
     """Everything after out_root is keyword-only on purpose: a positional
     fraction silently landing in the `contract` slot produced a confusing
     AttributeError deep inside validation rather than an error at the call.
@@ -1252,7 +1252,8 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         frame_split = sp.assign_frame_blocks_per_session(
             by_session, val_fraction, test_fraction, gap_frames=gap_frames,
             n_blocks=blocks_per_session, seed=seed,
-            class_counts_by_frame=counts_by_frame)
+            class_counts_by_frame=counts_by_frame,
+            train_only=train_only_sessions)
         split_map = {"train": [i.session_id for i in infos
                                if i.session_id not in pinned],
                      "val": [s for s, k in pinned.items() if k == "val"],
@@ -1279,9 +1280,15 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
         if pinned:
             print(f"      Held out WHOLE, not block-split: " + ", ".join(
                 f"{s} -> {k}" for s, k in sorted(pinned.items())))
-        if frame_split.get("_train_only_sessions"):
+        pinned_train = set(frame_split.get("_train_only_pinned") or ())
+        if pinned_train:
+            print(f"      TRAIN ONLY, never val or test: "
+                  f"{', '.join(sorted(pinned_train))}")
+        short = [s for s in (frame_split.get("_train_only_sessions") or ())
+                 if s not in pinned_train]
+        if short:
             print(f"      Too short to block-split, so wholly in train: "
-                  f"{', '.join(frame_split['_train_only_sessions'])}")
+                  f"{', '.join(short)}")
 
         # The gap is counted in POOL frames, and the pool is usually strided -
         # so the same number can mean 2 video frames or 50 depending on how

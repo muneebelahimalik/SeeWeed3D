@@ -547,13 +547,13 @@ def _recs(sources):
 
 def test_the_report_says_how_many_distinct_plants_the_pastes_are():
     txt = "\n".join(cm.reuse_note(_recs(["a", "b", "a", "c"]), bank_size=9))
-    assert "4 paste(s) from 3 distinct" in txt
+    assert "4 paste(s) from 3 distinct cut-out(s)" in txt
     assert "bank held 9" in txt
 
 
 def test_a_reused_cutout_is_called_out_as_measuring_memorisation():
     txt = "\n".join(cm.reuse_note(_recs(["a", "a", "b"])))
-    assert "1 plant(s) pasted more than once" in txt
+    assert "1 cut-out(s) pasted more than once" in txt
     assert "appears 2 time(s)" in txt
     assert "memorisation" in txt and "source_instance" in txt
 
@@ -666,7 +666,10 @@ def test_a_plain_list_still_works_for_callers_that_pass_one():
 
 def test_no_reuse_is_stated_positively():
     txt = "\n".join(cm.reuse_note(_recs(["a", "b", "c"])))
-    assert "every paste is a different hand-drawn plant" in txt
+    assert "every paste is a different cut-out" in txt
+    assert "Plants recurring across source frames still can" in txt, (
+        "the positive line must not overstate: distinct cut-outs is not "
+        "distinct plants when the source is video")
 
 
 def test_reuse_advice_points_at_the_two_knobs_that_cause_it():
@@ -678,3 +681,28 @@ def test_the_bank_cap_of_zero_keeps_every_cutout():
     """It was a function default of 600 against ~3,300 hand-drawn instances,
     discarding five sixths of the project's weeds where nobody could see it."""
     assert cm.BANK_MAX == 0 or cm.BANK_MAX >= 3000
+
+
+def test_a_cutout_id_names_the_instance_not_just_its_frame():
+    """Every weed in one source frame shared an id, so the reuse report counted
+    source FRAMES: it read '794 pastes from 131 plants' on a run where the
+    drawer had in fact handed out 794 different cut-outs."""
+    ids = {f"vid2/f{f}#{i}" for f in range(3) for i in range(5)}
+    assert len(ids) == 15
+
+
+def test_the_report_bounds_distinct_plants_by_the_source_frames():
+    """Cut-out count is an upper bound on distinct plants and a loose one: the
+    weed drives are video, so one weed recurs in every frame it was driven
+    past. The honest smaller number belongs next to it."""
+    recs = [{"band": "near", "source": f"vid2/f{i // 6}#{i}",
+             "source_frame": f"vid2/f{i // 6}"} for i in range(30)]
+    txt = "\n".join(cm.reuse_note(recs, 3842))
+    assert "30 paste(s) from 30 distinct cut-out(s)" in txt
+    assert "5 source frame(s)" in txt
+    assert "DISTINCT" in txt and "below that" in txt
+
+
+def test_the_frame_bound_is_omitted_when_nothing_records_one():
+    txt = "\n".join(cm.reuse_note([{"band": "near", "source": "a"}]))
+    assert "source frame(s)" not in txt

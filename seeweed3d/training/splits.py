@@ -397,7 +397,8 @@ MIN_FRAMES_FOR_BLOCKS = 5
 def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
                                     test_fraction=0.2, gap_frames=2,
                                     n_blocks=1, seed=1234, rotate=True,
-                                    class_counts_by_frame=None):
+                                    class_counts_by_frame=None,
+                                    train_only=()):
     """Contiguous frame blocks WITHIN each session, merged across sessions.
 
     USE WHEN A SESSION-LEVEL SPLIT IS IMPOSSIBLE OR HARMFUL. Splitting by whole
@@ -418,12 +419,26 @@ def assign_frame_blocks_per_session(frame_ids_by_session, val_fraction=0.2,
     contiguous split has left, and without it a class that clusters along the
     drive lands wherever the hash happens to put it.
 
+    train_only names sessions that must never reach val or test whatever their
+    length - synthetic composites, above all. A score computed on a composite
+    measures the generator's blind spots, not the model: the pasted weeds came
+    from drives that also train, the backgrounds were screened by the same
+    prior the model is being asked to beat, and the contact was arranged rather
+    than observed. Every document in this project says never to validate on
+    them, and until this argument existed the block splitter quietly did.
+
     Returns {split: [frame_id]} plus `_train_only_sessions`: sessions too short
-    to block-split, which went wholly to train."""
+    to block-split or pinned by train_only, which went wholly to train."""
     out = {"train": [], "val": [], "test": [], "_dropped_gap": [],
-           "_train_only_sessions": []}
+           "_train_only_sessions": [], "_train_only_pinned": []}
+    train_only = set(train_only or ())
     for sess in sorted(frame_ids_by_session):
         ids = list(frame_ids_by_session[sess])
+        if sess in train_only:
+            out["train"].extend(ids)
+            out["_train_only_sessions"].append(sess)
+            out["_train_only_pinned"].append(sess)
+            continue
         if len(ids) < MIN_FRAMES_FOR_BLOCKS:
             out["train"].extend(ids)
             out["_train_only_sessions"].append(sess)
