@@ -74,6 +74,20 @@ CONFIG = {
     "DATASET": "",
     "SPLIT": "test",
 
+    # With IMAGES (not DATASET): drop the frames this build already used, so
+    # what is left is the same drive on the same day under the same light -
+    # minus everything the model has seen. Set to a build's OUT_DIR, or "" off.
+    #
+    # An onion drive holds its training frames and its untouched frames in one
+    # rgb/ folder, so predictions on a session folder are mostly predictions on
+    # training data - which shows you what the model memorised.
+    #
+    # EXCLUDE_SPLITS defaults to train alone. val and test are held out too and
+    # looking at them is legitimate, but they are the frames the SCORE comes
+    # from, and a decision taken after staring at them has used them for tuning.
+    "EXCLUDE_BUILT": "",
+    "EXCLUDE_SPLITS": ("train",),
+
     # 0 = every frame found. Otherwise the first N, which is usually what you
     # want the first time you point this at 4000 frames.
     "LIMIT": 20,
@@ -247,6 +261,54 @@ def split_images(dataset_dir, split, limit=0, stride=1, images_root=""):
         except FileNotFoundError as e:
             raise SystemExit(f"ERROR: {e}")
     return out
+
+
+def _built_paths(dataset_dir, splits, images_root=""):
+    """Absolute paths of every frame of a build that is in one of `splits`.
+
+    Resolved rather than string-matched: the manifest stores paths relative to
+    an images_root, a merged build has several, and a path that compares
+    unequal because one side has a drive letter would silently exclude
+    nothing."""
+    from training.seg_dataset import resolve_image
+
+    man = Path(dataset_dir) / "seg_manifest.json"
+    if not man.exists():
+        raise SystemExit(f"ERROR: {man} not found.")
+    doc = json.loads(man.read_text(encoding="utf-8"))
+    root = images_root or doc.get("images_root") or "."
+    want = set(splits)
+    out = set()
+    for r in doc.get("frames", []):
+        if r.get("split") not in want:
+            continue
+        try:
+            out.add(Path(resolve_image(r["image_path"], root,
+                                       r.get("session_id"),
+                                       r.get("export_dir"))).resolve())
+        except FileNotFoundError:
+            # The annotation outlived the image. It cannot be in the folder we
+            # are filtering either, so there is nothing to exclude.
+            continue
+    return out
+
+
+def exclude_built(frames, dataset_dir, splits=("train",), images_root=""):
+    """Drop frames a build already used, so what is left was never seen.
+
+    THE QUESTION THIS ANSWERS is the one a folder cannot: an onion drive holds
+    the frames that trained the model and the frames nobody touched in the same
+    rgb/, and eyeballing predictions on the first kind tells you what the model
+    memorised. Excluding a build's own splits leaves the frames it has never
+    been shown, in the same field, on the same day, under the same light.
+
+    Defaults to `train` alone. val and test are held-out too, and looking at
+    them here is legitimate - but they are the frames the SCORE is computed on,
+    and a decision taken after staring at them has quietly used them for
+    tuning."""
+    used = _built_paths(dataset_dir, splits, images_root)
+    kept = [f for f in frames if Path(f).resolve() not in used]
+    return kept, len(frames) - len(kept)
 
 
 def _session_of(path):
@@ -424,8 +486,23 @@ def predict(cfg=None):
         print(f"  {len(frames)} frame(s) from split "
               f"{c.get('SPLIT', 'test')!r} of {c['DATASET']}")
     else:
-        frames = find_images(c["IMAGES"], c.get("LIMIT", 0),
-                             c.get("STRIDE", 1))
+        # Filter BEFORE limit/stride, or "the first 20" is the first 20 of a
+        # list that is mostly training frames and the exclusion buys nothing.
+        frames = find_images(c["IMAGES"])
+        if c.get("EXCLUDE_BUILT"):
+            frames, n = exclude_built(frames, c["EXCLUDE_BUILT"],
+                                      c.get("EXCLUDE_SPLITS", ("train",)),
+                                      c.get("IMAGES_ROOT", ""))
+            print(f"  excluded {n} frame(s) already in "
+                  f"{'/'.join(c.get('EXCLUDE_SPLITS', ('train',)))} of "
+                  f"{c['EXCLUDE_BUILT']}")
+            if not frames:
+                raise SystemExit(
+                    "ERROR: every frame under IMAGES was used by that build, "
+                    "so there is nothing here the model has not seen.")
+        frames = frames[::max(1, int(c.get("STRIDE", 1)))]
+        if c.get("LIMIT"):
+            frames = frames[:int(c["LIMIT"])]
 
     ckpt = Path(c["CHECKPOINT"])
     if not ckpt.exists():
@@ -714,6 +791,8 @@ def main(argv=None):
                                      "runs on that split's frames instead of a "
                                      "folder")
     p.add_argument("--split", choices=["train", "val", "test"])
+    p.add_argument("--exclude-built", metavar="DATASET_DIR",
+                   help="with --images, skip frames this build already used")
     p.add_argument("--checkpoint")
     p.add_argument("--out")
     p.add_argument("--backend", choices=["maskrcnn", "rfdetr"])
@@ -729,6 +808,7 @@ def main(argv=None):
     c = dict(CONFIG)
     for flag, key in (("images", "IMAGES"), ("checkpoint", "CHECKPOINT"),
                       ("dataset", "DATASET"), ("split", "SPLIT"),
+                      ("exclude_built", "EXCLUDE_BUILT"),
                       ("out", "OUT_DIR"), ("backend", "BACKEND"),
                       ("mode", "MODE"), ("device", "DEVICE"),
                       ("conf", "CONF"), ("limit", "LIMIT"),

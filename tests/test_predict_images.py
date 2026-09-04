@@ -321,3 +321,67 @@ def test_dataset_wins_over_images_so_a_stale_folder_cannot_be_scored(tmp_path):
     import inspect
     src = inspect.getsource(pi.predict)
     assert src.index('c.get("DATASET")') < src.index('find_images(')
+
+
+# --------------------------------------------------------------------------
+# The same drive holds the frames that trained the model and the frames
+# nobody touched, in one rgb/ folder. Predictions on the first kind show you
+# what was memorised.
+# --------------------------------------------------------------------------
+def test_frames_a_build_trained_on_are_dropped(tmp_path):
+    ds = _built(tmp_path, ("train", "train", "val", "test"))
+    all_frames = pi.find_images(tmp_path / "sessions" / "vid1_2026")
+    kept, n = pi.exclude_built(all_frames, ds)
+    assert n == 2
+    assert [p.name for p in kept] == ["vid1_2026_000003.png",
+                                      "vid1_2026_000004.png"]
+
+
+def test_val_and_test_can_be_excluded_too(tmp_path):
+    """Legitimate to look at, but they are the frames the score comes from -
+    a decision taken after staring at them has used them for tuning."""
+    ds = _built(tmp_path, ("train", "train", "val", "test"))
+    all_frames = pi.find_images(tmp_path / "sessions" / "vid1_2026")
+    kept, n = pi.exclude_built(all_frames, ds, ("train", "val", "test"))
+    assert n == 4 and kept == []
+
+
+def test_exclusion_matches_on_resolved_paths(tmp_path):
+    """A relative manifest path against an images_root will not string-match a
+    path found by walking a folder, and a comparison that silently excludes
+    nothing is worse than no filter at all."""
+    ds = _built(tmp_path, ("train", "train", "val", "test"))
+    sess = tmp_path / "sessions" / "vid1_2026"
+    awkward = [str(sess / "rgb" / "vid1_2026_000001.png"),
+               sess / "rgb" / ".." / "rgb" / "vid1_2026_000003.png"]
+    kept, n = pi.exclude_built(awkward, ds)
+    assert n == 1 and len(kept) == 1
+
+
+def test_a_frame_whose_image_is_gone_excludes_nothing(tmp_path):
+    """An annotation can outlive its image. It cannot be in the folder being
+    filtered either, so it must not raise."""
+    ds = _built(tmp_path, ("train", "test"))
+    (tmp_path / "sessions" / "vid1_2026" / "rgb"
+     / "vid1_2026_000001.png").unlink()
+    kept, n = pi.exclude_built(
+        pi.find_images(tmp_path / "sessions" / "vid1_2026"), ds)
+    assert n == 0 and len(kept) == 1
+
+
+def test_excluding_everything_says_so_rather_than_running_on_nothing(tmp_path):
+    ds = _built(tmp_path, ("train", "train", "train", "train"))
+    kept, n = pi.exclude_built(
+        pi.find_images(tmp_path / "sessions" / "vid1_2026"), ds)
+    assert kept == [] and n == 4
+    src = __import__("inspect").getsource(pi.predict)
+    assert "has not seen" in src, (
+        "an empty frame list must raise, not write an empty folder of "
+        "overlays that reads as 'the model found no weeds'")
+
+
+def test_exclusion_happens_before_limit_and_stride(tmp_path):
+    """Otherwise 'the first 20' is the first 20 of a list that is mostly
+    training frames, and the filter buys nothing."""
+    src = __import__("inspect").getsource(pi.predict)
+    assert src.index("exclude_built(") < src.index('frames[::max(1,')
