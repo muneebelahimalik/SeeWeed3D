@@ -452,3 +452,84 @@ def test_a_placement_a_few_pixels_from_an_onion_is_touching():
     d = cm.contact_distance(weed, onion)
     assert 0 <= d < 4
     assert cm.band_of(d) == "touching"
+
+
+# --------------------------------------------------------------------------
+# The hit rate is the point: a crown anchored at a band pixel does not put the
+# PLANT in the band, and rejecting on that alone threw away most attempts.
+# --------------------------------------------------------------------------
+def _dist_and_grad(union):
+    import cv2
+    d = cv2.distanceTransform((~np.asarray(union, bool)).astype(np.uint8),
+                              cv2.DIST_L2, 3)
+    return d, (cv2.Sobel(d, cv2.CV_32F, 0, 1, ksize=3),
+               cv2.Sobel(d, cv2.CV_32F, 1, 0, ksize=3))
+
+
+def test_refine_pulls_a_far_placement_into_touching():
+    union = _box(40, 40, 40, 40)
+    d, g = _dist_and_grad(union)
+    weed = np.ones((10, 10), bool)
+    far = (45, 95)                              # ~15 px clear of the onion
+    assert cm.band_of(cm.contact_distance(
+        cm.placed_mask(weed, far, union.shape), union)) != "touching"
+    spot = cm.refine_offset(union, d, g, weed, far, "touching")
+    assert spot is not None, "the nudge should reach a 4px-wide band"
+    got = cm.contact_distance(cm.placed_mask(weed, spot, union.shape), union)
+    assert cm.band_of(got) == "touching"
+
+
+def test_refine_pushes_an_overlapping_placement_out_to_touching():
+    union = _box(40, 40, 40, 40)
+    d, g = _dist_and_grad(union)
+    weed = np.ones((10, 10), bool)
+    inside = (50, 50)
+    assert cm.contact_distance(
+        cm.placed_mask(weed, inside, union.shape), union) < 0
+    spot = cm.refine_offset(union, d, g, weed, inside, "touching")
+    if spot is not None:
+        got = cm.contact_distance(
+            cm.placed_mask(weed, spot, union.shape), union)
+        assert cm.band_of(got) == "touching"
+
+
+def test_refine_returns_none_rather_than_a_wrong_band():
+    """A placement that cannot reach its band must be rejected, not silently
+    recorded under a band it does not occupy - that would corrupt the strata
+    the module exists to control."""
+    union = _box(40, 40, 40, 40)
+    d, g = _dist_and_grad(union)
+    weed = np.ones((10, 10), bool)
+    spot = cm.refine_offset(union, d, g, weed, (45, 95), "isolated", steps=1)
+    if spot is not None:
+        got = cm.contact_distance(
+            cm.placed_mask(weed, spot, union.shape), union)
+        assert cm.band_of(got) == "isolated"
+
+
+def test_refine_keeps_a_placement_that_is_already_right():
+    union = _box(40, 40, 40, 40)
+    d, g = _dist_and_grad(union)
+    weed = np.ones((8, 8), bool)
+    good = (45, 82)                             # 2 px clear
+    assert cm.band_of(cm.contact_distance(
+        cm.placed_mask(weed, good, union.shape), union)) == "touching"
+    assert cm.refine_offset(union, d, g, weed, good, "touching") == good
+
+
+def test_band_target_aims_inside_a_band_not_at_its_edge():
+    """Aiming at an edge and landing a pixel the wrong side is a rejection."""
+    for name, (lo, hi) in cm.CONTACT_BANDS.items():
+        t = cm.band_target(name)
+        assert lo <= t < hi, f"{name}: {t} outside [{lo}, {hi})"
+
+
+def test_placed_mask_matches_what_paste_places():
+    """The two must agree, or a placement is judged on one geometry and
+    rendered with another."""
+    bg = np.zeros((H, W, 3), np.uint8)
+    cut = np.full((12, 12, 3), 200, np.uint8)
+    m = np.ones((12, 12), bool)
+    for spot in ((30, 40), (-5, -5), (H - 4, W - 4)):
+        _, pasted = cm.paste(bg, cut, m, spot, feather=0, illumination=0)
+        assert (cm.placed_mask(m, spot, (H, W)) == pasted).all(), spot
