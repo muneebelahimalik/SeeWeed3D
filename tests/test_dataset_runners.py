@@ -436,13 +436,19 @@ def test_a_second_contact_batch_means_one_of_them_is_held_out():
     With TWO, holding none out is an oversight rather than a trade - there is
     now something to spare, and a crop-safety claim with no ruler behind it is
     the failure this project keeps designing against. This fires the day Batch
-    02 lands, which is the moment the decision should be revisited."""
+    02 lands, which is the moment the decision should be revisited.
+
+    A COMPOSITE RUN DOES NOT COUNT as the second one. Held out, it would
+    measure the compositor - whether pasted weeds get found on the backgrounds
+    the compositor screened - and report it as a crop-safety number for a field
+    nobody drove through. Only observed contact can be that ruler."""
     from training.datasets import mixed
     import ntpath
     import training.datumaro_multitask as dmm
 
     batch_ids = {dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
-                 for p in mixed.MIXED_SESSIONS}
+                 for p in mixed.MIXED_SESSIONS
+                 if not ntpath.basename(p.rstrip("\\/")).startswith("synth_")}
     if len(batch_ids) < 2:
         pytest.skip("one contact batch: training on it is the documented trade")
     assert batch_ids & set(mixed.HOLDOUT_TEST), (
@@ -526,6 +532,72 @@ def test_the_contact_batch_is_not_a_compositing_source():
     for p in mixed.MIXED_SESSIONS:
         assert p not in cm.WEED_SOURCES, f"{p} is a training frame, not a bank"
         assert p not in cm.ONION_BACKGROUNDS
+
+
+# --------------------------------------------------------------------------- #
+# The composite run is named in three places - the source path, INCLUDE_FRAMES
+# and SCENE_HINTS - and they are three DIFFERENT strings for one run. The
+# folder is synth_mixed_<stamp>; the session id the build actually sees comes
+# from the FILENAMES inside it, synth_<stamp>00_*.png. Typing either one in the
+# wrong place fails silently: INCLUDE_FRAMES matches nothing so 200 composites
+# quietly vanish, or SCENE_HINTS names a session that does not exist so the
+# frames train with no scene and the unmeasurable-class warning never fires.
+# --------------------------------------------------------------------------- #
+def test_the_synthetic_session_id_is_what_compose_mixed_writes():
+    """One derivation, owned by the writer. If the build derived its own, the
+    two would agree until the day compose_mixed changed its naming."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    if not mixed.SYNTH_RUN:
+        pytest.skip("no composite run configured")
+    assert mixed.SYNTH_SESSION == cm.session_id_for(mixed.SYNTH_RUN)
+    assert mixed.SYNTH_SESSION != mixed.SYNTH_RUN, (
+        "folder name and session id are the same string - one of them is "
+        "wrong, because the frames inside carry seconds the folder does not")
+
+
+def test_the_composite_run_reaches_all_three_places_it_is_needed():
+    from training.datasets import mixed
+    import ntpath
+    if not mixed.SYNTH_RUN:
+        pytest.skip("no composite run configured")
+
+    path = ntpath.join(mixed.SYNTH_ROOT, mixed.SYNTH_RUN)
+    assert path in mixed.MIXED_SESSIONS, "composite run supplies no frames"
+    assert path in mixed.SOURCES_ROOTS, "composite run is not read by the build"
+
+    spec = mixed.CONFIG.get("INCLUDE_FRAMES") or ""
+    assert f"{mixed.SYNTH_SESSION}:" in spec, (
+        f"{mixed.SYNTH_SESSION} is not in INCLUDE_FRAMES, so every composite "
+        f"is filtered out of a build that still reads the folder")
+    assert mixed.CONFIG["SCENE_HINTS"].get(mixed.SYNTH_SESSION) == "mixed", (
+        f"{mixed.SYNTH_SESSION} has no scene hint - composites hold onions "
+        f"AND weeds, and a split that does not know that cannot warn when one "
+        f"class becomes unmeasurable")
+
+
+def test_no_composite_run_leaves_nothing_dangling():
+    """SYNTH_RUN = "" is the documented way to build without composites. It has
+    to remove the session everywhere at once, or the build refuses on a session
+    named in INCLUDE_FRAMES that no export produces."""
+    from training.datasets import mixed
+    if mixed.SYNTH_RUN:
+        pytest.skip("a composite run is configured")
+    assert mixed.SYNTH_SESSION == ""
+    assert "synth_" not in (mixed.CONFIG.get("INCLUDE_FRAMES") or "")
+    assert not [k for k in mixed.CONFIG["SCENE_HINTS"] if k.startswith("synth_")]
+    assert not [p for p in mixed.MIXED_SESSIONS if "synth" in p]
+
+
+def test_the_composite_run_is_never_a_holdout():
+    """Synthetic frames measure the compositor, not the field. In val or test
+    they would report a crop-safety number for contact nobody observed - and
+    the pasted instances come from drives that also train, so the same plant
+    would sit on both sides of the split."""
+    from training.datasets import mixed
+    for split in (mixed.HOLDOUT_TEST, getattr(mixed, "HOLDOUT_VAL", [])):
+        assert mixed.SYNTH_SESSION not in split or not mixed.SYNTH_SESSION
+        assert not [s for s in split if str(s).startswith("synth_")]
 
 
 def test_overruling_the_audit_on_a_drive_is_written_down():

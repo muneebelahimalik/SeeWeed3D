@@ -204,6 +204,37 @@ Note also that the onion masks these are composited against are SAM prelabels,
 so "distance to crop" is a distance to a machine label — a bound on what a
 contact band means here, not a reason to skip it.
 
+### Wiring a run into the build
+
+Every `compose_mixed.py` run writes a **new stamped folder**, so the mixed
+build never picks "whatever is newest" — that is exactly the drift these
+runners exist to prevent. Point `SYNTH_RUN` in
+`training/datasets/mixed.py` at a run you have **looked at**; `SYNTH_RUN = ""`
+builds without composites.
+
+One constant, because the run has to be named in three places and they are
+**three different strings**:
+
+| where | what it needs | example |
+|---|---|---|
+| `MIXED_SESSIONS` / `SOURCES_ROOTS` | the **folder** | `synth_mixed_20260904_0156` |
+| `INCLUDE_FRAMES` | the **session id** | `synth_20260904_015600` |
+| `SCENE_HINTS` | the same session id → `"mixed"` | |
+
+The session id comes from the **filenames** (`synth_<stamp>00_*.png`), not the
+folder — a session id needs seconds and the folder stamp has none. So
+`SYNTH_SESSION` is derived by `compose_mixed.session_id_for()`, the writer's own
+function, and never typed. Getting it wrong fails *silently*: the wrong string
+in `INCLUDE_FRAMES` matches nothing and 200 composites vanish from the build,
+and in `SCENE_HINTS` it hints a session that does not exist, so the frames train
+with no scene and the unmeasurable-class warning never fires.
+
+Composites are **never** a holdout. Held out, they would measure the compositor
+— whether pasted weeds get found on backgrounds the compositor itself screened
+— and report it as a crop-safety number for contact nobody observed. Worse, the
+instances come from drives that also train, so the same plant would sit on both
+sides of the split.
+
 ### Copy-paste as augmentation is still refused
 
 [Dataset growth](dataset_growth.md) rules copy-paste out of every augmentation
