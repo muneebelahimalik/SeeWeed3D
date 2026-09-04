@@ -58,10 +58,22 @@ from training import pseudo_label as pl  # noqa: E402
 
 #: WHAT TO AUDIT. Session folders (annotations/ + rgb/) or folders whose
 #: children are sessions - the same shapes the dataset builds accept.
+#:
+#: THE COMPOSITE RUN IS AUDITED TOO, and it is the one entry here whose answer
+#: is not already known. compose_mixed.py screens every background so that all
+#: its vegetation is already labelled, and then pastes labelled instances - so
+#: composites SHOULD come back clean. If they do not, either a paste and its
+#: mask disagree, or MIN_BLOB_PX is calling shadow and soil texture a plant at
+#: this resolution. Both are worth finding before 200 frames train.
+#:
+#: It also writes the overlays, which compose_mixed does not: the run's own
+#: report says which contact band each instance achieved, but only a picture
+#: shows a paste seam or a shadow pointing the wrong way.
 SESSIONS = [
     r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
     r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
+    r"E:\Dataset_Vidalia\synthetic\synth_mixed_20260904_0156",
 ]
 
 #: Restrict to the frames a build actually uses, in make_dataset's
@@ -69,6 +81,39 @@ SESSIONS = [
 #: report - and the 251 unreviewed frames of a 326-frame export would drown the
 #: 75 corrected ones this is asking about.
 INCLUDE_FRAMES = "vid3_20260108_110444:1-75"
+
+#: THE TWO WAYS A DRIVE CAN BE USED. This audit recommends one of them; the
+#: dataset builds are where the choice actually gets made.
+WHOLE, CUTOUT = "whole", "cutout"
+USE_PHRASE = {WHOLE: "trains as WHOLE FRAMES",
+              CUTOUT: "used as a CUT-OUT SOURCE only"}
+
+#: DRIVES WHOSE USE IS ALREADY SETTLED, and why. `<session>: (use, reason)`.
+#:
+#: This audit is a heuristic over a colour prior. It cannot tell a seedling
+#: from moss, and it re-runs its opinion from scratch every time - so without
+#: this it goes on recommending against decisions that were made deliberately,
+#: with reasons, months ago. A tool that argues with a settled question every
+#: run teaches the reader to skip the line it prints, and then the one run
+#: where the numbers really did change gets skipped too.
+#:
+#: So a settled drive prints what was decided FIRST, and whether this audit
+#: agrees. The COUNTS ARE STILL SHOWN in full: a drive can get worse after it
+#: was decided, and noticing that is the whole point of running this again.
+#:
+#: Recording a decision here does not make it. Change the use in
+#: training/datasets/mixed.py; this only stops the audit from re-arguing it.
+DECIDED = {
+    "Mix_raj_Batch_01": (
+        WHOLE,
+        "training/datasets/mixed.py, deliberately against this audit - seven "
+        "frames corrected by hand in CVAT several times, and the only observed "
+        "onion-and-weed contact in the project, which a cut-out would destroy"),
+    "vid2_20260108_122731": (
+        CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
+    "vid3_20260108_110444": (
+        CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
+}
 
 #: A frame with more than this many plant-shaped unclaimed blobs is reported.
 #: 0 reports every frame that has any.
@@ -149,34 +194,87 @@ def audit_frame(bgr, claimed, dilate_px=DILATE_PX, min_blob_px=MIN_BLOB_PX,
             "soil_idx": soil_idx}, mask
 
 
-def verdict(per_frame, unsafe=UNSAFE_BLOBS):
+def _norm(name):
+    """A session key that survives the ways one drive gets written down.
+
+    The folder is `Mix_raj_Batch 01`, the session id is `Mix_raj_Batch_01`, and
+    a decision recorded against one of them has to reach the other - a note
+    that silently matches nothing is worse than no note."""
+    return "".join(c for c in str(name).lower() if c.isalnum())
+
+
+def decision_for(session, decided=DECIDED):
+    for k, v in (decided or {}).items():
+        if _norm(k) == _norm(session):
+            return v
+    return None
+
+
+def stale_decisions(audited, decided=DECIDED):
+    """Entries in DECIDED naming drives this run did not audit.
+
+    A decision is about a drive; if the drive is gone from SESSIONS the note is
+    describing something nobody is looking at any more, and it will go on being
+    trusted until somebody checks."""
+    seen = {_norm(s) for s in audited}
+    return [k for k in (decided or {}) if _norm(k) not in seen]
+
+
+def classify(per_frame, unsafe=UNSAFE_BLOBS):
     """What the counts say about how this drive may be used.
 
     The two usable outcomes are 'train on the frames' and 'use it only as a
     cut-out source', and they are decided by the same number - so the number
-    reports the decision rather than leaving it to be inferred."""
+    reports the decision rather than leaving it to be inferred.
+
+    Returns (recommended_use, text). The use is separate from the prose because
+    a drive whose use is already settled needs the two COMPARED, not just
+    printed one after the other."""
     n = len(per_frame)
     if not n:
-        return "No frames were audited."
+        return None, "No frames were audited."
     bad = [k for k, v in per_frame.items() if v["n_missed"] >= unsafe]
     any_missed = [k for k, v in per_frame.items() if v["n_missed"]]
     share = len(bad) / n
     if not any_missed:
-        return ("CLEAN. No frame has a plant-sized patch of vegetation outside "
-                "an annotation, so these frames are safe to train on WHOLE - "
-                "which keeps the real scene context a cut-out would lose. "
-                "Note the prior misses dark and very small seedlings, so open "
-                "a few overlays before treating this as proof.")
+        return WHOLE, (
+            "CLEAN. No frame has a plant-sized patch of vegetation outside "
+            "an annotation, so these frames are safe to train on WHOLE - "
+            "which keeps the real scene context a cut-out would lose. "
+            "Note the prior misses dark and very small seedlings, so open "
+            "a few overlays before treating this as proof.")
     if share < 0.10:
-        return (f"MOSTLY CLEAN. {len(bad)} of {n} frame(s) have {unsafe}+ "
-                f"unlabelled plant-shaped patches. Train on the frames and fix "
-                f"or exclude those few - the listed ones are where to look.")
-    return (f"NOT SAFE AS WHOLE FRAMES. {len(bad)} of {n} frame(s) "
-            f"({share:.0%}) carry {unsafe}+ unlabelled plant-shaped patches, so "
-            f"training on them teaches those plants are soil. Either finish the "
-            f"annotation, or use this drive as a CUT-OUT SOURCE only: "
-            f"compose_mixed.py carries the labelled instances into a screened "
-            f"background and leaves the missed ones behind.")
+        return WHOLE, (
+            f"MOSTLY CLEAN. {len(bad)} of {n} frame(s) have {unsafe}+ "
+            f"unlabelled plant-shaped patches. Train on the frames and fix "
+            f"or exclude those few - the listed ones are where to look.")
+    return CUTOUT, (
+        f"NOT SAFE AS WHOLE FRAMES. {len(bad)} of {n} frame(s) "
+        f"({share:.0%}) carry {unsafe}+ unlabelled plant-shaped patches, so "
+        f"training on them teaches those plants are soil. Either finish the "
+        f"annotation, or use this drive as a CUT-OUT SOURCE only: "
+        f"compose_mixed.py carries the labelled instances into a screened "
+        f"background and leaves the missed ones behind.")
+
+
+def verdict(per_frame, unsafe=UNSAFE_BLOBS, decided=None):
+    """The recommendation, and - where the question is already settled - what
+    was actually decided instead.
+
+    A heuristic that goes on recommending against a decision somebody already
+    made, with reasons, is not being careful; it is training the reader to skip
+    the line. So a decided drive says so FIRST, and the audit's own opinion
+    becomes supporting detail. The counts above it never change: a drive can
+    get worse after it was decided, and that is exactly what this should still
+    be able to show."""
+    use, text = classify(per_frame, unsafe)
+    if not decided or use is None:
+        return text
+    chose, why = decided
+    if chose == use:
+        return f"SETTLED: {USE_PHRASE[chose]} - {why}. This audit agrees: {text}"
+    return (f"SETTLED: {USE_PHRASE[chose]} - {why}.\n"
+            f"    This audit disagrees and is OVERRULED. It would say: {text}")
 
 
 def summarise(per_frame):
@@ -221,7 +319,12 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
                 v = per_frame[k]
                 L.append(f"      {k:<44}{v['n_missed']:>4} patch(es)"
                          f"{v['missed_frac']:>8.0%} of its vegetation")
-        L += [f"    VERDICT: {verdict(per_frame, unsafe)}"]
+        L += [f"    VERDICT: {verdict(per_frame, unsafe, decision_for(sess))}"]
+    for k in stale_decisions(by_session):
+        L += ["", f"  [!] DECIDED names {k!r}, which this run did not audit. "
+                  f"That decision is",
+              "      about a drive nobody is looking at any more - check it is "
+              "still in SESSIONS."]
     L += ["",
           "  [i] MASK TOO BIG is the forgiving half. A polygon around a thin "
           "onion leaf or a",
