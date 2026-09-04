@@ -135,9 +135,52 @@ CUTOUT_ONLY_SESSIONS = [
     r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
 ]
 
+#: A BLOCK OF REAL WEED FRAMES PINNED TO TEST, or "" for none, in the same
+#: `<session>:<a>-<b>` form everything else here takes.
+#:
+#: THE HOLE THIS FILLS. The first mixed run reported
+#:     small-weed recall (<=1500 px):   -   over 0 instances
+#: while 63% of the composites it trained on are under that threshold. The case
+#: a laser weeder most needs was taught and never scored, because the only weed
+#: frames in val came from Mix_raj and they hold no small weeds.
+#:
+#: A drive too dirty to TRAIN on whole is not too dirty to MEASURE on. A missed
+#: annotation makes a correct detection look like a false positive, so this
+#: understates precision - the safe direction for a number that does not
+#: currently exist at all. What it cannot do is inflate a score.
+#:
+#: TWO RULES, both enforced by tests rather than by care:
+#:   1. The block must be CONTIGUOUS. These drives are video, so a weed in one
+#:      frame is the same plant in the next; scattered test frames sit among
+#:      the frames feeding the cut-out bank.
+#:   2. compose_mixed.SOURCE_FRAMES must not reach into it, NOR within a few
+#:      frames of it. Otherwise the weed being measured is the weed pasted from
+#:      its neighbour, and the score is of memorisation.
+#:
+#: DO NOT GUESS THE RANGE. `python -m seeweed3d.annotation.missed_plants`
+#: prints the cleanest available block for every cut-out drive, and the
+#: matching cut-out spec to put in compose_mixed, as two lines to copy.
+WEED_TEST_FRAMES = ""
+
+
+def _weed_test_session(spec):
+    """The session id a WEED_TEST_FRAMES spec names, or ""."""
+    head = str(spec or "").split(":", 1)[0].strip()
+    return head if ":" in str(spec or "") else ""
+
+
+WEED_TEST_SESSION = _weed_test_session(WEED_TEST_FRAMES)
+
+#: A cut-out drive comes back as a whole-frame source ONLY for its test block.
+#: INCLUDE_FRAMES is what keeps the rest of it out, so the two must be set
+#: together - which is why the spec, not a bare path, is the switch.
+_TEST_ROOTS = [p for p in CUTOUT_ONLY_SESSIONS
+               if WEED_TEST_SESSION and p.rstrip("\\/").endswith(
+                   WEED_TEST_SESSION)]
+
 SOURCES_ROOTS = [p for p in
                  list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
-                 if p not in CUTOUT_ONLY_SESSIONS]
+                 if p not in CUTOUT_ONLY_SESSIONS or p in _TEST_ROOTS]
 
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
 OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
@@ -158,7 +201,7 @@ OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
 #: That is the right trade only because the replacement is already the plan: a
 #: properly annotated mixed set, whose first job is to come back here.
 HOLDOUT_TEST = [
-]
+] + ([WEED_TEST_SESSION] if WEED_TEST_SESSION else [])
 
 #: EMPTY THIS ROUND, for the same reason as HOLDOUT_TEST.
 #:
@@ -213,7 +256,8 @@ CONFIG = dict(
                     "Visit1_20260108_133306:*,"
                     "Visit1_20260108_134015:*,"
                     "vid3_20260108_132749:*"
-                    + (f",{SYNTH_SESSION}:*" if SYNTH_SESSION else "")),
+                    + (f",{SYNTH_SESSION}:*" if SYNTH_SESSION else "")
+                    + (f",{WEED_TEST_FRAMES}" if WEED_TEST_FRAMES else "")),
 
     # MERGED, not dropped, and the build's own counts are why.
     #

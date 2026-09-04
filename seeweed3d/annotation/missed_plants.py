@@ -115,6 +115,21 @@ DECIDED = {
         CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
 }
 
+#: A TEST BLOCK cut from a cut-out-only drive: how many frames, and how many
+#: to leave untouched either side of it.
+#:
+#: This is the cheapest fix for the hole the first mixed run left. Its val
+#: split reported "small-weed recall: - over 0 instances" while 63% of the
+#: composites it trained on are under that threshold - so the case a laser
+#: weeder most needs was taught and never scored. These drives have real small
+#: weeds, hand corrected.
+#:
+#: The buffer is the whole reason this is a BLOCK. Consecutive frames of a
+#: drive show the same ground, so without it the weed being measured is the
+#: weed pasted from its neighbour.
+TEST_BLOCK = 15
+TEST_BUFFER = 5
+
 #: A frame with at least this many plant-shaped unclaimed blobs gets LISTED and
 #: gets an overlay. It does NOT decide what the verdict counts: every audited
 #: frame is in the denominator, clean ones included, or the share stops being a
@@ -313,6 +328,70 @@ def summarise(per_frame):
             "median_instance_veg": float(np.median(med)) if med else 1.0}
 
 
+def cleanest_block(per_frame, size=TEST_BLOCK, buffer=TEST_BUFFER):
+    """The contiguous run of `size` frames carrying the fewest missed plants.
+
+    WHY CONTIGUOUS, when the cleanest frames are scattered. These drives are
+    VIDEO: consecutive frames show the same ground, so a weed in frame 40 is
+    the same physical plant as the weed in frame 41. Picking the individually
+    cleanest frames for a test set would scatter them among the frames feeding
+    the cut-out bank, and the model would be scored on plants it trained on.
+    A block can be cut out whole, with a buffer either side.
+
+    WHY A BLOCK IS WORTH HAVING AT ALL. A drive too dirty to train on whole is
+    not too dirty to MEASURE on: a missed annotation makes a correct detection
+    look like a false positive, which understates precision - the safe
+    direction for a number nobody has at all. The alternative here is a weed
+    score computed on one frame.
+
+    Returns (start, end, blobs) as 1-based positions matching the
+    `<session>:<a>-<b>` spec that make_dataset and compose_mixed both take, or
+    None when the drive is too short to give up a block and a buffer."""
+    stems = sorted(per_frame)
+    n = len(stems)
+    if n < size + buffer:
+        return None
+    counts = [per_frame[s]["n_missed"] for s in stems]
+    best, best_at = None, 0
+    for i in range(n - size + 1):
+        # A block at the very start would leave no room for a buffer before it,
+        # which is only a problem if anything precedes it - the end of the
+        # drive is free, so a trailing block is cheapest.
+        if i and i < buffer:
+            continue
+        tot = sum(counts[i:i + size])
+        if best is None or tot < best:
+            best, best_at = tot, i
+    if best is None:
+        return None
+    return best_at + 1, best_at + size, best
+
+
+def block_note(session, per_frame, size=TEST_BLOCK, buffer=TEST_BUFFER):
+    """The two specs a drive splits into: frames to MEASURE on, frames to cut
+    instances out of. Printed together because they are one decision, and
+    setting one without the other puts the same plant on both sides."""
+    got = cleanest_block(per_frame, size, buffer)
+    if not got:
+        return []
+    a, b, blobs = got
+    n = len(per_frame)
+    L = ["", f"    A TEST BLOCK from this drive, if you want a real weed "
+             f"score:",
+         f"      measure on   {session}:{a}-{b}"
+         f"   ({blobs} unlabelled patch(es) in {size} frames)"]
+    before = f"1-{a - buffer - 1}" if a - buffer - 1 >= 1 else ""
+    after = f"{b + buffer + 1}-{n}" if b + buffer + 1 <= n else ""
+    keep = ",".join(x for x in (before, after) if x)
+    L += [f"      cut-outs from {session}:{keep or '(nothing left)'}"
+          f"   ({buffer}-frame buffer each side)",
+          f"      The buffer is not optional: consecutive frames of a drive "
+          f"show the same",
+          f"      ground, so a weed measured in one is the weed pasted from "
+          f"its neighbour."]
+    return L
+
+
 def worst(per_frame, n=WORST_FRAMES):
     return sorted((k for k, v in per_frame.items() if v["n_missed"]),
                   key=lambda k: (-per_frame[k]["n_missed"],
@@ -341,6 +420,9 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
                 L.append(f"      {k:<44}{v['n_missed']:>4} patch(es)"
                          f"{v['missed_frac']:>8.0%} of its vegetation")
         L += [f"    VERDICT: {verdict(per_frame, unsafe, decision_for(sess))}"]
+        dec = decision_for(sess)
+        if dec and dec[0] == CUTOUT:
+            L += block_note(sess, per_frame)
     for k in stale_decisions(by_session):
         L += ["", f"  [!] DECIDED names {k!r}, which this run did not audit. "
                   f"That decision is",

@@ -403,3 +403,59 @@ def test_draw_marks_a_soil_claiming_mask_differently():
     vis = mp.draw(bgr, tight | fat, np.zeros((H, W), bool),
                   instances=[tight, fat], soil_idx=[1])
     assert vis.shape == bgr.shape
+
+
+# --------------------------------------------------------------------------
+# A test block cut from a cut-out-only drive. The first mixed run measured
+# small-weed recall "over 0 instances" while 63% of the composites it trained
+# on were under that threshold - the case a weeder most needs, taught and
+# never scored.
+# --------------------------------------------------------------------------
+def _pf(counts):
+    return {f"f{i:03d}": {"n_missed": n} for i, n in enumerate(counts)}
+
+
+def test_the_block_is_the_cleanest_run_of_frames():
+    pf = _pf([9] * 30 + [0] * 15 + [9] * 30)
+    a, b, blobs = mp.cleanest_block(pf, size=15, buffer=5)
+    assert (a, b, blobs) == (31, 45, 0)
+
+
+def test_the_block_is_contiguous_even_when_scattered_frames_are_cleaner():
+    """The cleanest frames individually are no use: these drives are video, so
+    a weed in frame 40 is the weed in frame 41. Scattered test frames sit among
+    the frames feeding the cut-out bank and the model is scored on plants it
+    trained on."""
+    pf = _pf([0, 9] * 20 + [1] * 15)
+    a, b, _ = mp.cleanest_block(pf, size=15, buffer=5)
+    assert b - a == 14, "a block, not a selection"
+
+
+def test_a_drive_too_short_to_spare_a_block_says_nothing():
+    assert mp.cleanest_block(_pf([0] * 10), size=15, buffer=5) is None
+    assert mp.block_note("s", _pf([0] * 10), size=15, buffer=5) == []
+
+
+def test_the_note_gives_both_specs_because_they_are_one_decision():
+    """Setting the test block without shrinking the cut-out source puts the
+    same plant on both sides."""
+    txt = "\n".join(mp.block_note("vid3", _pf([9] * 30 + [0] * 15 + [9] * 30),
+                                  size=15, buffer=5))
+    assert "measure on   vid3:31-45" in txt
+    assert "cut-outs from vid3:1-25,51-75" in txt
+    assert "buffer is not optional" in txt
+
+
+def test_a_block_at_the_end_leaves_no_dangling_range():
+    txt = "\n".join(mp.block_note("vid3", _pf([9] * 60 + [0] * 15),
+                                  size=15, buffer=5))
+    assert "measure on   vid3:61-75" in txt
+    assert "cut-outs from vid3:1-55" in txt
+
+
+def test_the_block_note_is_only_offered_for_cutout_drives():
+    """A drive that trains whole has no cut-out spec to shrink, so the advice
+    would be nonsense."""
+    import inspect
+    src = inspect.getsource(mp.format_report)
+    assert "dec[0] == CUTOUT" in src
