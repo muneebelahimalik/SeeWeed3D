@@ -706,3 +706,93 @@ def test_the_report_bounds_distinct_plants_by_the_source_frames():
 def test_the_frame_bound_is_omitted_when_nothing_records_one():
     txt = "\n".join(cm.reuse_note([{"band": "near", "source": "a"}]))
     assert "source frame(s)" not in txt
+
+
+# --------------------------------------------------------------------------
+# Looking at what was generated. compose_mixed writes RGB and Datumaro and no
+# pictures, so until this there was no way to check a composite by eye except
+# the audit's worst-15 in audit colours.
+# --------------------------------------------------------------------------
+def _run(tmp_path, bands=("touching",), with_item=True):
+    import cv2
+    run = tmp_path / "synth_mixed_20260101_0000"
+    (run / "rgb").mkdir(parents=True)
+    (run / "annotations").mkdir()
+    cv2.imwrite(str(run / "rgb" / "synth_1.png"),
+                np.full((H, W, 3), 60, np.uint8))
+
+    def box(y, x, h, w):
+        m = np.zeros((H, W), bool)
+        m[y:y + h, x:x + w] = True
+        return m
+
+    item = cm._item("synth_1", "synth_1.png", H, W, [
+        {"class_name": CROP_CLASS, "mask": box(20, 20, 30, 30),
+         "attributes": {}},
+        {"class_name": "grass_weed", "mask": box(60, 60, 20, 20),
+         "attributes": {}}])
+    (run / "annotations" / "default.json").write_text(
+        json.dumps(cm.datumaro_doc([item])), encoding="utf-8")
+    recs = [{"band": b, "source": "vid2/f0#1",
+             **({"item": "synth_1"} if with_item else {})} for b in bands]
+    (run / "compose_report.json").write_text(json.dumps({"records": recs}),
+                                             encoding="utf-8")
+    return run
+
+
+def test_a_finished_run_can_be_drawn_without_regenerating_it(tmp_path):
+    """Looking must never be a reason to change what was generated."""
+    run = _run(tmp_path)
+    cm.render_overlays(run, scale=1.0)
+    assert (run / "overlays" / "synth_1.png").is_file()
+
+
+def test_a_split_mask_draws_as_one_instance(tmp_path):
+    """An onion in front can cut a pasted weed into two polygons. Drawing them
+    as separate instances would show four weeds where the annotation says
+    two."""
+    groups = cm.instance_groups({"annotations": [
+        {"type": "polygon", "label_id": 0, "group": 1, "points": [0, 0, 1, 1]},
+        {"type": "polygon", "label_id": 0, "group": 1, "points": [5, 5, 6, 6]},
+        {"type": "polygon", "label_id": 1, "group": 2, "points": [2, 2, 3, 3]},
+    ]})
+    assert len(groups) == 2
+    assert len(groups[0][1]) == 2, "one instance, two polygons"
+
+
+def test_lep_points_are_not_drawn_as_instances(tmp_path):
+    groups = cm.instance_groups({"annotations": [
+        {"type": "points", "label_id": 4, "group": 1, "points": [3, 3]},
+        {"type": "polygon", "label_id": 0, "group": 1, "points": [0, 0, 1, 1]},
+    ]})
+    assert len(groups) == 1 and groups[0][1] == [[0, 0, 1, 1]]
+
+
+def test_weeds_are_coloured_by_the_band_they_achieved(tmp_path):
+    """The thing to check in a composite is not what the plant is - the cut-out
+    carries a hand-drawn class - but whether the placement the report claims is
+    the one you can see."""
+    bgr = np.full((H, W, 3), 60, np.uint8)
+    groups = [("grass_weed", [[10, 10, 40, 10, 40, 40, 10, 40]])]
+    touching = cm.draw_composite(bgr, groups, ["touching"], scale=1.0)
+    overlap = cm.draw_composite(bgr, groups, ["overlap"], scale=1.0)
+    assert not np.array_equal(touching, overlap)
+
+
+def test_a_run_with_no_band_records_still_draws(tmp_path):
+    """An older run predates per-frame records. It is still worth looking at."""
+    run = _run(tmp_path, with_item=False)
+    cm.render_overlays(run, scale=1.0)
+    assert (run / "overlays" / "synth_1.png").is_file()
+
+
+def test_pointing_it_at_the_wrong_folder_says_what_it_wanted(tmp_path):
+    with pytest.raises(SystemExit) as e:
+        cm.render_overlays(tmp_path)
+    assert "synth_mixed" in str(e.value)
+
+
+def test_overlays_go_somewhere_else_if_asked(tmp_path):
+    run = _run(tmp_path)
+    cm.render_overlays(run, out_dir=tmp_path / "look", scale=1.0)
+    assert (tmp_path / "look" / "synth_1.png").is_file()
