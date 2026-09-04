@@ -415,6 +415,85 @@ def paste(bg, cutout_rgb, cutout_mask, top_left, feather=FEATHER_PX,
     return out, placed
 
 
+def placed_mask(mask, top_left, shape):
+    """A cut-out's mask at a frame offset, clipped to the frame."""
+    H, W = int(shape[0]), int(shape[1])
+    m = np.asarray(mask, bool)
+    h, w = m.shape[:2]
+    y0, x0 = int(top_left[0]), int(top_left[1])
+    ys0, xs0 = max(0, -y0), max(0, -x0)
+    y0, x0 = max(0, y0), max(0, x0)
+    ys1, xs1 = min(h, ys0 + (H - y0)), min(w, xs0 + (W - x0))
+    out = np.zeros((H, W), bool)
+    if ys1 > ys0 and xs1 > xs0:
+        sub = m[ys0:ys1, xs0:xs1]
+        out[y0:y0 + sub.shape[0], x0:x0 + sub.shape[1]] = sub
+    return out
+
+
+def band_target(band, bands=None):
+    """A distance to aim at inside a band, rather than at its edge.
+
+    Aiming at an edge and landing a pixel the wrong side of it is a rejected
+    placement; aiming at the middle leaves room on both sides. The unbounded
+    bands get a sensible finite point instead of infinity."""
+    lo, hi = (bands or CONTACT_BANDS)[band]
+    if hi > 10 ** 8:
+        return float(lo) + 50.0
+    if lo < -10 ** 8:
+        return -5.0
+    return (float(lo) + float(hi)) / 2.0
+
+
+def refine_offset(union, dist, grad, mask_t, top_left, band, bands=None,
+                  steps=3, max_step_px=80):
+    """Nudge a placement toward the band it was asked for.
+
+    THE HIT RATE IS THE WHOLE POINT. Anchoring a plant's crown at a pixel whose
+    own distance-to-onion is in the band does not put the PLANT in the band: the
+    foliage extends outward, so whether the nearest part lands at 2 px or
+    overlapping depends on which way the onion happens to lie. The first run
+    with a usable band width still rejected 95 of 154 touching attempts.
+
+    So measure and correct. The distance transform's gradient points away from
+    the onion, so stepping along it by the error moves the weed's nearest point
+    to roughly the distance asked for, and two or three steps converge - which
+    turns a coin flip into a placement.
+
+    Returns a corrected top-left, or None if it wandered out of frame."""
+    target = band_target(band, bands)
+    H, W = dist.shape[:2]
+    gy, gx = grad
+    top, left = int(top_left[0]), int(top_left[1])
+    for _ in range(max(1, steps)):
+        placed = placed_mask(mask_t, (top, left), (H, W))
+        if not placed.any():
+            return None
+        d = contact_distance(placed, union)
+        if band_of(d, bands) == band:
+            return (top, left)
+        # Reference point: where the weed is nearest the onion, or its centre
+        # once they overlap and "nearest" is inside.
+        ys, xs = np.nonzero(placed)
+        if d >= 0:
+            k = int(np.argmin(dist[ys, xs]))
+            ry, rx = int(ys[k]), int(xs[k])
+        else:
+            ry, rx = int(ys.mean()), int(xs.mean())
+        vy, vx = float(gy[ry, rx]), float(gx[ry, rx])
+        norm = (vy * vy + vx * vx) ** 0.5
+        if norm < 1e-6:
+            return None
+        step = float(np.clip(d - target, -max_step_px, max_step_px))
+        top -= int(round(step * vy / norm))
+        left -= int(round(step * vx / norm))
+    placed = placed_mask(mask_t, (top, left), (H, W))
+    if not placed.any():
+        return None
+    return (top, left) if band_of(contact_distance(placed, union),
+                                  bands) == band else None
+
+
 def placement_candidates(onion_union, shape, band, rng, n=40,
                          bands=None, margin=8):
     """Top-left positions to try for a cut-out of `shape`, biased to `band`.
@@ -658,12 +737,19 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
     Pure apart from the RNG: every rejection is a returned reason rather than a
     silent skip, because a generator that quietly drops most of its attempts
     produces a dataset whose composition nobody can account for."""
+    import cv2
     c = dict(cfg or {})
     out = np.array(bgr, copy=True)
     onions = [np.asarray(m, bool) for m in onion_masks]
     union = np.zeros(out.shape[:2], bool)
     for m in onions:
         union |= m
+    # Computed ONCE for the frame: the distance to the nearest onion, and its
+    # gradient, which is what lets a placement be corrected instead of retried
+    # blindly.
+    dist = cv2.distanceTransform((~union).astype(np.uint8), cv2.DIST_L2, 3)
+    grad = (cv2.Sobel(dist, cv2.CV_32F, 0, 1, ksize=3),
+            cv2.Sobel(dist, cv2.CV_32F, 1, 0, ksize=3))
     placed, records = [], []
 
     for band in bands_wanted:
@@ -678,14 +764,21 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
             records.append({"band": None, "reason": f"no {band} position"})
             continue
 
-        for top, left in spots:
+        for spot in spots:
+            # Correct the placement toward the band before judging it. Anchoring
+            # a crown at a band pixel does not put the PLANT in the band, and
+            # rejecting on that alone threw away most touching attempts.
+            spot = refine_offset(union, dist, grad, mask_t, spot, band)
+            if spot is None:
+                continue
+            top, left = spot
             trial, pmask = paste(out, rgb_t, mask_t, (top, left),
                                  c.get("feather", FEATHER_PX),
                                  c.get("illumination", ILLUMINATION_MATCH))
             if not pmask.any():
                 continue
-            dist = contact_distance(pmask, union)
-            if band_of(dist) != band:
+            achieved = contact_distance(pmask, union)
+            if band_of(achieved) != band:
                 continue
             front = rng.random() < c.get("weed_in_front_p", WEED_IN_FRONT_P)
             vis_onions, vis_weed = visible_masks(onions, pmask, front)
@@ -703,7 +796,7 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
                            "attributes": cut["attributes"],
                            "lep": None if lep_t is None else
                            (lep_t[0] + left, lep_t[1] + top)})
-            records.append({"band": band, "distance_px": round(dist, 2),
+            records.append({"band": band, "distance_px": round(achieved, 2),
                             "class_name": cut["class_name"],
                             "in_front": bool(front), "source": cut["source"]})
             break
