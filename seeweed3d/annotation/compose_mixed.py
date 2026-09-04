@@ -1062,18 +1062,30 @@ def polygon_area(points):
     return float(abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1))) / 2)
 
 
-def count_note(per_frame, areas):
+#: eval_seg's small-weed bucket, repeated here so the generator reports its
+#: instances against the threshold the model will later be SCORED on. They are
+#: the same question asked at two ends of the pipeline.
+SMALL_WEED_PX = 1500
+
+
+def count_note(per_frame, areas, scale=1.0, small_px=SMALL_WEED_PX):
     """How many weeds are actually in these frames, and how big they are.
 
     "It looks like one or two weeds a frame" is a question about the PICTURE,
     and it has two very different answers: the generator pasted one or two, or
     it pasted four and you cannot see them. Only counting separates those, and
-    the second is the one that has been true here - half the palette used to
+    the second was the one that was true here - half the palette used to
     disappear into the crop colour and the soil.
 
-    Area is reported because a pasted cut-out is not scaled: a real cotyledon
-    from the source drive is a few hundred pixels in a 2.7 megapixel frame, and
-    at the default overlay scale of 0.5 its outline is a mark you can miss."""
+    `areas` is one number PER INSTANCE, not per polygon. An onion in front can
+    cut a pasted weed into two polygons, and counting those separately makes
+    the size tally disagree with the instance count in the line above it.
+
+    The size line is not decoration. A pasted cut-out is NOT scaled, so it
+    arrives at whatever size the source drive recorded it - and a cotyledon
+    that fills a few hundred pixels of a 2.7 megapixel frame is below the
+    threshold eval_seg calls a small weed, which is the hardest and most
+    important case a laser weeder has."""
     if not per_frame:
         return []
     n = len(per_frame)
@@ -1083,14 +1095,20 @@ def count_note(per_frame, areas):
     if areas:
         a = sorted(areas)
         med = a[len(a) // 2]
-        tiny = sum(1 for v in a if v < 1500)
+        tiny = sum(1 for v in a if v < small_px)
         L.append(f"    weed area px: median {med:.0f}, smallest {a[0]:.0f}, "
                  f"largest {a[-1]:.0f}")
         if tiny:
-            L.append(f"    {tiny} of {len(a)} are under 1500 px - at overlay "
-                     f"scale 0.5 those are a few pixels of outline.")
-            L.append(f"    Pass --scale 1.0 before concluding a frame is "
-                     f"empty.")
+            L += [f"    {tiny} of {len(a)} ({tiny / len(a):.0%}) are under "
+                  f"{small_px} px, which is what eval_seg counts as a SMALL "
+                  f"WEED -",
+                  f"    the hardest case there is, and the one a weeder most "
+                  f"needs. Check that your val",
+                  f"    split has any: a small-weed recall measured over 0 "
+                  f"instances measures nothing."]
+            if scale < 1.0:
+                L.append(f"    At --scale {scale} their outlines are a few "
+                         f"pixels; pass --scale 1.0 to see them.")
     return L
 
 
@@ -1138,11 +1156,14 @@ def render_overlays(run_dir, out_dir=None, limit=0, stride=1, scale=0.5):
         cv2.imwrite(str(out / f"{stem}.png"), pic)
         weeds = [g for g in groups if g[0] != CROP_CLASS]
         per_frame.append(len(weeds))
-        areas += [polygon_area(p) for _, polys in weeds for p in polys]
+        # One area PER INSTANCE. A weed split in two by an onion in front is
+        # still one weed, and counting its polygons separately would make this
+        # tally disagree with the instance count beside it.
+        areas += [sum(polygon_area(p) for p in polys) for _, polys in weeds]
         n += 1
     if not n:
         raise SystemExit(f"ERROR: nothing was drawn from {run}.")
-    print("\n".join(count_note(per_frame, areas)))
+    print("\n".join(count_note(per_frame, areas, scale)))
     print(f"\n  {n} overlay(s) -> {out}\n"
           f"  crop is orange and thickest; weeds are coloured by the contact "
           f"band they achieved\n"

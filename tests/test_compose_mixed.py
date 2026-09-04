@@ -828,17 +828,46 @@ def test_the_run_says_how_many_weeds_it_drew():
     assert "mean 3.50" in txt and "min 2" in txt and "max 5" in txt
 
 
-def test_tiny_weeds_are_called_out_before_a_frame_is_called_empty():
-    """A pasted cut-out is not scaled: a real cotyledon is a few hundred px in
-    a 2.7 megapixel frame, and at overlay scale 0.5 that is a mark you miss."""
+def test_tiny_weeds_are_measured_against_the_threshold_they_are_scored_on():
+    """A pasted cut-out is NOT scaled, so it arrives at whatever size the
+    source drive recorded - and eval_seg's small-weed bucket is the same
+    question asked at the other end of the pipeline."""
     txt = "\n".join(cm.count_note([2], [200.0, 300.0, 90000.0]))
-    assert "2 of 3 are under 1500 px" in txt
-    assert "--scale 1.0" in txt
+    assert "2 of 3 (67%) are under 1500 px" in txt
+    assert "SMALL WEED" in txt
+    assert "0 instances measures nothing" in txt, (
+        "the point is not that they are small, it is that val may not be able "
+        "to measure them")
+
+
+def test_the_scale_hint_matches_the_scale_that_was_used():
+    """It used to say 'at overlay scale 0.5' to someone who had passed
+    --scale 1.0, which reads as a tool that is not looking at its own run."""
+    small = [200.0, 300.0]
+    assert "--scale 1.0" in "\n".join(cm.count_note([2], small, scale=0.5))
+    assert "--scale" not in "\n".join(cm.count_note([2], small, scale=1.0))
+
+
+def test_the_small_threshold_is_the_one_eval_seg_uses():
+    import inspect
+    src = inspect.getsource(load_script("evaluation/eval_seg.py").__dict__
+                            .get("evaluate", lambda: None))
+    assert f"small_area_px={cm.SMALL_WEED_PX}" in src, (
+        "the generator and the scorer disagree about what a small weed is")
 
 
 def test_no_tiny_weeds_means_no_warning_about_them():
     txt = "\n".join(cm.count_note([2], [40000.0, 90000.0]))
     assert "under 1500 px" not in txt
+
+
+def test_a_split_weed_counts_once_in_the_size_tally():
+    """An onion in front can cut a pasted weed into two polygons. Counted per
+    polygon, the size tally said '59 of 98' beside an instance count of 94."""
+    import inspect
+    src = inspect.getsource(cm.render_overlays)
+    assert "sum(polygon_area(p) for p in polys)" in src, (
+        "areas must be summed per instance, not appended per polygon")
 
 
 def test_polygon_area_is_the_enclosed_pixels():
