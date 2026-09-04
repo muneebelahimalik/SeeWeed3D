@@ -204,6 +204,32 @@ Note also that the onion masks these are composited against are SAM prelabels,
 so "distance to crop" is a distance to a machine label — a bound on what a
 contact band means here, not a reason to skip it.
 
+### One paste, one plant
+
+Cut-outs are drawn **without replacement** — every hand-drawn plant is used
+once before any is used twice. Sampling with replacement looks harmless and
+isn't: a reused cut-out is the *same pixels*, moved and rotated, and the
+frame-block split separates by frame **index**, which a composite set has no
+video order to give meaning to. So duplicates scatter at random across train,
+val and test, and a weed memorised in training becomes part of what the model
+is scored on. The split's own seam-distance warning can't see it, because it
+isn't a question about frame ordering.
+
+The first run made this concrete: 506 pastes from a bank capped at 600 were
+about 340 distinct plants, ~120 of them appearing in several composites.
+
+Reuse now begins only when the pastes outnumber the bank, and the run says so
+when it does. Two knobs decide it — `BANK_MAX` (0 = every cut-out there is;
+the two source drives hold ~3,300) and `WEEDS_PER_IMAGE`. Every pasted instance
+also carries a `source_instance` attribute into the annotations, so a split can
+honour provenance directly rather than inferring it from frame order.
+
+`WEEDS_PER_IMAGE` has a second job: a composite carries every onion its
+background held — about 18 — so a low weed count is what made the built dataset
+30:1 crop-to-weed, with the thin weed classes unmeasurable. Don't overcorrect
+past what a field looks like; the model learns scene statistics as well as
+shapes.
+
 ### Wiring a run into the build
 
 Every `compose_mixed.py` run writes a **new stamped folder**, so the mixed

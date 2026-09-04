@@ -600,3 +600,81 @@ def test_the_provenance_survives_into_the_written_annotations():
     assert all(a["attributes"].get("source_instance") == "vid2/f0"
                for a in weed_anns)
     json.dumps(item)
+
+
+# --------------------------------------------------------------------------
+# Drawing without replacement. A bigger bank makes reuse less likely; drawing
+# each plant once before any of them twice removes it while the bank lasts.
+# --------------------------------------------------------------------------
+def test_every_plant_is_drawn_before_any_is_drawn_twice():
+    bank = [{"id": i} for i in range(10)]
+    d = cm.CutoutDrawer(bank, random.Random(0))
+    got = [d.draw()["id"] for _ in range(10)]
+    assert sorted(got) == list(range(10)), f"a plant repeated early: {got}"
+    assert d.cycles == 1
+
+
+def test_reuse_begins_only_once_the_pastes_outnumber_the_bank():
+    d = cm.CutoutDrawer([{"id": i} for i in range(4)], random.Random(0))
+    for _ in range(4):
+        d.draw()
+    assert d.cycles == 1, "the bank was not exhausted yet"
+    d.draw()
+    assert d.cycles == 2, "a second pass should be counted, not hidden"
+
+
+def test_the_draw_order_follows_the_seed():
+    """Reproducible, and not simply bank order - otherwise every run pastes the
+    same plants into the same early frames."""
+    bank = [{"id": i} for i in range(8)]
+
+    def order(seed):
+        d = cm.CutoutDrawer(bank, random.Random(seed))
+        return [d.draw()["id"] for _ in range(8)]
+
+    assert order(1) == order(1), "same seed, different order"
+    assert order(1) != order(2), "the order does not depend on the seed"
+    assert order(1) != list(range(8)), "the bank is being read in order"
+
+
+def test_an_empty_bank_says_so_rather_than_looping():
+    with pytest.raises(IndexError):
+        cm.CutoutDrawer([], random.Random(0)).draw()
+
+
+def test_one_run_shares_a_drawer_so_frames_cannot_repeat_a_plant():
+    """The point of the shared drawer: per-frame drawers each start a fresh
+    pool, which promises nothing ACROSS composites - and across composites is
+    where a split gets crossed."""
+    bank = [dict(_bank()[0], source=f"vid2/f{i}") for i in range(6)]
+    drawer = cm.CutoutDrawer(bank, random.Random(0))
+    bgr = np.full((H, W, 3), 50, np.uint8)
+    seen = []
+    for _ in range(3):
+        _, _, recs = cm.compose_one(bgr, [_box(50, 50, 20, 20)], drawer,
+                                    ["near", "near"], random.Random(0))
+        seen += [r["source"] for r in recs if r.get("band")]
+    assert len(seen) == len(set(seen)), f"a plant crossed frames: {seen}"
+
+
+def test_a_plain_list_still_works_for_callers_that_pass_one():
+    bgr = np.full((H, W, 3), 50, np.uint8)
+    img, instances, _ = cm.compose_one(bgr, [_box(50, 50, 20, 20)], _bank(),
+                                       ["near"], random.Random(0))
+    assert img is not None and instances
+
+
+def test_no_reuse_is_stated_positively():
+    txt = "\n".join(cm.reuse_note(_recs(["a", "b", "c"])))
+    assert "every paste is a different hand-drawn plant" in txt
+
+
+def test_reuse_advice_points_at_the_two_knobs_that_cause_it():
+    txt = "\n".join(cm.reuse_note(_recs(["a", "a"])))
+    assert "BANK_MAX" in txt and "WEEDS_PER_IMAGE" in txt
+
+
+def test_the_bank_cap_of_zero_keeps_every_cutout():
+    """It was a function default of 600 against ~3,300 hand-drawn instances,
+    discarding five sixths of the project's weeds where nobody could see it."""
+    assert cm.BANK_MAX == 0 or cm.BANK_MAX >= 3000
