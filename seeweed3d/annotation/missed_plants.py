@@ -115,8 +115,10 @@ DECIDED = {
         CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
 }
 
-#: A frame with more than this many plant-shaped unclaimed blobs is reported.
-#: 0 reports every frame that has any.
+#: A frame with at least this many plant-shaped unclaimed blobs gets LISTED and
+#: gets an overlay. It does NOT decide what the verdict counts: every audited
+#: frame is in the denominator, clean ones included, or the share stops being a
+#: property of the drive and becomes a property of this threshold.
 MIN_BLOBS_TO_REPORT = 1
 
 #: A frame at or above this many blobs is called UNSAFE AS A BACKGROUND: enough
@@ -277,6 +279,25 @@ def verdict(per_frame, unsafe=UNSAFE_BLOBS, decided=None):
             f"    This audit disagrees and is OVERRULED. It would say: {text}")
 
 
+def record_frame(per_frame, records, key, stem, rec, img_path, shape,
+                 min_blobs=MIN_BLOBS_TO_REPORT):
+    """File one audited frame: always into the counts, sometimes into the list.
+
+    THE TWO ARE DIFFERENT and conflating them was a real bug. Every audited
+    frame belongs in per_frame, clean ones included, because the verdict is a
+    SHARE - a denominator holding only the frames that already have a patch
+    answers "of the frames with a problem, how many have a big one", which is
+    near 100% by construction and says nothing about the drive. It read
+    20% NOT SAFE on a set whose honest number was 9% MOSTLY CLEAN.
+
+    min_blobs decides only what gets LISTED and gets an overlay, which is a
+    question about attention, not about the measurement."""
+    per_frame[stem] = rec
+    if rec["n_missed"] >= min_blobs:
+        records[key] = (img_path, shape)
+    return per_frame, records
+
+
 def summarise(per_frame):
     n = len(per_frame)
     tot = sum(v["n_missed"] for v in per_frame.values())
@@ -419,9 +440,8 @@ def main():
             for m in per_inst:
                 claimed |= m
             rec, mask = audit_frame(bgr, claimed, instances=per_inst)
-            if rec["n_missed"] >= MIN_BLOBS_TO_REPORT:
-                per_frame[stem] = rec
-                records[f"{sess.name}/{stem}"] = (str(img), claimed.shape)
+            record_frame(per_frame, records, f"{sess.name}/{stem}", stem, rec,
+                         str(img), claimed.shape)
         by_session[sess.name] = per_frame
 
     if not by_session:
