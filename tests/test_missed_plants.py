@@ -92,6 +92,53 @@ def _frames(counts):
             for i, n in enumerate(counts)}
 
 
+def test_the_verdict_counts_clean_frames_in_its_denominator():
+    """The share has to be over EVERY audited frame. Counting only the frames
+    that already have a patch answers 'of the frames with a problem, how many
+    have a big one' - which is near 100% by construction and says nothing about
+    the drive. It read 18 of 89 (20%, NOT SAFE) on a run where 200 frames were
+    audited and the honest number was 9% (MOSTLY CLEAN), and the composites it
+    condemned were about to be pulled from training on the strength of it."""
+    dirty = _frames([3] * 18)
+    assert mp.verdict(dirty).startswith("NOT SAFE")
+    with_clean = _frames([3] * 18 + [0] * 182)
+    assert mp.verdict(with_clean).startswith("MOSTLY CLEAN"), (
+        "182 clean frames did not move the share, so they are not being "
+        "counted")
+
+
+def test_a_clean_frame_is_counted_even_though_it_is_not_listed():
+    """Where the bug actually lived. verdict() was always right given complete
+    input; the audit loop never gave it one, dropping every clean frame on the
+    way in. So the invariant is pinned at the point the frame is filed."""
+    per_frame, records = {}, {}
+    mp.record_frame(per_frame, records, "s/clean", "clean",
+                    {"n_missed": 0}, "clean.png", (4, 4))
+    mp.record_frame(per_frame, records, "s/dirty", "dirty",
+                    {"n_missed": 5}, "dirty.png", (4, 4))
+    assert set(per_frame) == {"clean", "dirty"}, (
+        "a clean frame left the denominator, which inflates every share this "
+        "tool reports")
+    assert set(records) == {"s/dirty"}, "clean frames should not get overlays"
+
+
+def test_listing_fewer_frames_does_not_change_the_measurement():
+    """MIN_BLOBS_TO_REPORT is about attention. If raising it also moved the
+    verdict, the share would be a property of the threshold, not the drive."""
+    per_frame, records = {}, {}
+    for i, n in enumerate([0, 1, 2, 5, 5]):
+        mp.record_frame(per_frame, records, f"s/f{i}", f"f{i}",
+                        {"n_missed": n}, f"f{i}.png", (4, 4), min_blobs=4)
+    assert len(per_frame) == 5 and len(records) == 2
+
+
+def test_a_drive_with_nothing_missed_is_clean_not_unaudited():
+    """The empty-audit message and a perfect drive are different facts, and
+    dropping clean frames made them the same one."""
+    assert mp.verdict(_frames([0] * 40)).startswith("CLEAN")
+    assert "No frames" in mp.verdict({})
+
+
 def test_a_clean_drive_is_told_to_train_on_whole_frames():
     """Whole frames keep real weed-beside-weed context and real lighting - all
     things a cut-out loses - so 'clean' must recommend keeping them."""
