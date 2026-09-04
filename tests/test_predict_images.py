@@ -78,10 +78,39 @@ def test_stride_samples_across_the_session_not_the_first_n(tmp_path):
     """Consecutive ZED frames are near-identical; LIMIT alone gives you N
     pictures of one plant."""
     s = _session(tmp_path, n=10)
-    assert len(pi.find_images(s, limit=3, stride=3)) == 3
     spread = pi.find_images(s, limit=3, stride=3)
+    assert len(spread) == 3
     assert spread[0] != spread[1]
-    assert [f.stem[-1] for f in spread] == ["1", "4", "7"]
+    # frames 1,4,7,10 after the stride; 3 of those spread end to end.
+    assert [f.stem[-1] for f in spread] == ["1", "7", "0"]  # 1, 7, 10
+
+
+def test_a_limit_spreads_across_the_whole_drive_not_its_head():
+    """The trap this closes hides at small scale. On a 4000-frame drive,
+    stride 20 with limit 40 used to cover the first 800 frames and nothing
+    after - so a stretch of bare crop at the start of a session read as a
+    whole session with no weeds in it, and the conclusion drawn was about the
+    model rather than about the sampling."""
+    got = pi.sample_frames(list(range(4000)), limit=40, stride=20)
+    assert len(got) == 40
+    assert got[0] == 0
+    assert got[-1] == 3980, "the end of the drive is never reached"
+    assert max(b - a for a, b in zip(got, got[1:])) < 200
+
+
+def test_a_limit_larger_than_the_drive_returns_everything():
+    assert pi.sample_frames(list(range(5)), limit=99) == list(range(5))
+    assert pi.sample_frames(list(range(5)), limit=0) == list(range(5))
+
+
+def test_a_limit_of_one_is_not_an_error():
+    assert pi.sample_frames(list(range(9)), limit=1) == [0]
+
+
+def test_stride_applies_before_the_limit():
+    """Otherwise a limit smaller than the drive would defeat the stride, and
+    near-identical consecutive frames come back."""
+    assert pi.sample_frames(list(range(10)), limit=0, stride=4) == [0, 4, 8]
 
 
 def test_a_missing_path_says_so(tmp_path):
@@ -384,4 +413,4 @@ def test_exclusion_happens_before_limit_and_stride(tmp_path):
     """Otherwise 'the first 20' is the first 20 of a list that is mostly
     training frames, and the filter buys nothing."""
     src = __import__("inspect").getsource(pi.predict)
-    assert src.index("exclude_built(") < src.index('frames[::max(1,')
+    assert src.index("exclude_built(") < src.index("sample_frames(frames")

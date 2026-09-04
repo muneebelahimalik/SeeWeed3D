@@ -88,12 +88,13 @@ CONFIG = {
     "EXCLUDE_BUILT": "",
     "EXCLUDE_SPLITS": ("train",),
 
-    # 0 = every frame found. Otherwise the first N, which is usually what you
-    # want the first time you point this at 4000 frames.
+    # 0 = every frame found. Otherwise N frames spread ACROSS the drive - not
+    # the first N, which on a 4000-frame session shows you one end of one field
+    # and nothing else.
     "LIMIT": 20,
 
-    # Take every Nth frame instead of the first N. Consecutive ZED frames are
-    # nearly identical, so 1 gives you 20 pictures of the same plant.
+    # Take every Nth frame first. Consecutive ZED frames are nearly identical,
+    # so stride 1 gives you 20 pictures of the same plant.
     "STRIDE": 10,
 
     # -- The model -------------------------------------------------------------
@@ -218,8 +219,30 @@ def find_images(spec, limit=0, stride=1):
             f"ERROR: no images under {root}.\n"
             f"Expected a session folder (with an rgb/ subfolder), a folder of "
             f"images, or a single image file.")
-    files = files[::max(1, int(stride))]
-    return files[:limit] if limit else files
+    return sample_frames(files, limit, stride)
+
+
+def sample_frames(files, limit=0, stride=1):
+    """`limit` frames spread ACROSS the drive, not the first `limit` of it.
+
+    Taking the head is the trap this exists to close, and it hides at small
+    scale: on ten frames, "the first 3 of every 3rd" covers most of the
+    session. On a 4,000-frame drive, --stride 20 --limit 40 covers the first
+    800 and nothing after - so a stretch of bare crop at the start of a drive
+    reads as a whole session with no weeds in it, twice in a row, and the
+    conclusion drawn is about the model.
+
+    The last frame is always included, so the end of the drive is represented
+    however the arithmetic falls."""
+    files = list(files)[::max(1, int(stride))]
+    n = int(limit or 0)
+    if not n or n >= len(files):
+        return files
+    if n == 1:
+        return files[:1]
+    last = len(files) - 1
+    idx = sorted({round(i * last / (n - 1)) for i in range(n)})
+    return [files[i] for i in idx]
 
 
 def split_images(dataset_dir, split, limit=0, stride=1, images_root=""):
@@ -247,10 +270,8 @@ def split_images(dataset_dir, split, limit=0, stride=1, images_root=""):
         raise SystemExit(
             f"ERROR: split {split!r} has no frames in {man}. "
             f"This dataset has: {', '.join(have) or '(none)'}")
-    recs = sorted(recs, key=lambda r: str(r.get("image_path")))
-    recs = recs[::max(1, int(stride))]
-    if limit:
-        recs = recs[:limit]
+    recs = sample_frames(sorted(recs, key=lambda r: str(r.get("image_path"))),
+                         limit, stride)
     root = images_root or doc.get("images_root") or "."
     out = []
     for r in recs:
@@ -500,9 +521,13 @@ def predict(cfg=None):
                 raise SystemExit(
                     "ERROR: every frame under IMAGES was used by that build, "
                     "so there is nothing here the model has not seen.")
-        frames = frames[::max(1, int(c.get("STRIDE", 1)))]
-        if c.get("LIMIT"):
-            frames = frames[:int(c["LIMIT"])]
+        frames = sample_frames(frames, c.get("LIMIT", 0), c.get("STRIDE", 1))
+        # SAY WHAT WAS ACTUALLY READ. "Are these really that session's frames"
+        # is not answerable from a folder of overlays, and a path that silently
+        # resolved somewhere else produces a perfectly plausible-looking run.
+        if frames:
+            print(f"  {len(frames)} frame(s) from {Path(c['IMAGES'])}")
+            print(f"      {frames[0].name}  ..  {frames[-1].name}")
 
     ckpt = Path(c["CHECKPOINT"])
     if not ckpt.exists():
