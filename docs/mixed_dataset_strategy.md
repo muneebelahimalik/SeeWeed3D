@@ -233,6 +233,26 @@ background held — about 18 — so a low weed count is what made the built data
 past what a field looks like; the model learns scene statistics as well as
 shapes.
 
+### Looking at what came out
+
+`compose_mixed` writes RGB and Datumaro, no pictures. To see a finished run's
+own annotations drawn on its frames:
+
+```
+python -m seeweed3d.annotation.compose_mixed --overlays <run folder> --stride 10
+```
+
+It reads a run that already exists, so looking is never a reason to regenerate.
+Weeds are coloured by the **contact band they achieved**, not by class — the
+cut-out already carries a hand-drawn class, so the question a composite raises
+is whether the placement the report claims is the one you can see. A weed
+labelled `touching` sitting alone in bare soil is a generator bug no number in
+the report would show.
+
+Three things only a person can check: an outline that doesn't follow the plant,
+a band label that disagrees with the picture, and light or shadow on the pasted
+weed that doesn't match the onions around it.
+
 ### Wiring a run into the build
 
 Every `compose_mixed.py` run writes a **new stamped folder**, so the mixed

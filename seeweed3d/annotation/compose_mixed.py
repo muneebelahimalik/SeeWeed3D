@@ -970,9 +970,156 @@ def _paste_behind(original, pasted, weed_mask, onion_union):
     return out
 
 
-def main():
+#: Overlay colours, BGR. The crop is orange and drawn thickest, as everywhere
+#: else in this project: it is the one thing in the frame that must not be hit.
+OVERLAY_CROP = (0, 165, 255)
+OVERLAY_WEED = (60, 220, 60)
+OVERLAY_BAND = {"overlap": (60, 60, 235),      # red    - on the crop
+                "touching": (0, 140, 255),     # orange - against it
+                "very_near": (0, 220, 255),    # yellow
+                "near": (200, 200, 200),       # grey
+                "isolated": (160, 160, 160)}
+
+
+def instance_groups(item, classes=None):
+    """A written item's instances, as (class_name, [polygon]) in group order.
+
+    Groups, not annotations: one mask can become several polygons when an onion
+    in front splits a pasted weed in two, and drawing those as separate
+    instances would show four weeds where the annotation says two."""
+    names = list(classes or CLASSES) + [LEP_LABEL]
+    by_group = {}
+    for a in item.get("annotations", []):
+        if a.get("type") != "polygon":
+            continue
+        name = names[a["label_id"]]
+        by_group.setdefault(a.get("group", 0), (name, []))[1].append(a["points"])
+    return [by_group[g] for g in sorted(by_group)]
+
+
+def bands_by_item(report):
+    """{item stem: [band per pasted weed, in the order they were placed]}."""
+    out = {}
+    for r in report.get("records") or []:
+        if r.get("band") and r.get("item"):
+            out.setdefault(r["item"], []).append(r["band"])
+    return out
+
+
+def draw_composite(bgr, groups, bands=None, scale=1.0, labels=True):
+    """One composite with its own annotations drawn on it.
+
+    Colours the weeds BY ACHIEVED CONTACT BAND rather than by class, because
+    the thing to check in a composite is not what the plant is - the cut-out
+    carries a hand-drawn class - but whether the placement the report claims is
+    the placement you can see. A weed labelled `touching` sitting alone in bare
+    soil is a generator bug that no other output would show you."""
+    import cv2
+    out = np.ascontiguousarray(bgr.copy())
+    weed_i = 0
+    for name, polys in groups:
+        crop = name == CROP_CLASS
+        if crop:
+            colour, thick = OVERLAY_CROP, 4
+            text = name
+        else:
+            band = (bands or [])[weed_i] if weed_i < len(bands or []) else None
+            colour = OVERLAY_BAND.get(band, OVERLAY_WEED)
+            thick, weed_i = 2, weed_i + 1
+            text = f"{name} [{band}]" if band else name
+        cnts = [np.asarray(p, np.float32).reshape(-1, 2).round().astype(np.int32)
+                for p in polys]
+        cv2.polylines(out, cnts, True, colour, thick)
+        if labels and cnts is not None and len(cnts):
+            p = min((c.reshape(-1, 2) for c in cnts),
+                    key=lambda a: (a[:, 1].min(), a[:, 0].min()))
+            x, y = int(p[:, 0].min()), int(p[:, 1].min())
+            cv2.putText(out, text, (x, max(14, y - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(out, text, (x, max(14, y - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1, cv2.LINE_AA)
+    if scale and scale != 1.0:
+        out = cv2.resize(out, None, fx=scale, fy=scale,
+                         interpolation=cv2.INTER_AREA)
+    return out
+
+
+def render_overlays(run_dir, out_dir=None, limit=0, stride=1, scale=0.5):
+    """Draw a finished run's own annotations onto its frames.
+
+    Reads a run that already exists rather than drawing while compositing, so
+    the composites you have can be looked at without regenerating them - and so
+    looking is never a reason to change what was generated."""
+    import cv2
+    run = Path(run_dir)
+    ann = run / "annotations" / "default.json"
+    if not ann.exists():
+        raise SystemExit(f"ERROR: {ann} not found. Point this at a "
+                         f"synth_mixed_* run folder.")
+    doc = json.loads(ann.read_text(encoding="utf-8"))
+    classes = [c["name"] for c in
+               doc.get("categories", {}).get("label", {}).get("labels", [])]
+    rep_path = run / "compose_report.json"
+    report = (json.loads(rep_path.read_text(encoding="utf-8"))
+              if rep_path.exists() else {})
+    bands = bands_by_item(report)
+    if report and not bands:
+        print("  [i] this run's report predates per-frame band records, so "
+              "weeds are drawn in one colour.\n      Regenerate to colour them "
+              "by achieved contact band.")
+
+    items = sorted(doc.get("items", []), key=lambda i: str(i.get("id")))
+    items = items[::max(1, int(stride))]
+    if limit:
+        items = items[:int(limit)]
+    out = Path(out_dir or (run / "overlays"))
+    out.mkdir(parents=True, exist_ok=True)
+
+    n = 0
+    for item in items:
+        stem = str(item.get("id"))
+        img = run / "rgb" / f"{stem}.png"
+        bgr = cv2.imread(str(img))
+        if bgr is None:
+            print(f"  [!] missing image, skipped: {img}")
+            continue
+        pic = draw_composite(bgr, instance_groups(item, classes),
+                             bands.get(stem), scale)
+        cv2.imwrite(str(out / f"{stem}.png"), pic)
+        n += 1
+    if not n:
+        raise SystemExit(f"ERROR: nothing was drawn from {run}.")
+    print(f"\n  {n} overlay(s) -> {out}\n"
+          f"  crop is orange and thickest; weeds are coloured by the contact "
+          f"band they achieved\n"
+          f"  (red overlap, orange touching, yellow very_near, grey near and "
+          f"isolated).\n"
+          f"  WHAT TO LOOK FOR: a paste whose outline does not follow the "
+          f"plant, a band label\n"
+          f"  that disagrees with what you see, and light or shadow on the "
+          f"weed that does not\n"
+          f"  match the onions around it - none of which any number in the "
+          f"report can show.\n")
+    return 0
+
+
+def main(argv=None):
+    import argparse
     import cv2
     from evaluation.crop_risk import load_polygons, rasterise
+
+    ap = argparse.ArgumentParser(description="Composite mixed scenes, or draw "
+                                             "a finished run's annotations.")
+    ap.add_argument("--overlays", metavar="RUN_DIR",
+                    help="draw an existing synth_mixed_* run instead of "
+                         "generating a new one")
+    ap.add_argument("--out", help="where overlays go (default RUN_DIR/overlays)")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--stride", type=int, default=1)
+    ap.add_argument("--scale", type=float, default=0.5)
+    a = ap.parse_args(argv)
+    if a.overlays:
+        return render_overlays(a.overlays, a.out, a.limit, a.stride, a.scale)
 
     rng = random.Random(SEED)
     out_dir = Path(stamped(OUT_ROOT, "synth_mixed"))
