@@ -415,6 +415,20 @@ def paste(bg, cutout_rgb, cutout_mask, top_left, feather=FEATHER_PX,
     return out, placed
 
 
+def session_id_for(folder_name):
+    """The session id the frames in a composite run will carry.
+
+    Exported rather than kept inside main() because mixed.py has to name this
+    session in three places - the source path, INCLUDE_FRAMES and SCENE_HINTS -
+    and a build that types the id by hand gets it subtly wrong. This project has
+    already lost a build to a folder name and a session id disagreeing, and the
+    id here is NOT the folder name: `synth_mixed_20260904_0156` holds frames
+    called `synth_20260904_015600_000001.png`, because a session id needs
+    seconds to parse as one."""
+    stamp = str(folder_name).replace("synth_mixed_", "")
+    return f"synth_{stamp}00" if len(stamp) == 13 else f"synth_{stamp}"
+
+
 def placed_mask(mask, top_left, shape):
     """A cut-out's mask at a frame offset, clipped to the frame."""
     H, W = int(shape[0]), int(shape[1])
@@ -825,8 +839,7 @@ def main():
 
     rng = random.Random(SEED)
     out_dir = Path(stamped(OUT_ROOT, "synth_mixed"))
-    stamp = out_dir.name.replace("synth_mixed_", "")
-    session_id = f"synth_{stamp}00" if len(stamp) == 13 else f"synth_{stamp}"
+    session_id = session_id_for(out_dir.name)
 
     print(f"\n  Building the weed cut-out bank from {len(WEED_SOURCES)} "
           f"source(s)...")

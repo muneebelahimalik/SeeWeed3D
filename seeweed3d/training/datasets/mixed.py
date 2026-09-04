@@ -44,6 +44,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import ntpath  # noqa: E402
+
+from annotation.compose_mixed import session_id_for  # noqa: E402
 from common.ontology import CLASSES  # noqa: E402
 from training.datasets.onions import ONION_SESSIONS  # noqa: E402
 from training.datasets.weeds import WEED_SESSIONS  # noqa: E402
@@ -52,6 +55,28 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 # #############################################################################
 # ##  EDIT EVERYTHING BETWEEN THE HASH LINES                                 ##
 # #############################################################################
+
+#: THE COMPOSITE RUN TO INCLUDE, or "" for none. ONE constant, because this
+#: session has to be named in three places - the source path, INCLUDE_FRAMES and
+#: SCENE_HINTS - and typing a timestamp three times is how they come to
+#: disagree. Everything below derives from it.
+#:
+#: Each compose_mixed run writes a NEW stamped folder, so this is deliberately
+#: not "whatever is newest": a build that silently picks up a different
+#: synthetic set than the last one is the drift every runner here exists to
+#: prevent. Point it at a run you have LOOKED AT.
+#:
+#: Its own report is the record of what it contains - the achieved contact
+#: bands, the backgrounds it refused, and the fact that it is synthetic.
+SYNTH_ROOT = r"E:\Dataset_Vidalia\synthetic"
+SYNTH_RUN = "synth_mixed_20260904_0156"
+
+#: Derived, never typed. The folder is synth_mixed_<stamp> and the frames it
+#: contains are synth_<stamp>00_*.png - the id needs seconds to parse as a
+#: session, so the two are NOT the same string. compose_mixed.py owns this
+#: derivation so the build cannot come to disagree with the writer about what a
+#: run is called.
+SYNTH_SESSION = session_id_for(SYNTH_RUN) if SYNTH_RUN else ""
 
 #: Imported from the two single-purpose builds rather than repeated, so a
 #: session added there reaches this build without a second edit - and the three
@@ -86,7 +111,7 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: landing on real plants rather than on moss and debris.
 MIXED_SESSIONS = [
     r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
-]
+] + ([ntpath.join(SYNTH_ROOT, SYNTH_RUN)] if SYNTH_RUN else [])
 
 #: DRIVES USED ONLY AS COMPOSITING SOURCES, never as whole training frames.
 #:
@@ -187,7 +212,8 @@ CONFIG = dict(
     INCLUDE_FRAMES=("Mix_raj_Batch_01:*,"
                     "Visit1_20260108_133306:*,"
                     "Visit1_20260108_134015:*,"
-                    "vid3_20260108_132749:*"),
+                    "vid3_20260108_132749:*"
+                    + (f",{SYNTH_SESSION}:*" if SYNTH_SESSION else "")),
 
     # MERGED, not dropped, and the build's own counts are why.
     #
@@ -247,6 +273,10 @@ CONFIG = dict(
         "vid2_20260108_122731": "weed_only",
         "vid3_20260108_110444": "weed_only",
         "vid3_20260108_132749": "onion_only",
+        #: Composites are onion backgrounds with weeds pasted in, so both
+        #: classes are present and both are labelled - "mixed", exactly as
+        #: compose_mixed's own closing instruction says.
+        **({SYNTH_SESSION: "mixed"} if SYNTH_SESSION else {}),
     },
 
     VAL_FRACTION=0.15,
