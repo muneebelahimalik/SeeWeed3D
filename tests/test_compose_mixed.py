@@ -533,3 +533,70 @@ def test_placed_mask_matches_what_paste_places():
     for spot in ((30, 40), (-5, -5), (H - 4, W - 4)):
         _, pasted = cm.paste(bg, cut, m, spot, feather=0, illumination=0)
         assert (cm.placed_mask(m, spot, (H, W)) == pasted).all(), spot
+
+
+# --------------------------------------------------------------------------
+# Cut-outs are drawn WITH REPLACEMENT, so a paste count is not a plant count.
+# A reused cut-out is the same pixels in several frames, and the frame-block
+# split cannot see it: it separates by frame index, and a composite set has no
+# video order for an index to mean anything.
+# --------------------------------------------------------------------------
+def _recs(sources):
+    return [{"band": "touching", "source": s} for s in sources]
+
+
+def test_the_report_says_how_many_distinct_plants_the_pastes_are():
+    txt = "\n".join(cm.reuse_note(_recs(["a", "b", "a", "c"]), bank_size=9))
+    assert "4 paste(s) from 3 distinct" in txt
+    assert "bank held 9" in txt
+
+
+def test_a_reused_cutout_is_called_out_as_measuring_memorisation():
+    txt = "\n".join(cm.reuse_note(_recs(["a", "a", "b"])))
+    assert "1 plant(s) pasted more than once" in txt
+    assert "appears 2 time(s)" in txt
+    assert "memorisation" in txt and "source_instance" in txt
+
+
+def test_no_reuse_says_nothing_alarming():
+    """The warning has to be absent when it does not apply, or it becomes the
+    line everybody scrolls past."""
+    txt = "\n".join(cm.reuse_note(_recs(["a", "b", "c"])))
+    assert "3 paste(s) from 3 distinct" in txt
+    assert "memorisation" not in txt
+
+
+def test_reuse_is_silent_when_nothing_records_a_source():
+    assert cm.reuse_note([]) == []
+    assert cm.reuse_note([{"band": "near"}]) == []
+
+
+def test_a_pasted_instance_carries_the_plant_it_came_from():
+    """Without this the dataset holds no way to tell two copies of one plant
+    from two different plants, and no split can honour the difference."""
+    bgr = np.full((H, W, 3), 50, np.uint8)
+    bank = _bank()
+    bank[0]["attributes"] = {"targetable": "yes"}
+    _, instances, _ = cm.compose_one(bgr, [_box(50, 50, 20, 20)], bank,
+                                     ["near"], random.Random(0))
+    weeds = [i for i in instances if i["class_name"] == "grass_weed"]
+    assert weeds, "nothing was pasted, so nothing is being checked"
+    for w in weeds:
+        assert w["attributes"]["source_instance"] == "vid2/f0"
+        assert w["attributes"]["targetable"] == "yes", (
+            "the annotator's own attributes have to survive alongside it")
+
+
+def test_the_provenance_survives_into_the_written_annotations():
+    """It is only useful if a split can read it back out of default.json."""
+    bgr = np.full((H, W, 3), 50, np.uint8)
+    _, instances, _ = cm.compose_one(bgr, [_box(50, 50, 20, 20)], _bank(),
+                                     ["near"], random.Random(0))
+    item = cm._item("f1", "f1.png", H, W, instances)
+    names = list(cm.CLASSES) + [cm.LEP_LABEL]
+    weed_anns = [a for a in item["annotations"]
+                 if names[a["label_id"]] == "grass_weed"]
+    assert weed_anns
+    assert all(a["attributes"].get("source_instance") == "vid2/f0"
+               for a in weed_anns)
+    json.dumps(item)

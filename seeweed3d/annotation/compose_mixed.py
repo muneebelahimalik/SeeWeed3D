@@ -582,8 +582,45 @@ def summarise(records):
             "rejects": rejects}
 
 
+def reuse_note(records, bank_size=None):
+    """How many DISTINCT hand-drawn plants those pastes actually are.
+
+    Cut-outs are drawn with replacement, so 506 pastes is not 506 plants. The
+    duplicates are the same pixels rotated and moved, and a frame-block split
+    scatters them at random across train, val and test - so a weed the model
+    memorised in training can be most of what it is scored on. Nothing else in
+    the pipeline can see this: the split reasons about frame INDEX, and a
+    composite set has no video order for an index to mean anything.
+
+    Reported here because this is where it is cheap to fix - a bigger bank, or
+    fewer pastes, before 200 frames exist and get built into a dataset."""
+    srcs = [r.get("source") for r in records if r.get("source")]
+    if not srcs:
+        return []
+    uniq = set(srcs)
+    counts = {s: srcs.count(s) for s in uniq}
+    repeated = sum(1 for n in counts.values() if n > 1)
+    most = max(counts.values())
+    L = ["", f"  Cut-out reuse: {len(srcs)} paste(s) from {len(uniq)} distinct "
+             f"hand-drawn plant(s)"
+             + (f" (bank held {bank_size})" if bank_size else ""),
+         f"    {repeated} plant(s) pasted more than once; the most-reused "
+         f"appears {most} time(s)"]
+    if repeated:
+        L += ["  [!] a reused cut-out is the SAME PIXELS in several frames, and "
+              "the frame-block",
+              "      split does not know that - so the same plant can sit in "
+              "train and in val,",
+              "      where it measures memorisation. Its 'source_instance' "
+              "attribute is in the",
+              "      annotations; split on that, or raise the bank cap, before "
+              "quoting a weed score."]
+    return L
+
+
 def format_report(n_images, n_inst, bands, rejected, backgrounds_seen,
-                  backgrounds_used, out_dir=None):
+                  backgrounds_used, out_dir=None, records=None,
+                  bank_size=None):
     L = ["", "  Composited mixed scenes", "  " + "-" * 40,
          f"  {n_images} image(s), {n_inst} pasted weed instance(s)",
          f"  backgrounds: {backgrounds_used} used of {backgrounds_seen} "
@@ -597,6 +634,7 @@ def format_report(n_images, n_inst, bands, rejected, backgrounds_seen,
         L += ["", "  Rejected:"]
         for why, n in sorted(rejected.items(), key=lambda kv: -kv[1]):
             L.append(f"    {n:>6}  {why}")
+    L += reuse_note(records or [], bank_size)
     L += ["",
           "  [i] provenance is SYNTHETIC. Train on these; never validate on",
           "      them - a score computed on composites measures this "
@@ -806,8 +844,17 @@ def compose_one(bgr, onion_masks, cutouts, bands_wanted, rng, cfg=None):
 
             out = trial if front else _paste_behind(out, trial, pmask, union)
             onions = vis_onions
+            #: WHICH HAND-DRAWN INSTANCE THIS IS, carried into the dataset.
+            #: Cut-outs are drawn WITH REPLACEMENT, so the same plant - the
+            #: same pixels, at a different offset and rotation - can land in
+            #: several composites. Frame-block splitting cannot see that: it
+            #: separates by frame index, and a composite set has no video
+            #: order for an index to mean anything. So the same weed can sit
+            #: in train and in val, where it measures memorisation exactly.
+            #: Recording it in the annotation is what lets a split honour it.
             placed.append({"class_name": cut["class_name"], "mask": vis_weed,
-                           "attributes": cut["attributes"],
+                           "attributes": {**cut["attributes"],
+                                          "source_instance": cut["source"]},
                            "lep": None if lep_t is None else
                            (lep_t[0] + left, lep_t[1] + top)})
             records.append({"band": band, "distance_px": round(achieved, 2),
@@ -907,7 +954,7 @@ def main():
         pi += k
         image, instances, records = compose_one(
             bgr, onion_masks, bank, want, rng)
-        all_records += [r for r in records if r.get("band")]
+        kept_records = [r for r in records if r.get("band")]
         for r in records:
             if not r.get("band"):
                 rejected[r.get("reason", "?")] = \
@@ -919,6 +966,12 @@ def main():
         name = f"{session_id}_{used:06d}.png"
         cv2.imwrite(str(out_dir / "rgb" / name), image)
         items.append(_item(Path(name).stem, name, h, w, instances))
+        #: Tagged with the frame it landed in, not just counted. Without this
+        #: the report can say a cut-out was used twice but not WHERE, which is
+        #: the half that decides whether the reuse crosses a split.
+        for r in kept_records:
+            r["item"] = Path(name).stem
+        all_records += kept_records
 
     if not items:
         raise SystemExit(
@@ -934,7 +987,8 @@ def main():
     for r in all_records:
         bands[r["band"]] = bands.get(r["band"], 0) + 1
     report = format_report(len(items), len(all_records), bands, rejected,
-                           seen, used, out_dir)
+                           seen, used, out_dir, records=all_records,
+                           bank_size=len(bank))
     print(report)
     (out_dir / "compose_report.json").write_text(json.dumps({
         "session_id": session_id, "n_images": len(items),
