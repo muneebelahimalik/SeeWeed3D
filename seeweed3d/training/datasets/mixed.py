@@ -69,7 +69,7 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: Its own report is the record of what it contains - the achieved contact
 #: bands, the backgrounds it refused, and the fact that it is synthetic.
 SYNTH_ROOT = r"E:\Dataset_Vidalia\synthetic"
-SYNTH_RUN = "synth_mixed_20260904_0156"
+SYNTH_RUN = "synth_mixed_20260904_0246"
 
 #: Derived, never typed. The folder is synth_mixed_<stamp> and the frames it
 #: contains are synth_<stamp>00_*.png - the id needs seconds to parse as a
@@ -278,6 +278,19 @@ CONFIG = dict(
         #: compose_mixed's own closing instruction says.
         **({SYNTH_SESSION: "mixed"} if SYNTH_SESSION else {}),
     },
+
+    #: The composites TRAIN ONLY. compose_mixed's own report says never to
+    #: validate on them, the strategy doc says it, and until this key existed
+    #: the block splitter put 15 of them in val and 15 in test anyway - along
+    #: with 73 of val's weed instances, on frames whose contact was arranged
+    #: rather than observed.
+    #:
+    #: WHAT IT COSTS, plainly: the composites were carrying most of the weed
+    #: instances in val, so pinning them leaves Mix_raj's one val frame as
+    #: nearly the whole weed measurement. That number was never trustworthy -
+    #: it is the same seven frames the model trains on - and a weed score
+    #: computed on pasted weeds was not more trustworthy for being larger.
+    TRAIN_ONLY_SESSIONS=[SYNTH_SESSION] if SYNTH_SESSION else [],
 
     VAL_FRACTION=0.15,
     TEST_FRACTION=0.15,

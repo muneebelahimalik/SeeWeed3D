@@ -191,3 +191,42 @@ def test_two_renamed_batches_do_not_merge_into_one_seam_group():
         {"train": ["frame_000001"], "val": ["frame_000002"], "test": []},
         session_of=ids)
     assert sep["val"] == {}, "different sessions share no training frames"
+
+
+# --------------------------------------------------------------------------
+# Synthetic composites train only. A score computed on one measures the
+# generator's blind spots, not the model - and the block splitter, doing
+# exactly what it is designed to, put a share of them in val until this
+# existed.
+# --------------------------------------------------------------------------
+def test_a_train_only_session_never_reaches_val_or_test():
+    out = sp.assign_frame_blocks_per_session(
+        {"synth": [f"synth_{i:04d}" for i in range(200)],
+         "drive": [f"drive_{i:04d}" for i in range(200)]},
+        0.15, 0.15, gap_frames=2, n_blocks=3, train_only=["synth"])
+    assert not [f for f in out["val"] + out["test"] if f.startswith("synth")]
+    assert len([f for f in out["train"] if f.startswith("synth")]) == 200, (
+        "pinned frames should all train, not be dropped as split buffer")
+    assert [f for f in out["val"] if f.startswith("drive")], (
+        "pinning one session must not stop the others being split")
+
+
+def test_a_pinned_session_is_named_apart_from_a_short_one():
+    """Both end up wholly in train, for opposite reasons - one is a decision,
+    the other is a shortage. A report that calls them the same thing invites
+    someone to 'fix' the decision by lengthening the session."""
+    out = sp.assign_frame_blocks_per_session(
+        {"synth": [f"synth_{i:04d}" for i in range(200)],
+         "tiny": ["tiny_0", "tiny_1"]},
+        0.15, 0.15, gap_frames=2, n_blocks=3, train_only=["synth"])
+    assert out["_train_only_pinned"] == ["synth"]
+    assert set(out["_train_only_sessions"]) == {"synth", "tiny"}
+
+
+def test_pinning_nothing_leaves_the_split_unchanged():
+    ids = {"a": [f"a_{i:04d}" for i in range(200)]}
+    base = sp.assign_frame_blocks_per_session(ids, 0.15, 0.15, gap_frames=2,
+                                              n_blocks=3)
+    same = sp.assign_frame_blocks_per_session(ids, 0.15, 0.15, gap_frames=2,
+                                              n_blocks=3, train_only=())
+    assert base["val"] == same["val"] and base["test"] == same["test"]

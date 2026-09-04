@@ -610,3 +610,14 @@ def test_overruling_the_audit_on_a_drive_is_written_down():
     head = src[:src.index("MIXED_SESSIONS = [")]
     assert "missed_plants.py disagrees" in head
     assert "overruled" in head.lower()
+
+
+def test_the_composite_run_trains_only():
+    """compose_mixed's own report says never to validate on composites, the
+    strategy doc says it, and the block splitter put 15 in val and 15 in test
+    regardless - because that is exactly what it is designed to do. Saying it
+    in prose is not saying it to the build."""
+    from training.datasets import mixed
+    if not mixed.SYNTH_SESSION:
+        pytest.skip("no composite run configured")
+    assert mixed.SYNTH_SESSION in (mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])

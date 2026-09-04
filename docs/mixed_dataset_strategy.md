@@ -219,7 +219,10 @@ The first run made this concrete: 506 pastes from a bank capped at 600 were
 about 340 distinct plants, ~120 of them appearing in several composites.
 
 Reuse now begins only when the pastes outnumber the bank, and the run says so
-when it does. Two knobs decide it — `BANK_MAX` (0 = every cut-out there is;
+when it does. Distinct cut-outs is still an **upper** bound on distinct plants:
+the weed drives are video, so one weed recurs in every frame it was driven past,
+and 3,842 cut-outs came from 131 source frames. The report prints both numbers,
+because no id in this pipeline can tell which instances are the same plant. Two knobs decide it — `BANK_MAX` (0 = every cut-out there is;
 the two source drives hold ~3,300) and `WEEDS_PER_IMAGE`. Every pasted instance
 also carries a `source_instance` attribute into the annotations, so a split can
 honour provenance directly rather than inferring it from frame order.
@@ -255,7 +258,10 @@ in `INCLUDE_FRAMES` matches nothing and 200 composites vanish from the build,
 and in `SCENE_HINTS` it hints a session that does not exist, so the frames train
 with no scene and the unmeasurable-class warning never fires.
 
-Composites are **never** a holdout. Held out, they would measure the compositor
+Composites are **never** a holdout, and that is enforced rather than advised:
+`TRAIN_ONLY_SESSIONS` pins the synth session to train, because the frame-block
+splitter otherwise puts a share of *every* session into val exactly as designed
+— it did, 15 val and 15 test, carrying most of val's weed instances. Held out, they would measure the compositor
 — whether pasted weeds get found on backgrounds the compositor itself screened
 — and report it as a crop-safety number for contact nobody observed. Worse, the
 instances come from drives that also train, so the same plant would sit on both
