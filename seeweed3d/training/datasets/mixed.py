@@ -160,7 +160,11 @@ CUTOUT_ONLY_SESSIONS = [
 #: DO NOT GUESS THE RANGE. `python -m seeweed3d.annotation.missed_plants`
 #: prints the cleanest available block for every cut-out drive, and the
 #: matching cut-out spec to put in compose_mixed, as two lines to copy.
-WEED_TEST_FRAMES = ""
+#: Chosen by the audit, not by hand: vid3's cleanest block carries 11
+#: unlabelled patches in 15 frames, against 40 for vid2's best. That is
+#: 0.73/frame - the same rate the composites came back at, and well under
+#: vid3's own 1.69 average.
+WEED_TEST_FRAMES = "vid3_20260108_110444:43-57"
 
 
 def _weed_test_session(spec):
