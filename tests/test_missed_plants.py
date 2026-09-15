@@ -442,7 +442,7 @@ def test_the_note_gives_both_specs_because_they_are_one_decision():
     txt = "\n".join(mp.block_note("vid3", _pf([9] * 30 + [0] * 15 + [9] * 30),
                                   size=15, buffer=5))
     assert "measure on   vid3:31-45" in txt
-    assert "cut-outs from vid3:1-25,51-75" in txt
+    assert "cut-outs from vid3:1-25,vid3:51-75" in txt
     assert "buffer is not optional" in txt
 
 
@@ -451,6 +451,7 @@ def test_a_block_at_the_end_leaves_no_dangling_range():
                                   size=15, buffer=5))
     assert "measure on   vid3:61-75" in txt
     assert "cut-outs from vid3:1-55" in txt
+    assert ",55-" not in txt and ",61-" not in txt
 
 
 def test_the_block_note_is_only_offered_for_cutout_drives():
@@ -459,3 +460,22 @@ def test_the_block_note_is_only_offered_for_cutout_drives():
     import inspect
     src = inspect.getsource(mp.format_report)
     assert "dec[0] == CUTOUT" in src
+
+
+def test_every_token_of_the_pasted_spec_names_its_session():
+    """`vid3:1-37,63-75` parses the second range as UNSCOPED, and select_frames
+    refuses a bare position the moment a spec names more than one session -
+    which compose_mixed's always does. A line printed to be pasted has to be a
+    line that works."""
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve()
+                           .parents[1] / "seeweed3d"))
+    from training.prepare_dataset import parse_frame_spec
+
+    txt = "\n".join(mp.block_note("vid3", _pf([9] * 30 + [0] * 15 + [9] * 30),
+                                  size=15, buffer=5))
+    spec = [ln.split("cut-outs from")[1].split("   (")[0].strip()
+            for ln in txt.splitlines() if "cut-outs from" in ln][0]
+    parsed = parse_frame_spec(spec)
+    assert None not in parsed, f"{spec} has an unscoped token: {parsed}"
+    assert set(parsed) == {"vid3"}

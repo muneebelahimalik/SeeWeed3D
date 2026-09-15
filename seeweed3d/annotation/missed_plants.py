@@ -380,10 +380,17 @@ def block_note(session, per_frame, size=TEST_BLOCK, buffer=TEST_BUFFER):
              f"score:",
          f"      measure on   {session}:{a}-{b}"
          f"   ({blobs} unlabelled patch(es) in {size} frames)"]
-    before = f"1-{a - buffer - 1}" if a - buffer - 1 >= 1 else ""
-    after = f"{b + buffer + 1}-{n}" if b + buffer + 1 <= n else ""
-    keep = ",".join(x for x in (before, after) if x)
-    L += [f"      cut-outs from {session}:{keep or '(nothing left)'}"
+    # EVERY token carries its session. `vid3:1-37,63-75` parses the second
+    # range as UNSCOPED, which select_frames refuses the moment a spec names
+    # more than one session - and compose_mixed's always does. A line printed
+    # to be pasted has to be a line that works.
+    parts = []
+    if a - buffer - 1 >= 1:
+        parts.append(f"{session}:1-{a - buffer - 1}")
+    if b + buffer + 1 <= n:
+        parts.append(f"{session}:{b + buffer + 1}-{n}")
+    keep = ",".join(parts)
+    L += [f"      cut-outs from {keep or '(nothing left)'}"
           f"   ({buffer}-frame buffer each side)",
           f"      The buffer is not optional: consecutive frames of a drive "
           f"show the same",

@@ -113,8 +113,14 @@ WEED_SOURCES = [
 #: vid3_20260108_110444 has 326 frames and 75 corrected ones. Cutting instances
 #: out of the other 251 would build the bank from SAM's own guesses, and a
 #: composite made from a machine mask is a machine mask with extra steps.
+#: vid3's 43-57 is MISSING ON PURPOSE, with a 5-frame buffer either side. That
+#: block is mixed.py's WEED_TEST_FRAMES - the project's only real weed test set
+#: - and a drive is video, so cutting instances out of frame 58 would paste the
+#: same physical plant that frame 57 is used to score. Tests enforce both the
+#: gap and the buffer; see test_dataset_runners.
 SOURCE_FRAMES = ("vid2_20260108_122731:*,"
-                 "vid3_20260108_110444:1-75")
+                 "vid3_20260108_110444:1-37,"
+                 "vid3_20260108_110444:63-75")
 
 #: WHERE THE BACKGROUNDS COME FROM. Onion drives - real soil, real rows, real
 #: crop geometry. Every one is screened before use; see UNCLAIMED_BLOBS_MAX.
