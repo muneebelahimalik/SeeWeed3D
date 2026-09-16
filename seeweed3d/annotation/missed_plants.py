@@ -73,7 +73,7 @@ SESSIONS = [
     r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
     r"E:\Dataset_Vidalia\Mix_raj_Batch 01",
-    r"E:\Dataset_Vidalia\synthetic\synth_mixed_20260904_0246",
+    r"E:\Dataset_Vidalia\synthetic\synth_mixed_20260916_1341",
 ]
 
 #: Restrict to the frames a build actually uses, in make_dataset's
