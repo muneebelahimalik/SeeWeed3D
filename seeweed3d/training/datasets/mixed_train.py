@@ -40,7 +40,7 @@ from training.train_model_rfdetr import main  # noqa: E402
 #: Bump this each round. Numbered independently of the weed rounds, because
 #: they are different models trained on different data - sharing the counter
 #: would make "round 2" ambiguous in every later conversation.
-ROUND = 0
+ROUND = 1
 
 #: WHERE RUNS ARE WRITTEN. Separate from the weed runs root so a mixed round
 #: never overwrites the weed checkpoint it should be compared against.
