@@ -1161,9 +1161,17 @@ def build(datumaro_root, images_root, out_root, *, contract=None,
                   f"({infos[0].session_id if infos else '?'}) - there is "
                   f"nothing to hold out")
     else:
+        # train_only_sessions reaches BOTH split paths or it is not a
+        # guarantee. It used to be honoured only by the frame-block splitter,
+        # so the day a build had enough independent units to split by session
+        # instead, the composites went silently into val and the only
+        # hand-annotated contact batch became the whole test set - the two
+        # things the setting exists to prevent, arriving by a route it never
+        # covered.
         split_map, split_info = sp.plan_splits(
             infos, val_fraction, test_fraction, seed,
             holdout_val=holdout_val, holdout_test=holdout_test,
+            holdout_train=train_only_sessions,
             stratify_by_scene=stratify_by_scene,
             granularity=split_granularity)
         # Whole sessions are indivisible, so a fraction that rounds below one

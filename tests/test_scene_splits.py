@@ -230,3 +230,32 @@ def test_pinning_nothing_leaves_the_split_unchanged():
     same = sp.assign_frame_blocks_per_session(ids, 0.15, 0.15, gap_frames=2,
                                               n_blocks=3, train_only=())
     assert base["val"] == same["val"] and base["test"] == same["test"]
+
+
+def test_a_train_only_session_is_honoured_by_the_session_split_too():
+    """WHERE IT BROKE. train_only was wired into the frame-block splitter
+    alone, so the day a build had enough independent units to split by SESSION
+    instead, the composites went into val and the only hand-annotated contact
+    batch became the whole test set - the two things the setting exists to
+    prevent, arriving by the one route it did not cover."""
+    S = sp.SessionInfo
+    infos = [S(session_id="synth_x", scene="mixed"),
+             S(session_id="Mix_raj_Batch_01", scene="mixed"),
+             S(session_id="onionA", scene="onion_only"),
+             S(session_id="onionB", scene="onion_only"),
+             S(session_id="onionC", scene="onion_only"),
+             S(session_id="weedA", scene="weed_only")]
+    m, _ = sp.plan_splits(infos, 0.15, 0.15,
+                          holdout_train=["synth_x", "Mix_raj_Batch_01"])
+    for pinned in ("synth_x", "Mix_raj_Batch_01"):
+        assert pinned in m["train"]
+        assert pinned not in m["val"] and pinned not in m["test"]
+
+
+def test_pinning_to_train_and_to_test_is_refused():
+    """Silently preferring one would put a session where its config says it
+    must never go."""
+    S = sp.SessionInfo
+    infos = [S(session_id=f"s{i}") for i in range(4)]
+    with pytest.raises(sp.SplitError, match="pinned to both"):
+        sp.assign_splits(infos, holdout_train=["s0"], holdout_test=["s0"])
