@@ -479,3 +479,57 @@ def test_every_token_of_the_pasted_spec_names_its_session():
     parsed = parse_frame_spec(spec)
     assert None not in parsed, f"{spec} has an unscoped token: {parsed}"
     assert set(parsed) == {"vid3"}
+
+
+def test_the_spec_names_the_session_the_build_will_use():
+    """NOT the folder name. The build derives a session from FILENAMES and only
+    falls back to the folder when they are generic, so `synth_mixed_20260916_1341`
+    holds frames the build calls `synth_20260916_134100` - and a spec written
+    with the folder matches nothing at all."""
+    synth = {f"synth_20260916_134100_{i:06d}": {"n_missed": 0}
+             for i in range(1, 6)}
+    assert mp.build_session_id("synth_mixed_20260916_1341",
+                               synth) == "synth_20260916_134100"
+
+
+def test_a_generic_stem_falls_back_to_the_folder_with_its_punctuation_fixed():
+    """`Mix_raj_Batch 01` has a space where the session id has an underscore."""
+    raj = {f"frame_{i:08d}": {"n_missed": 0} for i in (555, 562)}
+    assert mp.build_session_id("Mix_raj_Batch 01", raj) == "Mix_raj_Batch_01"
+
+
+def test_an_overruled_drive_is_not_offered_an_exclusion():
+    """The overrule says a person looked and does not believe these patches are
+    missed plants. Listing them as frames to delete argues the same settled
+    question twice - and on Mix_raj it proposed deleting all seven frames of
+    the project's only observed contact, leaving zero."""
+    raj = {f"frame_{i:08d}": {"n_missed": 9} for i in range(7)}
+    assert mp.exclude_note("Mix_raj_Batch 01", raj,
+                           decided=mp.DECIDED["Mix_raj_Batch_01"]) == []
+
+
+def test_half_a_drive_is_too_much_to_exclude():
+    """Excluding is a fix for a few frames. Past that the drive needs
+    annotating or cutting up, and 'exclude 33 of 60' reads as an action while
+    being neither."""
+    txt = "\n".join(mp.exclude_note(
+        "vid2", {f"v{i:03d}": {"n_missed": 9 if i < 33 else 0}
+                 for i in range(60)}))
+    assert "Too many bad frames" in txt and "33 of 60" in txt
+    assert "EXCLUDE_FRAMES" not in txt
+
+
+def test_a_few_bad_frames_do_get_a_paste_ready_spec():
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve()
+                           .parents[1] / "seeweed3d"))
+    from training.prepare_dataset import parse_frame_spec
+
+    pf = {f"vid3_20260108_110444_{i:06d}": {"n_missed": 9 if i < 3 else 0}
+          for i in range(20)}
+    txt = "\n".join(mp.exclude_note("vid3_20260108_110444", pf))
+    assert "exclude its 3 bad frame(s) of 20" in txt
+    spec = txt.split("EXCLUDE_FRAMES = (")[1].split(")")[0].strip("'\"")
+    parsed = parse_frame_spec(spec)
+    assert None not in parsed, "an unscoped token would apply to every session"
+    assert set(parsed) == {"vid3_20260108_110444"}
