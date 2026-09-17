@@ -793,3 +793,19 @@ def test_excluded_frames_are_item_ids_rather_than_positions():
     positions, patterns = parse_frame_spec(
         mixed.CONFIG["EXCLUDE_FRAMES"])["vid3_20260108_110444"]
     assert not positions and patterns
+
+
+def test_the_mixed_build_splits_by_frame_block():
+    """A session is ALL OR NOTHING, and exactly one session in this build holds
+    real weeds. A session-level split therefore either puts vid3 in val - no
+    real weed-only frames train at all - or keeps it in train, leaving real
+    weeds unmeasured. Blocks give training and the score each a share."""
+    from training.datasets import mixed
+    assert mixed.CONFIG["SPLIT_MODE"] == "frame_block"
+
+
+def test_the_train_only_sessions_reach_the_build_config():
+    from training.datasets import mixed
+    names = set(mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])
+    assert mixed.SYNTH_SESSION in names
+    assert "Mix_raj_Batch_01" in names

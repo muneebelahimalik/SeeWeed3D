@@ -341,7 +341,22 @@ CONFIG = dict(
 
     # Whole sessions where there are enough of them - and with two campaigns
     # merged there are. The build says which granularity it used.
-    SPLIT_MODE="auto",
+    #: FRAME BLOCKS, not whole sessions, and the last build is why.
+    #:
+    #: "auto" tries a session-level split first, and it now succeeds: with the
+    #: composites and Mix_raj pinned to train, four sessions remain, which is
+    #: enough units to fill three splits. But a session is ALL OR NOTHING, and
+    #: exactly one of those four holds real weeds - so a session split either
+    #: puts vid3 in val, which leaves training no real weed-only frames at all,
+    #: or keeps it in train, which leaves real weeds unmeasured. Both are worse
+    #: than splitting it into blocks, where training and the score each get a
+    #: share of it.
+    #:
+    #: WHAT THIS COSTS, said plainly: val and test come from the same drives as
+    #: train, so the numbers are an upper bound and not evidence of
+    #: generalisation. That is the accepted trade until a separately annotated
+    #: mixed set exists to hold out, which is the plan this build is a step in.
+    SPLIT_MODE="frame_block",
     SPLIT_GRANULARITY="auto",
     HOLDOUT_TEST_SESSIONS=HOLDOUT_TEST,
     HOLDOUT_VAL_SESSIONS=HOLDOUT_VAL,
