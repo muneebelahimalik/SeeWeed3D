@@ -101,9 +101,19 @@ from training import pseudo_label as pl  # noqa: E402
 #: The cost of cut-out-only: real weed-beside-weed context, real dense-patch
 #: lighting and the drive's own soil all stay behind. Prefer whole frames when
 #: the audit says they are clean.
+#: vid3_20260108_110444 IS NO LONGER HERE. A drive is a bank OR whole frames,
+#: not both: an instance trained in situ and again pasted is trained twice, and
+#: near-copies of one plant land on both sides of a split. vid3 is the cleanest
+#: weed drive at 19%, so it went to whole frames, where it brings real
+#: weed-beside-weed context, real dense-patch lighting and its own soil - none
+#: of which survives a cut-out. vid2 at 55% cannot, so it is the bank.
+#:
+#: THE COST IS A CEILING ON COMPOSITES. The bank is now vid2's ~1,450 cut-outs,
+#: and pastes are drawn without replacement, so at a mean of 4 weeds a frame
+#: about 360 composites is the most this can make before a plant repeats. The
+#: run says so when it happens. Raising it means finishing vid2's annotation.
 WEED_SOURCES = [
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
-    r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
 ]
 
 #: Which frames of those sessions were actually corrected, in the same
@@ -113,14 +123,10 @@ WEED_SOURCES = [
 #: vid3_20260108_110444 has 326 frames and 75 corrected ones. Cutting instances
 #: out of the other 251 would build the bank from SAM's own guesses, and a
 #: composite made from a machine mask is a machine mask with extra steps.
-#: vid3's 43-57 is MISSING ON PURPOSE, with a 5-frame buffer either side. That
-#: block is mixed.py's WEED_TEST_FRAMES - the project's only real weed test set
-#: - and a drive is video, so cutting instances out of frame 58 would paste the
-#: same physical plant that frame 57 is used to score. Tests enforce both the
-#: gap and the buffer; see test_dataset_runners.
-SOURCE_FRAMES = ("vid2_20260108_122731:*,"
-                 "vid3_20260108_110444:1-37,"
-                 "vid3_20260108_110444:63-75")
+#: vid3 is gone from here with WEED_SOURCES: it trains as whole frames now, and
+#: the block that used to be withheld for testing is no longer needed, because
+#: the build's own frame-block split gives val and test a share of that drive.
+SOURCE_FRAMES = "vid2_20260108_122731:*"
 
 #: WHERE THE BACKGROUNDS COME FROM. Onion drives - real soil, real rows, real
 #: crop geometry. Every one is screened before use; see UNCLAIMED_BLOBS_MAX.

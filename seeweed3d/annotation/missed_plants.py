@@ -112,7 +112,11 @@ DECIDED = {
     "vid2_20260108_122731": (
         CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
     "vid3_20260108_110444": (
-        CUTOUT, "training/datasets/mixed.py, on this audit's recommendation"),
+        WHOLE,
+        "training/datasets/mixed.py - at 19% it is the cleanest weed drive "
+        "there is, and its bad frames are EXCLUDED by name rather than the "
+        "whole drive being thrown away. This audit's own MOSTLY CLEAN advice, "
+        "applied to a drive that just misses the threshold"),
 }
 
 #: A TEST BLOCK cut from a cut-out-only drive: how many frames, and how many
@@ -399,6 +403,39 @@ def block_note(session, per_frame, size=TEST_BLOCK, buffer=TEST_BUFFER):
     return L
 
 
+def exclude_note(session, per_frame, unsafe=UNSAFE_BLOBS):
+    """The frames to leave out, as a paste-ready EXCLUDE_FRAMES spec.
+
+    A drive at 19% is not a drive to throw away; it is a drive with fourteen
+    bad frames in it. The audit's own MOSTLY CLEAN verdict says exactly that -
+    "train on the frames and fix or exclude those few" - and until now the only
+    thing it printed was the worst eight by name, which is not a decision
+    anybody can act on.
+
+    LITERAL ITEM IDS, not positions. A position range is relative to whatever
+    INCLUDE_FRAMES already selected, so the two would silently disagree the
+    moment either changed; an item id means the same frame whatever else the
+    spec does. `<session>:<stem>` is one of the token forms parse_frame_spec
+    already takes."""
+    bad = sorted(k for k, v in per_frame.items()
+                 if v.get("n_missed", 0) >= unsafe)
+    if not bad:
+        return []
+    n = len(per_frame)
+    spec = ",".join(f"{session}:{k}" for k in bad)
+    return ["", f"    TO TRAIN ON THIS DRIVE WHOLE, exclude its {len(bad)} bad "
+                f"frame(s) of {n}:",
+            f"      EXCLUDE_FRAMES = ({spec!r})",
+            f"      That leaves {n - len(bad)} frame(s) carrying real "
+            f"weed-beside-weed context,",
+            f"      real dense-patch lighting and this drive's own soil - all "
+            f"of which a cut-out",
+            f"      loses. Excluding a frame is not the same as fixing it: "
+            f"those {len(bad)} still",
+            f"      hold plants nobody labelled, and annotating them is worth "
+            f"more than this is."]
+
+
 def worst(per_frame, n=WORST_FRAMES):
     return sorted((k for k, v in per_frame.items() if v["n_missed"]),
                   key=lambda k: (-per_frame[k]["n_missed"],
@@ -430,6 +467,11 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
         dec = decision_for(sess)
         if dec and dec[0] == CUTOUT:
             L += block_note(sess, per_frame)
+        # Offered whenever excluding a few frames would make the rest usable -
+        # which is the actionable half of MOSTLY CLEAN, and of a NOT SAFE
+        # verdict driven by a minority of the drive.
+        if not dec or dec[0] == WHOLE:
+            L += exclude_note(sess, per_frame, unsafe)
     for k in stale_decisions(by_session):
         L += ["", f"  [!] DECIDED names {k!r}, which this run did not audit. "
                   f"That decision is",

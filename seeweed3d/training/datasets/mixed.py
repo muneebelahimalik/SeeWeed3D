@@ -130,9 +130,17 @@ MIXED_SESSIONS = [
 #: these drives' own soil. Composites place instances individually against onion
 #: rows, so the model stops seeing what a weed-only field looks like. Move a
 #: drive back out of this list the day its annotation is finished.
+#: vid3_20260108_110444 LEFT THIS LIST. At 19% it is the cleanest weed drive
+#: there is, and the audit's own MOSTLY CLEAN advice - "train on the frames and
+#: fix or exclude those few" - applies to a drive that only just misses the
+#: threshold. Its bad frames are named in EXCLUDE_FRAMES instead, so 60-odd
+#: good ones train rather than 75 being thrown away.
+#:
+#: It is out of compose_mixed.WEED_SOURCES in the same move. A drive is a bank
+#: OR whole frames, never both: an instance trained in situ and again pasted is
+#: trained twice, and near-copies of one plant land on both sides of a split.
 CUTOUT_ONLY_SESSIONS = [
     r"E:\Dataset_Vidalia\Weeds_20260108_3_good\sessions\vid2_20260108_122731",
-    r"E:\Dataset_Vidalia\Weeds_20260108_1\sessions\vid3_20260108_110444",
 ]
 
 #: A BLOCK OF REAL WEED FRAMES PINNED TO TEST, or "" for none, in the same
@@ -160,11 +168,11 @@ CUTOUT_ONLY_SESSIONS = [
 #: DO NOT GUESS THE RANGE. `python -m seeweed3d.annotation.missed_plants`
 #: prints the cleanest available block for every cut-out drive, and the
 #: matching cut-out spec to put in compose_mixed, as two lines to copy.
-#: Chosen by the audit, not by hand: vid3's cleanest block carries 11
-#: unlabelled patches in 15 frames, against 40 for vid2's best. That is
-#: 0.73/frame - the same rate the composites came back at, and well under
-#: vid3's own 1.69 average.
-WEED_TEST_FRAMES = "vid3_20260108_110444:43-57"
+#: RETIRED, and kept for the day another drive needs it. vid3 now trains as
+#: whole frames and the build's own frame-block split gives val and test a
+#: share of it, so pinning a block would take those frames out of training to
+#: buy a holdout the splitter already provides.
+WEED_TEST_FRAMES = ""
 
 
 def _weed_test_session(spec):
@@ -182,9 +190,17 @@ _TEST_ROOTS = [p for p in CUTOUT_ONLY_SESSIONS
                if WEED_TEST_SESSION and p.rstrip("\\/").endswith(
                    WEED_TEST_SESSION)]
 
-SOURCES_ROOTS = [p for p in
-                 list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
-                 if p not in CUTOUT_ONLY_SESSIONS or p in _TEST_ROOTS]
+#: Dropping a drive out of CUTOUT_ONLY_SESSIONS is all it takes to train on it
+#: whole - WEED_SESSIONS already names both weed drives, and this list is what
+#: subtracts the ones that may only supply cut-outs. There is deliberately no
+#: second "whole frames" list: two lists naming the same drive is how a root
+#: gets read twice, and a drive would silently double its instances.
+#:
+#: dict.fromkeys rather than set(): order decides which export the build reads
+#: first, and a set would reorder the SESSIONS table between runs.
+SOURCES_ROOTS = list(dict.fromkeys(
+    p for p in list(WEED_SESSIONS) + list(ONION_SESSIONS) + MIXED_SESSIONS
+    if p not in CUTOUT_ONLY_SESSIONS or p in _TEST_ROOTS))
 
 #: WHERE THE BUILT DATASET IS WRITTEN. Safe to delete and rebuild.
 OUT_DIR = r"E:\Dataset_Vidalia\datasets\mixed_v1"
@@ -259,9 +275,30 @@ CONFIG = dict(
     INCLUDE_FRAMES=("Mix_raj_Batch_01:*,"
                     "Visit1_20260108_133306:*,"
                     "Visit1_20260108_134015:*,"
-                    "vid3_20260108_132749:*"
+                    "vid3_20260108_132749:*,"
+                    # The 75 frames a person corrected. The export holds 326;
+                    # the other 251 are SAM's own guesses, and training on a
+                    # correctly-shaped mask with the wrong class is worse than
+                    # no data, because the loss is confident and consistent.
+                    "vid3_20260108_110444:1-75"
                     + (f",{SYNTH_SESSION}:*" if SYNTH_SESSION else "")
                     + (f",{WEED_TEST_FRAMES}" if WEED_TEST_FRAMES else "")),
+
+    # THE FRAMES OF A MOSTLY-CLEAN DRIVE THAT ARE NOT CLEAN, by item id.
+    #
+    # vid3_20260108_110444 has 14 frames of 75 carrying 3+ plant-shaped patches
+    # nobody labelled. Trained whole they teach that a plant of that size is
+    # soil - a weed that never gets treated - so they come out and the other 61
+    # stay in. This is the audit's own MOSTLY CLEAN advice applied to a drive
+    # that only just misses its threshold.
+    #
+    # ITEM IDS, NOT POSITIONS: a position is relative to whatever INCLUDE_FRAMES
+    # selected, so the two would silently disagree the moment either changed.
+    #
+    # PASTE THE LINE `python -m seeweed3d.annotation.missed_plants` PRINTS.
+    # Leaving this empty trains on all 75, bad frames included - which is the
+    # thing the drive was kept out of the build to avoid.
+    EXCLUDE_FRAMES="",
 
     # MERGED, not dropped, and the build's own counts are why.
     #
@@ -338,7 +375,14 @@ CONFIG = dict(
     #: nearly the whole weed measurement. That number was never trustworthy -
     #: it is the same seven frames the model trains on - and a weed score
     #: computed on pasted weeds was not more trustworthy for being larger.
-    TRAIN_ONLY_SESSIONS=[SYNTH_SESSION] if SYNTH_SESSION else [],
+    #: Mix_raj_Batch_01 JOINS THE COMPOSITES HERE, by decision rather than by
+    #: arithmetic. Seven frames split 5/1/1 put one frame in val and one in
+    #: test, each a single frame from a batch the model trains the rest of -
+    #: a number too small to mean anything and two frames training cannot
+    #: spare. The replacement is a separate hand-annotated mixed set, which is
+    #: what a crop-safety measurement actually needs.
+    TRAIN_ONLY_SESSIONS=([SYNTH_SESSION] if SYNTH_SESSION else [])
+                        + ["Mix_raj_Batch_01"],
 
     VAL_FRACTION=0.15,
     TEST_FRACTION=0.15,

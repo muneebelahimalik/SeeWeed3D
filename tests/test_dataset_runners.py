@@ -704,3 +704,68 @@ def test_pinning_nothing_leaves_the_cutout_drives_fully_out():
         pytest.skip("a weed test block is pinned")
     assert mixed._TEST_ROOTS == []
     assert mixed.HOLDOUT_TEST == []
+
+
+# --------------------------------------------------------------------------- #
+# A drive is a cut-out BANK or a source of WHOLE FRAMES, never both. Trained
+# both ways an instance is trained twice - once in situ, once pasted - and
+# near-copies of one plant land on both sides of a split.
+# --------------------------------------------------------------------------- #
+def test_no_drive_is_both_a_bank_and_a_training_source():
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    both = set(cm.WEED_SOURCES) & set(mixed.SOURCES_ROOTS)
+    assert not both, f"{sorted(both)} supplies whole frames AND cut-outs"
+
+
+def test_the_build_reads_no_export_twice():
+    """WEED_SESSIONS already names both weed drives, so a second 'whole frames'
+    list naming one of them would read its export twice and silently double
+    that drive's instances."""
+    from training.datasets import mixed
+    assert len(mixed.SOURCES_ROOTS) == len(set(mixed.SOURCES_ROOTS))
+
+
+def test_every_cutout_only_drive_still_feeds_the_bank():
+    """Otherwise a drive supplies neither frames nor cut-outs and has silently
+    left the project."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    for p in mixed.CUTOUT_ONLY_SESSIONS:
+        assert p in cm.WEED_SOURCES, f"{p} reaches nothing at all"
+
+
+def test_a_weed_drive_that_trains_whole_is_not_in_the_bank_spec():
+    """SOURCE_FRAMES naming a session the bank no longer reads is not
+    harmless - load_bank narrows the spec per export, and a stale name is a
+    selection that silently matches nothing."""
+    from training.datasets import mixed
+    from annotation import compose_mixed as cm
+    import ntpath
+    import training.datumaro_multitask as dmm
+    for p in mixed.SOURCES_ROOTS:
+        sid = dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
+        assert f"{sid}:" not in cm.SOURCE_FRAMES, (
+            f"{sid} trains as whole frames but is still named in SOURCE_FRAMES")
+
+
+def test_the_only_contact_batch_never_reaches_val_or_test():
+    """Seven frames split 5/1/1 put ONE frame in val and ONE in test, each a
+    single frame from a batch the model trains the rest of. That is a number
+    too small to mean anything and two frames training cannot spare - so the
+    batch trains whole, and the crop-safety ruler comes from a separate
+    hand-annotated mixed set instead."""
+    from training.datasets import mixed
+    train_only = mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or []
+    assert "Mix_raj_Batch_01" in train_only
+    assert "Mix_raj_Batch_01" not in mixed.HOLDOUT_TEST
+
+
+def test_the_corrected_frames_of_a_weed_drive_are_the_ones_selected():
+    """vid3's export holds 326 frames and 75 corrected ones. The other 251 are
+    SAM's guesses, and a correctly-shaped mask with the wrong class is worse
+    than no data - the loss is confident and consistent."""
+    from training.datasets import mixed
+    spec = mixed.CONFIG["INCLUDE_FRAMES"]
+    assert "vid3_20260108_110444:1-75" in spec
+    assert "vid3_20260108_110444:*" not in spec
