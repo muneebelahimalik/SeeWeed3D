@@ -69,7 +69,7 @@ from training.make_dataset import CONFIG as BASE, main  # noqa: E402
 #: Its own report is the record of what it contains - the achieved contact
 #: bands, the backgrounds it refused, and the fact that it is synthetic.
 SYNTH_ROOT = r"E:\Dataset_Vidalia\synthetic"
-SYNTH_RUN = "synth_mixed_20260916_1341"
+SYNTH_RUN = "synth_mixed_20260917_1138"
 
 #: Derived, never typed. The folder is synth_mixed_<stamp> and the frames it
 #: contains are synth_<stamp>00_*.png - the id needs seconds to parse as a
