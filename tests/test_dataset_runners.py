@@ -769,3 +769,27 @@ def test_the_corrected_frames_of_a_weed_drive_are_the_ones_selected():
     spec = mixed.CONFIG["INCLUDE_FRAMES"]
     assert "vid3_20260108_110444:1-75" in spec
     assert "vid3_20260108_110444:*" not in spec
+
+
+def test_the_bad_frames_of_the_whole_frame_weed_drive_are_excluded():
+    """vid3 trains whole at 19% dirty, which is only defensible because its 14
+    bad frames come out by name. Empty here and the build trains on all 75 -
+    exactly what keeping the drive out was avoiding."""
+    from training.prepare_dataset import parse_frame_spec
+    from training.datasets import mixed
+    spec = mixed.CONFIG.get("EXCLUDE_FRAMES") or ""
+    assert spec, "vid3 trains whole with nothing excluded"
+    parsed = parse_frame_spec(spec)
+    assert None not in parsed, "an unscoped token applies to every session"
+    _, patterns = parsed["vid3_20260108_110444"]
+    assert len(patterns) == 14
+
+
+def test_excluded_frames_are_item_ids_rather_than_positions():
+    """A position is relative to whatever INCLUDE_FRAMES selected, so the two
+    would silently disagree the moment either changed."""
+    from training.prepare_dataset import parse_frame_spec
+    from training.datasets import mixed
+    positions, patterns = parse_frame_spec(
+        mixed.CONFIG["EXCLUDE_FRAMES"])["vid3_20260108_110444"]
+    assert not positions and patterns

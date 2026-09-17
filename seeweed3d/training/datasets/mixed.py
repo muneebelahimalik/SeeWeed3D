@@ -295,10 +295,25 @@ CONFIG = dict(
     # ITEM IDS, NOT POSITIONS: a position is relative to whatever INCLUDE_FRAMES
     # selected, so the two would silently disagree the moment either changed.
     #
-    # PASTE THE LINE `python -m seeweed3d.annotation.missed_plants` PRINTS.
-    # Leaving this empty trains on all 75, bad frames included - which is the
-    # thing the drive was kept out of the build to avoid.
-    EXCLUDE_FRAMES="",
+    # Pasted from `python -m seeweed3d.annotation.missed_plants`, which
+    # prints this spec. RE-RUN IT after any re-annotation: these 14 are a
+    # property of the labels as they stand, and fixing a frame should put
+    # it back into training rather than leave it excluded for ever.
+    EXCLUDE_FRAMES=(
+                   "vid3_20260108_110444:vid3_20260108_110444_000065,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000075,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000100,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000110,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000185,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000220,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000225,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000230,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000240,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000245,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000295,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000410,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000415,"
+                   "vid3_20260108_110444:vid3_20260108_110444_000445"),
 
     # MERGED, not dropped, and the build's own counts are why.
     #

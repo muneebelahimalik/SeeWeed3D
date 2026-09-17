@@ -403,7 +403,25 @@ def block_note(session, per_frame, size=TEST_BLOCK, buffer=TEST_BUFFER):
     return L
 
 
-def exclude_note(session, per_frame, unsafe=UNSAFE_BLOBS):
+def build_session_id(folder_name, per_frame):
+    """The session id the BUILD will know this drive by.
+
+    Not the folder name. The build derives a session from the FILENAMES and
+    only falls back to the folder when they are generic, so a spec written with
+    the folder name silently matches nothing: `synth_mixed_20260916_1341` holds
+    frames the build calls `synth_20260916_134100`, and `Mix_raj_Batch 01` has
+    a space where the id has an underscore. A pasted line that matches nothing
+    is worse than no line."""
+    import training.datumaro_multitask as dmm
+    for stem in sorted(per_frame):
+        derived = dmm.session_id_from_name(str(stem).rsplit("_", 1)[0])
+        if derived and derived.lower() not in dmm.GENERIC_STEMS:
+            return derived
+    return dmm.session_id_from_name(folder_name)
+
+
+def exclude_note(session, per_frame, unsafe=UNSAFE_BLOBS, decided=None,
+                 min_left=0.5):
     """The frames to leave out, as a paste-ready EXCLUDE_FRAMES spec.
 
     A drive at 19% is not a drive to throw away; it is a drive with fourteen
@@ -419,21 +437,34 @@ def exclude_note(session, per_frame, unsafe=UNSAFE_BLOBS):
     already takes."""
     bad = sorted(k for k, v in per_frame.items()
                  if v.get("n_missed", 0) >= unsafe)
-    if not bad:
-        return []
     n = len(per_frame)
-    spec = ",".join(f"{session}:{k}" for k in bad)
+    if not bad or not n:
+        return []
+    # A DRIVE THAT WAS OVERRULED IS NOT OFFERED AN EXCLUSION. The overrule says
+    # a person looked and does not believe these patches are missed plants, so
+    # listing them as frames to delete argues the same settled question twice -
+    # and on Mix_raj it proposed deleting all seven frames of the project's
+    # only observed contact, leaving nothing.
+    if decided and decided[0] == WHOLE and "deliberately against" in decided[1]:
+        return []
+    # Excluding is a fix only when the bad frames are a MINORITY. Past that the
+    # drive needs annotating or cutting up, and "exclude 33 of 60" is advice
+    # that reads as action while being neither.
+    if (n - len(bad)) < min_left * n:
+        return ["", f"    Too many bad frames to exclude: {len(bad)} of {n}. "
+                    f"Excluding is a fix for a few,",
+                f"    not for half a drive - finish the annotation, or use it "
+                f"as a cut-out source."]
+    sid = build_session_id(session, per_frame)
+    spec = ",".join(f"{sid}:{k}" for k in bad)
     return ["", f"    TO TRAIN ON THIS DRIVE WHOLE, exclude its {len(bad)} bad "
                 f"frame(s) of {n}:",
             f"      EXCLUDE_FRAMES = ({spec!r})",
-            f"      That leaves {n - len(bad)} frame(s) carrying real "
-            f"weed-beside-weed context,",
-            f"      real dense-patch lighting and this drive's own soil - all "
-            f"of which a cut-out",
-            f"      loses. Excluding a frame is not the same as fixing it: "
-            f"those {len(bad)} still",
-            f"      hold plants nobody labelled, and annotating them is worth "
-            f"more than this is."]
+            f"      That leaves {n - len(bad)} frame(s). Excluding a frame is "
+            f"not the same as fixing it:",
+            f"      those {len(bad)} still hold plants nobody labelled, and "
+            f"annotating them is worth",
+            f"      more than this is."]
 
 
 def worst(per_frame, n=WORST_FRAMES):
@@ -471,7 +502,7 @@ def format_report(by_session, out_dir=None, unsafe=UNSAFE_BLOBS):
         # which is the actionable half of MOSTLY CLEAN, and of a NOT SAFE
         # verdict driven by a minority of the drive.
         if not dec or dec[0] == WHOLE:
-            L += exclude_note(sess, per_frame, unsafe)
+            L += exclude_note(sess, per_frame, unsafe, dec)
     for k in stale_decisions(by_session):
         L += ["", f"  [!] DECIDED names {k!r}, which this run did not audit. "
                   f"That decision is",
