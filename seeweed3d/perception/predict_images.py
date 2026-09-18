@@ -620,6 +620,7 @@ def predict(cfg=None):
     if want_coco:
         n_poly = _write_coco(coco_frames, coco_names or list(CLASSES),
                              out_dir, str(ckpt), c["CONF"])
+        _write_cvat_labels(out_dir)
         print(f"\n-> {out_dir / 'instances_default.json'}  "
               f"({n_poly} instance(s), COCO 1.0)")
 
@@ -671,6 +672,26 @@ def _coco_instances(det):
                     "area": float(np.count_nonzero(det.masks[i])),
                     "score": float(det.scores[i])})
     return out
+
+
+def _write_cvat_labels(out_dir):
+    """The CVAT label schema, beside the COCO the schema has to match.
+
+    Importing COCO into a task whose labels do not match does not fail - CVAT
+    creates whatever is missing, or drops what it cannot place, and the
+    annotator corrects masks under the wrong class names without ever being
+    told. The two files are written together because they are one thing: the
+    predictions and the vocabulary they are expressed in.
+
+    The FULL ontology, not the model's four classes. An annotator correcting a
+    prelabelled frame needs `wild_radish` and `weed_cluster` available even
+    though this build merges them into other_weed - otherwise the only way to
+    label one is to call it something it is not. The LEP point label and
+    ignore_region come with it for the same reason."""
+    import json as _json
+    from common.ontology import cvat_labels
+    (Path(out_dir) / "cvat_labels.json").write_text(
+        _json.dumps(cvat_labels(), indent=2), encoding="utf-8")
 
 
 def _write_coco(frames, names, out_dir, checkpoint, conf):
