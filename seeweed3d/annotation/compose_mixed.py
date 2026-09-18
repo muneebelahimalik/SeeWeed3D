@@ -101,6 +101,18 @@ from training import pseudo_label as pl  # noqa: E402
 #: The cost of cut-out-only: real weed-beside-weed context, real dense-patch
 #: lighting and the drive's own soil all stay behind. Prefer whole frames when
 #: the audit says they are clean.
+#:
+#: NEVER CUT INSTANCES OUT OF A DRIVE THAT IS MEASURED ON. A weed pasted from a
+#: val or test frame is that frame's own plant sitting in the training set -
+#: the most direct leak there is, and invisible to every other check, because
+#: the composite has a different session id, a different filename and a
+#: different background.
+#:
+#: And it is stricter than "not that exact frame": these drives are VIDEO, so
+#: the frame beside a val frame holds the same physical plant. The rule that
+#: holds is about whole drives - a drive feeding this bank may appear in the
+#: build only if it is pinned TRAIN_ONLY there. test_dataset_runners enforces
+#: it, and it goes live the day vid3's 251 uncorrected frames are mined in.
 #: vid3_20260108_110444 IS NO LONGER HERE. A drive is a bank OR whole frames,
 #: not both: an instance trained in situ and again pasted is trained twice, and
 #: near-copies of one plant land on both sides of a split. vid3 is the cleanest
