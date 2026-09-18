@@ -268,3 +268,38 @@ def test_the_crop_class_is_exported_like_any_other(tmp_path, monkeypatch):
     doc = json.loads((out / "instances_default.json").read_text())
     ids = {c["id"]: c["name"] for c in doc["categories"]}
     assert {ids[a["category_id"]] for a in doc["annotations"]} == {CROP_CLASS}
+
+
+def test_the_cvat_label_schema_is_written_beside_the_coco():
+    """Importing COCO into a task whose labels do not match does not fail -
+    CVAT creates what is missing or drops what it cannot place, and the
+    annotator then corrects masks under the wrong class names without ever
+    being told. The two files are one thing: the predictions and the
+    vocabulary they are expressed in."""
+    import inspect
+    src = inspect.getsource(pi.predict)
+    assert "_write_cvat_labels(out_dir)" in src
+    assert src.index("_write_coco(") < src.index("_write_cvat_labels(out_dir)")
+
+
+def test_the_schema_offers_the_full_ontology_not_the_models_classes(tmp_path):
+    """An annotator correcting a prelabelled frame needs wild_radish and
+    weed_cluster available even though this build merges them into other_weed.
+    Without them the only way to label one is to call it something it is not -
+    and a merge is reversible while a mislabel is not."""
+    pi._write_cvat_labels(tmp_path)
+    names = [lab["name"] for lab in
+             json.loads((tmp_path / "cvat_labels.json").read_text())]
+    for required in ("wild_radish", "weed_cluster", "onion_plant",
+                     "weed_LEP", "ignore_region"):
+        assert required in names, required
+
+
+def test_the_schema_carries_the_lep_point_label(tmp_path):
+    """Stage B needs a point grouped with its mask. A schema without the point
+    label silently makes every corrected frame LEP-less, and the shortage of
+    LEPs is already what blocks Stage B."""
+    pi._write_cvat_labels(tmp_path)
+    labs = json.loads((tmp_path / "cvat_labels.json").read_text())
+    lep = [lab for lab in labs if lab["name"] == "weed_LEP"]
+    assert lep and lep[0]["type"] == "points"
