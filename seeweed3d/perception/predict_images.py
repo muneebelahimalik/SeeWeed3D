@@ -621,8 +621,13 @@ def predict(cfg=None):
         n_poly = _write_coco(coco_frames, coco_names or list(CLASSES),
                              out_dir, str(ckpt), c["CONF"])
         _write_cvat_labels(out_dir)
+        # ANNOUNCED, not merely written. A file nobody is told about is a file
+        # nobody pastes into CVAT, and the whole reason it exists is that a
+        # mismatched label set corrupts an import silently.
         print(f"\n-> {out_dir / 'instances_default.json'}  "
-              f"({n_poly} instance(s), COCO 1.0)")
+              f"({n_poly} instance(s), COCO 1.0)"
+              f"\n-> {out_dir / 'cvat_labels.json'}  "
+              f"(paste into CVAT's Raw label editor BEFORE importing the COCO)")
 
     print(f"\n  detections per class over {len(records)} frames:")
     for k in sorted(counts):
