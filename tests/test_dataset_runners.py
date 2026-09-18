@@ -809,3 +809,36 @@ def test_the_train_only_sessions_reach_the_build_config():
     names = set(mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])
     assert mixed.SYNTH_SESSION in names
     assert "Mix_raj_Batch_01" in names
+
+
+def test_no_frame_that_is_measured_on_ever_feeds_the_cutout_bank():
+    """A frame in val or test must not supply cut-outs, in any form.
+
+    A pasted instance cut from a measured frame is that frame's own plant in
+    the training set - the most direct leak there is, and invisible to every
+    other check here because the composite has a different session id, a
+    different filename and a different background.
+
+    It is stricter than it looks: these drives are VIDEO, so a cut-out taken
+    from the frame NEXT to a val frame is the same physical plant. The only
+    statically checkable rule that guarantees it is therefore about whole
+    drives - a session may feed the bank and appear in the build only if it is
+    pinned TRAIN_ONLY, because then it has no val or test frames to leak.
+
+    This becomes live the moment vid3's 251 uncorrected frames are mined into
+    the bank: that drive already contributes val and test frames."""
+    import ntpath
+    import training.datumaro_multitask as dmm
+    from annotation import compose_mixed as cm
+    from training.datasets import mixed
+
+    def ids(paths):
+        return {dmm.session_id_from_name(ntpath.basename(p.rstrip("\\/")))
+                for p in paths}
+
+    both = ids(cm.WEED_SOURCES) & ids(mixed.SOURCES_ROOTS)
+    train_only = set(mixed.CONFIG.get("TRAIN_ONLY_SESSIONS") or [])
+    leaking = sorted(both - train_only)
+    assert not leaking, (
+        f"{leaking} both feeds the cut-out bank and is split into val/test. "
+        f"Pin it TRAIN_ONLY, or keep it out of one of the two.")
