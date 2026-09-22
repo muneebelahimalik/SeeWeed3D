@@ -414,3 +414,105 @@ def test_exclusion_happens_before_limit_and_stride(tmp_path):
     training frames, and the filter buys nothing."""
     src = __import__("inspect").getsource(pi.predict)
     assert src.index("exclude_built(") < src.index("sample_frames(frames")
+
+
+# --------------------------------------------------------------------------
+# Growth points WITHOUT depth. PlantContext.depth_mm is optional and only
+# CanopyHeightEvidence reads it, so the other four votes give a 2D point on
+# any folder of frames - which is what makes a figure possible on a
+# hand-curated batch or a session with no stereo beside it.
+# --------------------------------------------------------------------------
+def _rosette_det(H=300, W=420):
+    from common.ontology import CLASSES, CROP_CLASS
+    bgr = np.full((H, W, 3), 72, np.uint8)
+    specs = [(95, 150, 38, "cutleaf_evening_primrose"),
+             (250, 95, 30, "grass_weed"),
+             (320, 205, 44, CROP_CLASS)]
+    masks, labels = [], []
+    yy, xx = np.mgrid[0:H, 0:W]
+    for cx, cy, r, cls in specs:
+        ang = np.arctan2(yy - cy, xx - cx)
+        rad = np.hypot(yy - cy, xx - cx)
+        m = rad <= r * (0.5 + 0.5 * np.abs(np.cos(3 * ang)))
+        bgr[m] = (45, 145, 65)
+        masks.append(m)
+        labels.append(CLASSES.index(cls))
+    masks = np.stack(masks)
+    boxes = []
+    for m in masks:
+        ys, xs = np.nonzero(m)
+        boxes.append([xs.min(), ys.min(), xs.max() - xs.min(),
+                      ys.max() - ys.min()])
+    det = seg.Detections(masks, np.array(boxes, float), np.array(labels),
+                         np.array([.93, .81, .96]), W, H, names=list(CLASSES))
+    return bgr, det, masks
+
+
+def test_growth_points_are_found_with_no_depth_at_all():
+    bgr, det, _ = _rosette_det()
+    leps = pi.lep_points(bgr, det)
+    assert len(leps) == 2, "one per weed"
+    # Each lands on its own rosette centre rather than drifting to a leaf tip.
+    got = sorted((round(u), round(v)) for u, v, _ in leps)
+    assert got == [(95, 150), (250, 95)] or all(
+        abs(u - cx) < 12 and abs(v - cy) < 12
+        for (u, v), (cx, cy) in zip(got, [(95, 150), (250, 95)]))
+
+
+def test_no_growth_point_is_ever_put_on_the_crop():
+    """A LEP is where the laser is aimed. One drawn on an onion is a picture of
+    the failure this whole system exists to prevent."""
+    bgr, det, masks = _rosette_det()
+    crop = masks[2]
+    for u, v, _ in pi.lep_points(bgr, det):
+        assert not crop[int(round(v)), int(round(u))]
+
+
+def test_a_frame_with_no_weeds_yields_no_points():
+    from common.ontology import CLASSES, CROP_CLASS
+    m = np.zeros((40, 40), bool)
+    m[10:30, 10:30] = True
+    det = seg.Detections(m[None], np.array([[10., 10., 20., 20.]]),
+                         np.array([CLASSES.index(CROP_CLASS)]),
+                         np.array([0.9]), 40, 40, names=list(CLASSES))
+    assert pi.lep_points(np.zeros((40, 40, 3), np.uint8), det) == []
+
+
+def test_one_unusable_instance_does_not_lose_the_frame():
+    """This runs on unlabelled field frames where a mask can be a sliver at the
+    image edge. A figure with one plant unmarked beats no figure."""
+    bgr, det, _ = _rosette_det()
+    import perception.lep as lepmod
+
+    class Boom(lepmod.LEPEstimator):
+        def estimate(self, ctx):
+            if getattr(self, "_seen", False):
+                return super().estimate(ctx)
+            self._seen = True
+            raise RuntimeError("degenerate mask")
+
+    orig = lepmod.LEPEstimator
+    lepmod.LEPEstimator = Boom
+    try:
+        assert len(pi.lep_points(bgr, det)) == 1
+    finally:
+        lepmod.LEPEstimator = orig
+
+
+def test_the_marker_has_its_own_colour_and_no_safety_verdict():
+    """Segmentation mode has no verdict - a verdict needs the laser spot tested
+    against the crop in 3D, and without depth there is no spot. Reusing the
+    full-mode colours would paint every point as refused, which is a claim
+    rather than a blank."""
+    assert pi.C_LEP_2D not in (pi.C_CANDIDATE, pi.C_ABSTAIN)
+    bgr, det, _ = _rosette_det()
+    vis = pi.draw(bgr, det, set(), 1.0, leps=pi.lep_points(bgr, det))
+    flat = vis.reshape(-1, 3)
+    assert np.any(np.all(flat == np.array(pi.C_LEP_2D), axis=1))
+    assert not np.any(np.all(flat == np.array(pi.C_ABSTAIN), axis=1))
+
+
+def test_drawing_without_points_is_unchanged():
+    bgr, det, _ = _rosette_det()
+    assert np.array_equal(pi.draw(bgr, det, set(), 1.0),
+                          pi.draw(bgr, det, set(), 1.0, leps=None))
