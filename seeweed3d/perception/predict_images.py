@@ -919,6 +919,9 @@ def main(argv=None):
     p.add_argument("--limit", type=int)
     p.add_argument("--stride", type=int)
     p.add_argument("--labels", choices=["class_score", "class", "none"])
+    p.add_argument("--overlay-scale", type=float, metavar="F",
+                   help="1.0 for full-size overlays (figures); the default "
+                        "0.5 halves ZED frames to keep the folder small")
     p.add_argument("--no-legend", action="store_true")
     p.add_argument("--no-lep", action="store_true",
                    help="skip growth-point markers in segmentation mode")
@@ -931,7 +934,8 @@ def main(argv=None):
                       ("out", "OUT_DIR"), ("backend", "BACKEND"),
                       ("mode", "MODE"), ("device", "DEVICE"),
                       ("conf", "CONF"), ("limit", "LIMIT"),
-                      ("stride", "STRIDE"), ("labels", "LABELS")):
+                      ("stride", "STRIDE"), ("labels", "LABELS"),
+                      ("overlay_scale", "OVERLAY_SCALE")):
         v = getattr(a, flag)
         if v is not None:
             c[key] = v
