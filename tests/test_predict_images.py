@@ -6,6 +6,7 @@ feeds 16-bit depth to the segmenter as a picture. The same defect already had
 to be fixed once in training/seg_dataset.py.
 """
 import json
+import re
 
 import cv2
 import numpy as np
@@ -516,3 +517,25 @@ def test_drawing_without_points_is_unchanged():
     bgr, det, _ = _rosette_det()
     assert np.array_equal(pi.draw(bgr, det, set(), 1.0),
                           pi.draw(bgr, det, set(), 1.0, leps=None))
+
+
+def test_the_overlay_scale_is_reachable_from_the_command_line():
+    """Figures want full-size overlays and inspection wants small ones, and
+    editing the file between the two is the friction that makes people stop
+    looking at their own output."""
+    import inspect
+    src = inspect.getsource(pi.main)
+    assert '"--overlay-scale"' in src
+    assert '("overlay_scale", "OVERLAY_SCALE")' in src
+
+
+def test_every_cli_flag_maps_to_a_config_key():
+    """A flag argparse accepts and the override loop ignores is worse than no
+    flag: it is accepted in silence and changes nothing."""
+    import inspect
+    src = inspect.getsource(pi.main)
+    flags = set(re.findall(r'p\.add_argument\("--([a-z-]+)"', src))
+    flags -= {"no-legend", "no-lep"}          # handled explicitly below the loop
+    mapped = {f.replace("_", "-") for f in
+              re.findall(r'\("([a-z_]+)", "[A-Z_]+"\)', src)}
+    assert not (flags - mapped), f"unmapped flags: {sorted(flags - mapped)}"
