@@ -141,6 +141,23 @@ CONFIG = {
     # costs a real weed its own treatment point. See common/dedup.py.
     "DEDUP_IOU": DEFAULT_DEDUP_IOU,
 
+    # Growth-point markers in SEGMENTATION mode, from the hand-engineered
+    # estimator in perception/lep.py. "full" mode always draws them.
+    #
+    # NO DEPTH NEEDED. PlantContext.depth_mm is optional and only
+    # CanopyHeightEvidence uses it, so without depth the estimate is the other
+    # four votes - medial axis, petiole convergence, radial isotropy, young
+    # tissue - and the point is 2D. That is what makes this work on a folder of
+    # frames, a hand-curated batch, or anything else with no stereo beside it.
+    #
+    # WEEDS ONLY. A LEP is where the laser is aimed, and the crop is never a
+    # target; drawing one on an onion would picture the failure this system
+    # exists to prevent.
+    #
+    # It costs real time - medial-axis thinning runs per instance - so it is
+    # for figures and inspection, not for prelabelling a thousand frames.
+    "DRAW_LEP": True,
+
     # Also write the predictions as COCO 1.0 beside predictions.json.
     # evaluation/bench_mixed.py consumes it, so the model can be compared
     # against the SAM prelabels on the same frames - and CVAT imports it
@@ -180,6 +197,7 @@ C_CONFLICT = (255, 255, 255)  # white   - outline on a weed touching the crop
 #: alike.
 C_CANDIDATE = (255, 255, 0)    # cyan    - would be treated
 C_ABSTAIN = (255, 0, 255)      # magenta - a growth point the safety check refused
+C_LEP_2D = (0, 255, 255)       # yellow  - a growth point with NO safety verdict
 
 
 def class_colour(name):
@@ -391,8 +409,34 @@ def _legend_strip(img, names, pad=10, row=26, font=0.5):
     return np.vstack([img, strip])
 
 
+def lep_points(bgr, det):
+    """Growth points for every WEED instance, in full-frame pixels.
+
+    The hand-engineered estimator, which needs no training and no depth. One
+    bad instance must not lose the frame, so a failure is skipped rather than
+    raised: this runs on unlabelled field frames where a mask can be a sliver
+    at the image edge, and a figure with one plant unmarked beats no figure."""
+    from perception.lep import LEPEstimator, crop_context
+
+    est = LEPEstimator()
+    out = []
+    for i in det.weed_indices():
+        try:
+            x, y, w, h = [int(round(v)) for v in det.boxes[i]]
+            ctx = crop_context(det.masks[i], bgr, (x, y, max(1, w), max(1, h)),
+                               depth_full=None, pad=10,
+                               class_name=det.class_name(i))
+            r = est.estimate(ctx)
+            if r is not None:
+                out.append((float(r.uv[0]), float(r.uv[1]),
+                            float(r.confidence)))
+        except Exception:
+            continue
+    return out
+
+
 def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
-         show_legend=True, targets=None, note=None):
+         show_legend=True, targets=None, note=None, leps=None):
     """Tint and outline every instance, ONE COLOUR PER CLASS.
 
     Crop proximity is drawn as an extra WHITE outline rather than by recolouring
@@ -433,6 +477,21 @@ def draw(bgr, det, conflict_idx, scale=1.0, alpha=0.35, labels="class_score",
             if i in conflict_idx:
                 text += "  !CROP"
             _put_label(out, text, (int(xs.min()), int(ys.min()) - 4), colour)
+
+    # SEGMENTATION-MODE GROWTH POINTS. Drawn in their own colour and WITHOUT a
+    # safety verdict, because there is none: a verdict needs the laser spot
+    # tested against the crop in 3D, and without depth there is no spot. Reusing
+    # the full-mode colours would paint every point as refused, which is a
+    # claim, not a blank.
+    for u, v, conf in (leps or []):
+        u, v = int(round(u)), int(round(v))
+        cv2.circle(out, (u, v), 13, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.circle(out, (u, v), 13, C_LEP_2D, 2, cv2.LINE_AA)
+        cv2.line(out, (u - 19, v), (u - 7, v), C_LEP_2D, 2, cv2.LINE_AA)
+        cv2.line(out, (u + 7, v), (u + 19, v), C_LEP_2D, 2, cv2.LINE_AA)
+        cv2.line(out, (u, v - 19), (u, v - 7), C_LEP_2D, 2, cv2.LINE_AA)
+        cv2.line(out, (u, v + 7), (u, v + 19), C_LEP_2D, 2, cv2.LINE_AA)
+        cv2.circle(out, (u, v), 4, C_LEP_2D, -1, cv2.LINE_AA)
 
     # THE GROWTH POINTS, before the downscale so they land on true pixels.
     #
@@ -556,7 +615,7 @@ def predict(cfg=None):
     print(f"  {len(frames)} frames | {c['BACKEND']} | conf {c['CONF']} | "
           f"mode {mode}")
 
-    records, counts, n_conflict = [], {}, 0
+    records, counts, n_conflict, n_lep = [], {}, 0, 0
     n_dup, dup_labels = 0, {}
     want_coco = bool(c.get("WRITE_COCO", True))
     coco_frames, coco_names = [], None
@@ -591,10 +650,14 @@ def predict(cfg=None):
             counts[inst["class_name"]] = counts.get(inst["class_name"], 0) + 1
         n_conflict += len(conflicts)
 
+        leps = (lep_points(bgr, det)
+                if c.get("DRAW_LEP", True) and targets is None else None)
+        if leps:
+            n_lep += len(leps)
         vis = draw(bgr, det, conflicts, c.get("OVERLAY_SCALE", 1.0),
                    labels=c.get("LABELS", "class_score"),
                    show_legend=c.get("LEGEND", True), targets=targets,
-                   note=note)
+                   note=note, leps=leps)
         dst = out_dir / "overlays" / f"{path.stem}.png"
         cv2.imwrite(str(dst), vis)
         rec.update({"image": str(path), "overlay": str(dst)})
@@ -635,6 +698,9 @@ def predict(cfg=None):
     if not counts:
         print("    (nothing above the confidence threshold)")
     print(f"  weeds overlapping predicted onion: {n_conflict}")
+    if n_lep:
+        print(f"  growth points marked: {n_lep}  (2D, no depth - no safety "
+              f"verdict attached)")
     if n_dup:
         # RF-DETR is a set-prediction model: two queries can find the same plant
         # and disagree about what it is, so the same mask comes back twice under
@@ -854,6 +920,8 @@ def main(argv=None):
     p.add_argument("--stride", type=int)
     p.add_argument("--labels", choices=["class_score", "class", "none"])
     p.add_argument("--no-legend", action="store_true")
+    p.add_argument("--no-lep", action="store_true",
+                   help="skip growth-point markers in segmentation mode")
     a = p.parse_args(argv)
 
     c = dict(CONFIG)
@@ -869,6 +937,8 @@ def main(argv=None):
             c[key] = v
     if a.no_legend:
         c["LEGEND"] = False
+    if a.no_lep:
+        c["DRAW_LEP"] = False
     return predict(c)
 
 
