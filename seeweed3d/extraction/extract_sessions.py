@@ -16,8 +16,42 @@ Handles BOTH capture formats transparently:
       + frames.csv with `video_frame_idx` / `capture_frame_idx`, exposure,
         gain, white balance, pose and IMU per frame
 
+  v3 (WeedScan Zed2i_video_datacollection.py, app v2.0.0 - see DATA_SPEC.md)
+      RGB_left.mkv + Depth.mkv + Confidence.mkv (all FFV1)
+      + calibration.json (nested differently), session_metadata.json,
+        markers.csv
+      + frames.csv with `rec_frame_idx` / `mkv_frame_idx` / `mkv_written`,
+        plus speed, distance travelled, tilt from nadir and a full pose
+
 Everything a format offers is used; nothing missing is fatal. Sessions are
 tagged `capture_format` so downstream code knows what exists.
+
+WHY v3 NEEDED MORE THAN A FEW NEW FILENAMES
+--------------------------------------------
+Its video files are found by the same loose patterns v1 and v2 use, so a
+v3 session READS - and that is the danger. Four of its differences are silent
+if it is treated as v2, every one of them producing values that are in range
+and plausible rather than an error:
+
+  depth scale       v3 stores `depth_units_per_mm` counts per millimetre,
+                    default 10. Read as v2 a 1 m crop row becomes 10 m, and
+                    10000 is a legal uint16 that nothing range-checks.
+  depth sentinels   65534 (too close) and 65535 (too far) decode under
+                    value/10 to 6553.4 and 6553.5 mm - a believable distance.
+  confidence depth  Confidence.mkv is gray16le. Decoded as 8-bit grey every
+                    value is divided by ~257, so a confidence of 50 reads 19.
+  frames.csv order  v3 writes a row per CAPTURED frame, dropped ones included.
+                    Read in file order the first drop shifts every later
+                    frame's timestamp and pose by one.
+
+So depth and confidence are normalised HERE - `depth/` stays millimetres with
+0 = invalid for every format, `conf/` becomes 0..100 - and frames are joined by
+`mkv_frame_idx` rather than by position. What the capture actually used is
+recorded under `depth_encoding.source_units_per_mm`, so a factor-of-ten error
+stays diagnosable rather than merely avoided.
+
+A v3 session that does not record its own depth scale is REFUSED, not defaulted
+to 10: a crash is recoverable and a ten-fold depth field is not.
 
 CORE INVARIANTS
 ---------------
@@ -333,6 +367,8 @@ def parse_calibration_json(path):
     if path is None or not path.exists():
         return None
     j = json.loads(path.read_text())
+    if "calibration_rectified" in j:
+        return _parse_calibration_json_v3(j, path)
     rect = j.get("rectified", {})
     out = {"source": path.name, "format": "v2_json",
            "left": rect.get("left"), "right": rect.get("right"),
@@ -346,8 +382,36 @@ def parse_calibration_json(path):
     return _derive_calib(out)
 
 
-def parse_session_meta(txt_path, json_path):
-    """v2 session.json wins; v1 session_meta.txt is the fallback."""
+def _parse_calibration_json_v3(j, path):
+    """v3 calibration.json: `calibration_rectified.left_cam`, baseline in mm.
+
+    Same intrinsics under different keys - `left_cam` rather than `left`,
+    `baseline` rather than `baseline_mm`, and the fields of view suffixed
+    `_deg`. Falling through to the v2 reader would not raise; it would return a
+    calibration with every value None, and the session would be extracted with
+    no intrinsics at all."""
+    rect = j.get("calibration_rectified", {})
+    left, right = rect.get("left_cam"), rect.get("right_cam")
+    st = rect.get("stereo_transform") or {}
+    out = {"source": path.name, "format": "v3_json",
+           "left": left, "right": right,
+           "baseline_mm": rect.get("baseline"),
+           "stereo_translation_mm": st.get("translation"),
+           "rotation_vector_rad": st.get("rotation_vector_rad"),
+           "raw": j.get("calibration_raw_factory"),
+           "serial_number": j.get("serial_number"),
+           "firmware": j.get("camera_firmware_version"),
+           "camera_imu_transform": j.get("camera_imu_transform"),
+           "resolution": j.get("resolution"), "fps": j.get("fps")}
+    if left and left.get("h_fov_deg") is not None:
+        out["hfov_deg"] = left["h_fov_deg"]
+    return _derive_calib(out)
+
+
+def parse_session_meta(txt_path, json_path, v3_path=None):
+    """Newest format wins: v3 session_metadata.json, then v2, then v1."""
+    if v3_path and v3_path.exists():
+        return json.loads(v3_path.read_text()), "v3"
     if json_path and json_path.exists():
         return json.loads(json_path.read_text()), "v2"
     if txt_path and txt_path.exists():
@@ -360,6 +424,76 @@ def parse_session_meta(txt_path, json_path):
     return None, None
 
 
+#: v3 depth sentinels. They are NOT out-of-band: under `value / 10` they decode
+#: to 6553.4 and 6553.5 mm, which is a plausible distance rather than an
+#: obvious error - so a reader that handles only `0 = invalid` gets a believable
+#: wrong answer instead of a crash.
+DEPTH_CODE_TOO_CLOSE = 65534
+DEPTH_CODE_TOO_FAR = 65535
+
+
+def depth_encoding_of(meta, meta_ver):
+    """(units_per_mm, confidence_scale) for a capture format.
+
+    THE SILENT 10x. v3 stores depth at `depth_units_per_mm` counts per
+    millimetre, default 10, while v1 and v2 store millimetres directly. Read a
+    v3 stream as v2 and every distance is ten times too large - a 1 m row
+    becomes 10 m - and nothing raises, because 10000 is a perfectly legal
+    uint16. Normalising here is what keeps `depth/` meaning millimetres for
+    every consumer downstream, none of which look at a scale.
+
+    A MISSING KEY IS NOT A DEFAULT. If a v3 session does not record its own
+    encoding we refuse rather than assume 10: a crash is recoverable and a
+    ten-fold depth field is not. The spec's "default 10" is a statement about
+    the recorder, not a licence for a reader to guess."""
+    if meta_ver != "v3":
+        return 1.0, None
+    enc = (meta or {}).get("encoding") or {}
+    units = enc.get("depth_units_per_mm")
+    if units is None:
+        raise ValueError(
+            "v3 session_metadata.json has no encoding.depth_units_per_mm. "
+            "Refusing to guess: assuming the default of 10 on a session that "
+            "used a different scale produces depth that is silently wrong by "
+            "that factor, and nothing downstream checks.")
+    return float(units), float(enc.get("confidence_scale") or 100.0)
+
+
+def depth_to_mm_u16(raw_u16, units_per_mm):
+    """A capture's native depth counts as uint16 MILLIMETRES, 0 = invalid.
+
+    Both sentinels become 0. They mean "no usable distance here" - nearer than
+    the sensor minimum, or past its maximum - which is exactly what 0 already
+    means to every consumer. Keeping them would require every caller to learn
+    two more magic numbers, and the one that forgot would read 65 metres."""
+    raw = np.asarray(raw_u16)
+    bad = (raw == 0) | (raw == DEPTH_CODE_TOO_CLOSE) | (raw == DEPTH_CODE_TOO_FAR)
+    if float(units_per_mm) == 1.0:
+        mm = raw.astype(np.float64)
+    else:
+        mm = raw.astype(np.float64) / float(units_per_mm)
+    mm = np.rint(mm)
+    mm[bad] = 0
+    return np.clip(mm, 0, 65535).astype(np.uint16)
+
+
+def confidence_to_pct_u8(raw_u16, scale):
+    """v3 confidence counts as 0..100 in a uint8, NaN code -> 100 (worst).
+
+    v3 writes confidence as gray16le at `confidence_scale` counts per percent;
+    decoding it as 8-bit grey - which is what the v1/v2 path does - divides
+    every value by about 257 and turns a confidence of 50 into 19.
+
+    65535 means UNDEFINED, and it maps to 100 rather than 0 because ZED
+    confidence is inverted: higher is LESS reliable, so 100 is "trust nothing"
+    and 0 would be "perfect". A pixel the SDK could not judge must not arrive
+    as the most trustworthy one in the frame."""
+    raw = np.asarray(raw_u16)
+    pct = raw.astype(np.float64) / float(scale or 100.0)
+    pct[raw == 65535] = 100.0
+    return np.clip(np.rint(pct), 0, 255).astype(np.uint8)
+
+
 def read_frames_csv(path):
     """Rows are one per ENCODED frame in write order, so video frame i <-> row i.
     Recovers true capture indices and timestamps despite dropped frames.
@@ -370,6 +504,8 @@ def read_frames_csv(path):
     with open(path, newline="", encoding="utf-8", errors="ignore") as f:
         rdr = csv.DictReader(f)
         cols = set(rdr.fieldnames or [])
+        if "mkv_frame_idx" in cols:
+            return _read_frames_csv_v3(rdr)
         ver = "v2" if "capture_frame_idx" in cols else "v1"
         for r in rdr:
             try:
@@ -391,6 +527,57 @@ def read_frames_csv(path):
             except (KeyError, ValueError):
                 return None, None
     return (rows, ver) if rows else (None, None)
+
+
+def _read_frames_csv_v3(rdr):
+    """v3 rows, placed at their OWN mkv index rather than in file order.
+
+    THE TRAP THIS CLOSES. v1 and v2 write one row per ENCODED frame, so row i
+    describes video frame i and reading in order is correct. v3 writes one row
+    per CAPTURED frame - including frames the encoder dropped, flagged
+    `mkv_written=0` - and gives every stored frame its own `mkv_frame_idx`.
+
+    Read v3 in file order and the first drop shifts everything after it by one:
+    every later frame gets the timestamp, pose and exposure of its neighbour.
+    Nothing downstream can detect that, because the values are all plausible.
+    So the list is built BY INDEX, and a gap stays a gap.
+
+    Returns a list where position i is the row for video frame i, or None."""
+    by_idx = {}
+    for r in rdr:
+        if str(r.get("mkv_written", "")).strip() != "1":
+            continue
+        try:
+            idx = int(r["mkv_frame_idx"])
+            rec = {
+                "capture_frame_idx": int(r["rec_frame_idx"]),
+                "timestamp_ns": int(r["image_timestamp_ns"]),
+                "host_realtime_ns": r.get("system_time_ns", ""),
+                "exposure": r.get("exposure_pct", ""),
+                "gain": r.get("gain", ""),
+                "wb_temp": r.get("wb_temp_k", ""),
+                "pose_state": r.get("pose_state", ""),
+                "tx_mm": r.get("tx_mm", ""), "ty_mm": r.get("ty_mm", ""),
+                "tz_mm": r.get("tz_mm", ""),
+                # v3 only, and the reason it is worth carrying: a split can be
+                # made in METRES of ground instead of frame counts, and a
+                # blurred or tilted frame can be dropped before anyone
+                # annotates it.
+                "qx": r.get("qx", ""), "qy": r.get("qy", ""),
+                "qz": r.get("qz", ""), "qw": r.get("qw", ""),
+                "speed_m_s": r.get("speed_m_s", ""),
+                "distance_m": r.get("distance_m", ""),
+                "tilt_from_nadir_deg": r.get("tilt_from_nadir_deg", ""),
+                "exposure_ms_approx": r.get("exposure_ms_approx", ""),
+                "est_missing_before": r.get("est_missing_before", ""),
+            }
+        except (KeyError, ValueError, TypeError):
+            return None, None
+        by_idx[idx] = rec
+    if not by_idx:
+        return None, None
+    out = [by_idx.get(i) for i in range(max(by_idx) + 1)]
+    return out, "v3"
 
 
 class RawDecoder:
@@ -683,7 +870,12 @@ def discover(cfg):
                 "calib_json": opt("calibration.json"),
                 "meta_txt": opt("session_meta.txt"),
                 "meta_json": opt("session.json"),
+                # v3 renamed it. A rename with no version marker is why this
+                # lookup has to be explicit: opt("session.json") simply misses,
+                # and the depth SCALE lives in here.
+                "meta_json_v3": opt("session_metadata.json"),
                 "frames_csv": opt("frames.csv"),
+                "markers_csv": opt("markers.csv"),
                 "dropped_csv": opt("dropped_frames.csv"),
                 "svo": next((p for p in folder.glob("*.svo*")), None),
                 "cfg": rc})
@@ -700,7 +892,9 @@ def extract_session(sess, out_root, cfg):
         print(f"  [SKIP] {sid} already extracted (OVERWRITE=False)")
         return None
 
-    fmt = "v2" if (sess["meta_json"] or sess["conf"] or sess["calib_json"]) else "v1"
+    fmt = ("v3" if sess.get("meta_json_v3") else
+           "v2" if (sess["meta_json"] or sess["conf"] or sess["calib_json"])
+           else "v1")
 
     rgb_info = probe(cfg["FFPROBE"], sess["rgb"])
     W, H = rgb_info["width"], rgb_info["height"]
@@ -738,9 +932,18 @@ def extract_session(sess, out_root, cfg):
     if calib is None:
         warnings.append("NO calibration - session unusable for 3D work")
 
-    meta, meta_ver = parse_session_meta(sess["meta_txt"], sess["meta_json"])
+    meta, meta_ver = parse_session_meta(sess["meta_txt"], sess["meta_json"],
+                                        sess.get("meta_json_v3"))
     if meta is None:
         warnings.append("no session metadata - parameters taken from video header")
+    # Raises on a v3 session that does not record its own depth scale. That is
+    # deliberate: see depth_encoding_of.
+    units_per_mm, conf_scale = depth_encoding_of(meta, meta_ver)
+    if units_per_mm != 1.0:
+        warnings.append(
+            f"depth rescaled from {units_per_mm:g} counts/mm to millimetres; "
+            f"codes {DEPTH_CODE_TOO_CLOSE} and {DEPTH_CODE_TOO_FAR} mapped to "
+            f"0 (invalid)")
 
     fcsv, csv_ver = read_frames_csv(sess["frames_csv"])
     ts_source = f"frames_csv_{csv_ver}" if fcsv else "nominal_fps"
@@ -792,8 +995,15 @@ def extract_session(sess, out_root, cfg):
         decs["right"] = RawDecoder(F, sess["right"], "bgr24", W, H, 3,
                                    np.uint8, sws_flags=SWS)
     if sess["conf"]:
-        decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1, np.uint8,
-                                  sws_flags=SWS)
+        # v3 writes confidence as gray16le. Asking ffmpeg for 8-bit grey from
+        # it divides every value by ~257, turning a confidence of 50 into 19 -
+        # a number that is in range, plausible, and wrong.
+        if fmt == "v3":
+            decs["conf"] = RawDecoder(F, sess["conf"], "gray16le", W, H, 1,
+                                      np.uint16, sws_flags=SWS)
+        else:
+            decs["conf"] = RawDecoder(F, sess["conf"], "gray", W, H, 1,
+                                      np.uint8, sws_flags=SWS)
     its = {k: iter(v) for k, v in decs.items() if k != "rgb"}
 
     index_rows, pool_rows = [], []
@@ -806,10 +1016,20 @@ def extract_session(sess, out_root, cfg):
     prog = Progress(est_total, f"  [{sid}]", unit="frames")
     for i, bgr in enumerate(decs["rgb"]):
         got = {k: next(v, None) for k, v in its.items()}
+        # NORMALISE BEFORE ANYTHING READS IT, including the QC metrics. Those
+        # go into the registry and are compared across sessions, so a v3
+        # session measured in its native counts would be incomparable with
+        # every v1 and v2 session beside it.
+        if got.get("depth") is not None and units_per_mm != 1.0:
+            got["depth"] = depth_to_mm_u16(got["depth"], units_per_mm)
+        if got.get("conf") is not None and fmt == "v3":
+            got["conf"] = confidence_to_pct_u8(got["conf"], conf_scale)
         met = frame_metrics(bgr, got.get("depth"), got.get("conf"), cfg)
 
-        fr = fcsv[i] if (fcsv and i < len(fcsv)) else \
-            {"capture_frame_idx": i, "timestamp_ns": int(i / fps * 1e9)}
+        # v3 leaves a hole where the encoder dropped a frame, so a missing row
+        # is a real state rather than the end of the file.
+        fr = (fcsv[i] if (fcsv and i < len(fcsv) and fcsv[i] is not None)
+              else {"capture_frame_idx": i, "timestamp_ns": int(i / fps * 1e9)})
 
         row = {"video_frame_idx": i,
                "capture_frame_idx": fr["capture_frame_idx"],
@@ -819,7 +1039,18 @@ def extract_session(sess, out_root, cfg):
                "wb_temp": fr.get("wb_temp", ""),
                "pose_state": fr.get("pose_state", ""),
                "tx_mm": fr.get("tx_mm", ""), "ty_mm": fr.get("ty_mm", ""),
-               "tz_mm": fr.get("tz_mm", ""), "in_pool": 0, **met}
+               "tz_mm": fr.get("tz_mm", ""),
+               # v3 only, blank elsewhere. distance_m is the one that changes
+               # what is possible: a split can be separated by METRES of
+               # ground rather than by a guessed number of frames.
+               "qx": fr.get("qx", ""), "qy": fr.get("qy", ""),
+               "qz": fr.get("qz", ""), "qw": fr.get("qw", ""),
+               "speed_m_s": fr.get("speed_m_s", ""),
+               "distance_m": fr.get("distance_m", ""),
+               "tilt_from_nadir_deg": fr.get("tilt_from_nadir_deg", ""),
+               "exposure_ms_approx": fr.get("exposure_ms_approx", ""),
+               "est_missing_before": fr.get("est_missing_before", ""),
+               "in_pool": 0, **met}
 
         if (i % stride == 0) and (cap is None or n_written < cap):
             name = f"{sid}_{i:06d}.png"
@@ -921,6 +1152,13 @@ def extract_session(sess, out_root, cfg):
             "directory": "depth",
             "scale_mm_per_unit": cfg["DEPTH_SCALE_MM_PER_UNIT"],
             "invalid_value": cfg["DEPTH_INVALID_VALUE"],
+            # What the CAPTURE used, kept so a 10x error is diagnosable after
+            # the fact rather than merely avoided now. scale_mm_per_unit above
+            # describes what is in depth/; this describes what it came from.
+            "source_units_per_mm": units_per_mm,
+            "source_sentinels_mapped_to_invalid": (
+                [DEPTH_CODE_TOO_CLOSE, DEPTH_CODE_TOO_FAR]
+                if units_per_mm != 1.0 else []),
             "note": "Raw millimetres. depth_vis_max_mm in v1 session_meta.txt is "
                     "a GUI preview constant - do not rescale by it. 0 = invalid."}
             if sess["depth"] else ({
@@ -940,8 +1178,18 @@ def extract_session(sess, out_root, cfg):
                         "compression. Usable for ground plane and row geometry; "
                         "not for the LEP canopy-height channel."}
                 if preview else None)),
-        "confidence_encoding": ({"container": "8-bit PNG", "polarity": conf_pol}
-                                if want_conf else None),
+        # v3 PINS THE POLARITY, which v1 and v2 could only probe for per
+        # session: higher is LESS reliable, so a pixel passes a threshold T
+        # when confidence <= T.
+        "confidence_encoding": (
+            {"directory": "conf", "container": "8-bit grayscale PNG",
+             "units": "percent, 0..100", "polarity": "higher_is_worse",
+             "undefined_mapped_to": 100, "source_scale": conf_scale,
+             "note": "ZED MEASURE.CONFIDENCE. Keep pixels with conf <= T; "
+                     "30-50 for clean geometry, 70 for general use."}
+            if (want_conf and fmt == "v3") else
+            {"container": "8-bit PNG", "polarity": conf_pol}
+            if want_conf else None),
         "frames": {"decoded": len(index_rows), "pool": len(pooled),
                    "stride": stride, "nominal_fps": fps,
                    "timestamp_source": ts_source,
@@ -956,6 +1204,14 @@ def extract_session(sess, out_root, cfg):
                 [r["veg_frac"] for r in pooled])), 4) if pooled else None},
         "warnings": warnings}
     (sdir / "meta" / "session.json").write_text(json.dumps(session_json, indent=2))
+
+    # OPERATOR NOTES SURVIVE THE EXTRACTION. markers.csv is free text typed
+    # during recording - "start row 3", "weed patch", "skip: person in view" -
+    # and it is the only record of where a row or plot begins and which
+    # stretches to throw away. Copied rather than parsed: the conventions are
+    # the operator's, and inventing a schema for them here would guess.
+    if sess.get("markers_csv") and sess["markers_csv"].exists():
+        shutil.copyfile(sess["markers_csv"], sdir / "meta" / "markers.csv")
 
     for w in warnings:
         print(f"      ! {w}")

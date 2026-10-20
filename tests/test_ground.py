@@ -414,3 +414,57 @@ def test_the_weed_default_is_lower_than_the_onion_one():
     wd = load_script("annotation/prelabel_weeds_sam3.py")
     on = load_script("annotation/prelabel_onions_sam3.py")
     assert wd.CONFIG["HEIGHT_MIN_MM"] < on.CONFIG["HEIGHT_MIN_MM"]
+
+
+# --------------------------------------------------------------------------
+# The depth scale. It was a hard-coded 1, while the extractor had always
+# written `depth_encoding.scale_mm_per_unit` into session.json and nothing in
+# the project ever read it back - a knob that looked present and was not.
+# --------------------------------------------------------------------------
+def test_a_non_millimetre_scale_is_applied(tmp_path):
+    """A capture storing tenths of a millimetre read as millimetres is ten
+    times too far, with no error anywhere: 10000 is a legal uint16 and no
+    consumer range-checks a depth."""
+    raw = np.full((8, 8), 10000, np.uint16)        # 1000 mm at 10 counts/mm
+    path = tmp_path / "d.png"
+    cv2.imwrite(str(path), raw)
+    assert gr.load_depth_mm(path)[0, 0] == 10000.0          # unscaled
+    assert gr.load_depth_mm(path, 0.1)[0, 0] == 1000.0      # scaled
+
+
+def test_the_invalid_sentinel_survives_scaling(tmp_path):
+    """Scaling must not turn 0 into a very small distance - that would read as
+    the nearest, and therefore tallest, thing in the frame."""
+    raw = np.full((8, 8), 10000, np.uint16)
+    raw[2, 2] = 0
+    path = tmp_path / "d.png"
+    cv2.imwrite(str(path), raw)
+    assert np.isnan(gr.load_depth_mm(path, 0.1)[2, 2])
+
+
+def test_the_default_leaves_existing_sessions_untouched(tmp_path):
+    """Every session extracted so far is millimetres, and extraction
+    normalises new formats too, so the default has to be a no-op."""
+    raw = np.full((8, 8), 1234, np.uint16)
+    path = tmp_path / "d.png"
+    cv2.imwrite(str(path), raw)
+    assert np.array_equal(gr.load_depth_mm(path), gr.load_depth_mm(path, 1.0))
+
+
+def test_the_scale_is_read_from_the_session_rather_than_assumed(tmp_path):
+    sess = tmp_path / "s"
+    (sess / "meta").mkdir(parents=True)
+    (sess / "meta" / "session.json").write_text(json.dumps(
+        {"depth_encoding": {"scale_mm_per_unit": 0.1}}))
+    assert gr.session_depth_scale(sess) == 0.1
+
+
+def test_a_session_with_no_recorded_scale_falls_back_visibly(tmp_path):
+    """Almost certainly millimetres - every format this project has written is
+    - but the assumption lives in one findable place instead of in every
+    caller that never knew there was one."""
+    sess = tmp_path / "s"
+    (sess / "meta").mkdir(parents=True)
+    (sess / "meta" / "session.json").write_text("{}")
+    assert gr.session_depth_scale(sess) == 1.0
+    assert gr.session_depth_scale(tmp_path / "missing") == 1.0
