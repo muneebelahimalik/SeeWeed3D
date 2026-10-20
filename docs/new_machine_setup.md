@@ -1,5 +1,30 @@
 # Setting up a training machine
 
+## Claude Code cloud container
+
+A cloud container is rebuilt often and starts bare. Point the environment's
+**Setup script** (cloud environment menu in the title bar → Edit) at:
+
+```
+bash scripts/setup_cloud_env.sh
+```
+
+One line that never changes again; the script is in the repo, so it is
+reviewable, it moves with the code that needs it, and `tests/test_setup_script.py`
+checks the parts of it that fail silently.
+
+It installs **ffmpeg and ffprobe** — not pip-installable, and without both the
+48 extraction tests cannot build or probe a recording, so they fail as
+`FileNotFoundError` from inside subprocess and read as unrelated breakage. It
+also installs CPU torch, torchvision and matplotlib, without which another 31
+tests fail on `ImportError`, and it uses **headless** OpenCV rather than the
+`opencv-python` in `requirements.txt`, which needs libGL and will not import
+where there is no display.
+
+numpy is re-pinned `<2` last, because opencv declares `numpy>=2` and pip
+resolves that by upgrading numpy — silently breaking the pin SAM 3 depends on.
+
+
 Getting a second PC to the point where it can train Stage A overnight, and the
 one thing that will silently break if you skip it.
 
