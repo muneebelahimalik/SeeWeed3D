@@ -108,18 +108,48 @@ CONF_LOWER_IS_BETTER = {"lower_is_better", "lower", "low", "uncertainty",
                         "zed_confidence"}
 
 
-def load_depth_mm(path):
+def load_depth_mm(path, scale_mm_per_unit=1.0):
     """A 16-bit depth PNG as float millimetres with NaN for invalid, or None.
 
     Refuses anything that is not 16-bit rather than scaling an 8-bit preview
     into plausible-looking millimetres - the same fiction REQUIRE_16BIT_DEPTH
-    exists to prevent at extraction time."""
+    exists to prevent at extraction time.
+
+    THE SCALE IS A PARAMETER NOW, and it used to be a hard-coded 1. The
+    extractor has always written `depth_encoding.scale_mm_per_unit` into
+    session.json and nothing in the project ever read it back, so the knob
+    looked present and was not. That mattered the moment a capture format
+    arrived storing tenths of a millimetre: every distance would have been ten
+    times too large, with no error anywhere, because 10000 is a legal uint16
+    and no consumer range-checks a depth.
+
+    Extraction normalises v3 to millimetres, so the default stays 1.0 and
+    nothing changes for existing sessions. Use `session_depth_scale()` to read
+    the value a session recorded rather than assuming it."""
     raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if raw is None or raw.dtype != np.uint16:
         return None
     d = raw.astype(np.float32)
+    if float(scale_mm_per_unit) != 1.0:
+        d *= np.float32(scale_mm_per_unit)
     d[raw == DEPTH_INVALID_RAW] = np.nan
     return d
+
+
+def session_depth_scale(session_dir, default=1.0):
+    """`depth_encoding.scale_mm_per_unit` from a session, or `default`.
+
+    Read rather than assumed. A session that does not record one is almost
+    certainly millimetres - every format this project has written is - but the
+    lookup exists so the assumption is made in one place that can be found,
+    instead of in every caller that never knew there was one."""
+    try:
+        doc = json.loads((Path(session_dir) / "meta" / "session.json")
+                         .read_text(encoding="utf-8"))
+        v = (doc.get("depth_encoding") or {}).get("scale_mm_per_unit")
+        return float(v) if v else float(default)
+    except Exception:
+        return float(default)
 
 
 def session_depth_kind(session_dir):

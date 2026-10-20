@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from conftest import load_script
 
@@ -28,11 +29,12 @@ def test_cvat_labels_every_attribute_has_nonempty_values():
                 f"{label['name']}.{attr['name']} has an empty 'values' array")
 
 
-def test_registry_detects_both_formats(extracted_root):
+def test_registry_detects_every_capture_format(extracted_root):
     reg = {r["session_id"]: r for r in _rows(extracted_root / "registry.csv")}
-    assert len(reg) == 3
+    assert len(reg) == 4
     assert reg["vid_20250304_142804"]["capture_format"] == "v1"
     assert reg["vid_20260108_103135"]["capture_format"] == "v2"
+    assert reg["vid_20261008_101500"]["capture_format"] == "v3"
     assert reg["vid_20260108_103135"]["has_confidence"] == "True"
     assert reg["vid_20260108_103135"]["has_right"] == "True"
     assert reg["vid_20250304_142804"]["has_confidence"] == "False"
@@ -623,3 +625,119 @@ def test_the_session_records_how_it_was_decoded(tmp_path):
     _, rec = _extract(tmp_path)
     assert rec["decode"]["sws_flags"] == ex.CONFIG["SWS_FLAGS"]
     assert rec["decode"]["png_compression"] == ex.CONFIG["PNG_COMPRESSION"]
+
+
+# --------------------------------------------------------------------------- #
+# v3 (WeedScan ZED 2i, app v2.0.0). Three of its differences from v2 are
+# SILENT if a reader assumes v2: depth in tenths of a millimetre, two sentinels
+# that decode to a plausible 6.5 m, and 16-bit confidence.
+# --------------------------------------------------------------------------- #
+def test_v3_depth_is_rescaled_to_millimetres(extracted_root, raw_root):
+    """The 10x. v3 stores `depth_units_per_mm` counts per mm, default 10, so a
+    1 m row read as v2 becomes 10 m - and nothing raises, because 10000 is a
+    legal uint16 and no consumer range-checks a depth."""
+    sdir = extracted_root / "sessions" / "vid_20261008_101500"
+    truth = raw_root["truth"]["vid_20261008_101500"]
+    rows = _rows(sdir / "meta" / "pool.csv")
+    assert rows
+    for r in rows:
+        d = cv2.imread(str(sdir / "depth" / r["filename"]), cv2.IMREAD_UNCHANGED)
+        v = int(r["video_frame_idx"])
+        centre = int(d[d.shape[0] // 2, d.shape[1] // 2])
+        assert centre == truth[v]["depth_at"], (
+            f"frame {v}: {centre} mm vs {truth[v]['depth_at']} mm expected - "
+            f"a factor of ten here is the whole point of this test")
+
+
+def test_v3_depth_sentinels_become_invalid(extracted_root):
+    """65534 and 65535 mean 'no usable distance', but under value/10 they
+    decode to 6553.4 and 6553.5 mm - believable, so a reader that handles only
+    `0 = invalid` gets a wrong answer rather than an error."""
+    sdir = extracted_root / "sessions" / "vid_20261008_101500"
+    r = _rows(sdir / "meta" / "pool.csv")[0]
+    d = cv2.imread(str(sdir / "depth" / r["filename"]), cv2.IMREAD_UNCHANGED)
+    assert int(d[0, 0]) == 0, "too-close sentinel survived as a real distance"
+    assert int(d[0, 1]) == 0, "too-far sentinel survived as a real distance"
+    assert int(d.max()) < 7000, "something decoded as metres away"
+
+
+def test_v3_confidence_is_read_as_sixteen_bit(extracted_root):
+    """v3 writes gray16le. Decoding it as 8-bit grey divides every value by
+    ~257 and turns a confidence of 50 into 19 - in range, plausible, wrong."""
+    sdir = extracted_root / "sessions" / "vid_20261008_101500"
+    r = _rows(sdir / "meta" / "pool.csv")[0]
+    c = cv2.imread(str(sdir / "conf" / r["filename"]), cv2.IMREAD_UNCHANGED)
+    assert c is not None
+    body = c[20:, 20:]                       # clear of the undefined corner
+    assert body.max() > 60, (
+        f"max confidence {body.max()} - an 8-bit decode of a 16-bit stream "
+        f"collapses the range toward zero")
+    assert c[:15, :15].max() == 100, "undefined must map to 100 (worst), not 0"
+
+
+def test_v3_frames_are_joined_by_mkv_index_not_file_order(extracted_root,
+                                                          raw_root):
+    """v3 writes a row per CAPTURED frame, including ones the encoder dropped.
+    Read in file order, the first drop shifts every later frame's timestamp and
+    pose by one - undetectably, because every value stays plausible."""
+    sdir = extracted_root / "sessions" / "vid_20261008_101500"
+    truth = raw_root["truth"]["vid_20261008_101500"]
+    rows = {int(r["video_frame_idx"]): r
+            for r in _rows(sdir / "meta" / "frames_index.csv")}
+    for v, exp in truth.items():
+        assert int(rows[v]["capture_frame_idx"]) == exp["capture_idx"]
+        assert int(rows[v]["timestamp_ns"]) == exp["timestamp_ns"]
+    # The drop really happened, or this test proves nothing.
+    assert max(int(r["capture_frame_idx"]) for r in rows.values()) > max(rows)
+
+
+def test_v3_carries_distance_so_a_split_can_be_made_in_metres(extracted_root,
+                                                              raw_root):
+    """The column that changes what is possible: val and test can be separated
+    by METRES of ground instead of by a guessed number of frames."""
+    sdir = extracted_root / "sessions" / "vid_20261008_101500"
+    truth = raw_root["truth"]["vid_20261008_101500"]
+    for r in _rows(sdir / "meta" / "frames_index.csv"):
+        v = int(r["video_frame_idx"])
+        assert float(r["distance_m"]) == pytest.approx(truth[v]["distance_m"])
+
+
+def test_v3_records_what_the_depth_was_rescaled_from(extracted_root):
+    """So a factor-of-ten error stays diagnosable after the fact rather than
+    merely avoided now."""
+    doc = json.loads((extracted_root / "sessions" / "vid_20261008_101500"
+                      / "meta" / "session.json").read_text())
+    enc = doc["depth_encoding"]
+    assert enc["scale_mm_per_unit"] == 1.0, "depth/ is millimetres"
+    assert enc["source_units_per_mm"] == 10
+    assert enc["source_sentinels_mapped_to_invalid"] == [65534, 65535]
+
+
+def test_v3_confidence_encoding_is_recorded(extracted_root):
+    doc = json.loads((extracted_root / "sessions" / "vid_20261008_101500"
+                      / "meta" / "session.json").read_text())
+    enc = doc["confidence_encoding"]
+    assert enc["polarity"] == "higher_is_worse"
+    assert enc["units"] == "percent, 0..100"
+    assert enc["undefined_mapped_to"] == 100
+
+
+def test_v3_operator_markers_survive_extraction(extracted_root):
+    """markers.csv is the only record of where a row or plot begins and which
+    stretches to throw away."""
+    mk = (extracted_root / "sessions" / "vid_20261008_101500" / "meta"
+          / "markers.csv")
+    assert mk.exists() and "start row 3" in mk.read_text()
+
+
+def test_v3_calibration_is_read_from_its_own_key_names(extracted_root):
+    """v3 nests intrinsics under calibration_rectified.left_cam, not
+    rectified.left. Falling through to the v2 reader does not raise - it
+    returns a calibration of all None and the session loses its intrinsics."""
+    doc = json.loads((extracted_root / "sessions" / "vid_20261008_101500"
+                      / "meta" / "session.json").read_text())
+    calib = doc["camera"]["calibration"]
+    assert calib["format"] == "v3_json"
+    assert calib["left"]["fx"] == 350.0
+    assert calib["baseline_mm"] == 120.0
+    assert calib["mm_per_px_at_1000mm"] == pytest.approx(1000.0 / 350.0, abs=1e-3)
