@@ -966,6 +966,13 @@ def extract_session(sess, out_root, cfg):
           f"ts={ts_source} | left+{'+'.join(have) if have else 'none'}"
           f"{' | SVO' if sess['svo'] else ''}")
     if cfg["DRY_RUN"]:
+        # A dry run exists to be READ before committing to an extraction, so it
+        # has to show the warnings, not just the shape of the session. They were
+        # collected here and printed only at the end of a real extraction, which
+        # meant the run you do precisely to catch a missing calibration or a
+        # rescaled depth stream was the one run that never mentioned them.
+        for w in warnings:
+            print(f"      ! {w}")
         return {"session_id": sid, "dry_run": True, "warnings": warnings}
 
     want_right = bool(sess["right"]) and cfg["WRITE_RIGHT"]

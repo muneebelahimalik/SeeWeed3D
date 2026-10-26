@@ -24,6 +24,20 @@ where there is no display.
 numpy is re-pinned `<2` last, because opencv declares `numpy>=2` and pip
 resolves that by upgrading numpy — silently breaking the pin SAM 3 depends on.
 
+**The container carries two Pythons**, and that is the subtlest thing the
+script works around. `python` is 3.11 under `/usr/local`; the `pip` on PATH
+belongs to Debian's 3.13. So every install goes through `python -m pip`, never
+bare `pip`, which would report success while installing into the interpreter
+that never runs the tests.
+
+Worse, 3.11's `sys.path` includes Debian's `/usr/lib/python3/dist-packages`,
+where packages are built for **another ABI**. `pillow` is the one that lands
+there: pip sees Debian's 10.2 as already satisfying an unpinned `pillow`,
+installs nothing, and `import PIL.Image` then fails on a
+`_imaging.cpython-312.so` — which takes torchvision and its 31 tests with it,
+reported as a Pillow error nowhere near the cause. Hence `pillow>=11`, and
+hence the verify step refuses any package that resolves out of Debian's tree.
+
 
 Getting a second PC to the point where it can train Stage A overnight, and the
 one thing that will silently break if you skip it.
