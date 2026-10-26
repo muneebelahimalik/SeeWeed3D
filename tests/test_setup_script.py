@@ -95,3 +95,35 @@ def test_the_torch_build_is_cpu_only(body):
     """Nothing in this container has a GPU, and the CUDA wheels are gigabytes
     of download for an identical test result."""
     assert "download.pytorch.org/whl/cpu" in body
+
+
+def test_pillow_carries_a_version_floor(code):
+    """Debian's pillow 10.2 lives in /usr/lib/python3/dist-packages, which is on
+    3.11's sys.path, and its C extensions are built for another ABI. An
+    unpinned `pip install pillow` treats it as already satisfied and installs
+    nothing, so `import PIL.Image` dies on a cpython-312 .so and takes
+    torchvision down with it. The floor is what forces a real cp311 wheel."""
+    m = re.search(r"pillow[^\s\"']*", code)
+    assert m, "pillow is not installed at all"
+    assert re.search(r"\"pillow>=\d+\"", code), (
+        f"pillow must carry a version floor, found: {m.group(0)}")
+
+
+def test_every_install_goes_through_python_dash_m_pip(code):
+    """`python` is 3.11 under /usr/local; `pip` on PATH is Debian's 3.13. A bare
+    `pip install` succeeds loudly and installs into the interpreter that never
+    runs the tests."""
+    for ln in code.splitlines():
+        s = ln.strip()
+        if s.startswith("pip ") or s.startswith("pip3 "):
+            pytest.fail(f"bare pip invocation: {s}")
+        if "pip install" in s:
+            assert "python -m pip install" in s, f"not via python -m pip: {s}"
+
+
+def test_the_verify_step_rejects_packages_from_debians_tree(body):
+    """The whole class of failure is a package resolving out of another
+    interpreter's site directory, so the check is on the path, not on one
+    package name."""
+    assert "/usr/lib/python3/dist-packages" in body
+    assert "PIL.Image" in body, "importing PIL alone does not load the C extension"

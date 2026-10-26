@@ -110,27 +110,80 @@ training change.
 
 Turns raw ZED recordings into an indexed, QC'd frame pool.
 
-Edit the CONFIG block at the top of `seeweed3d/extraction/extract_sessions.py`:
+Edit the two blocks at the top of `seeweed3d/extraction/extract_sessions.py`.
+They are the only part you normally touch. Point `path` at the folder that
+*contains* the `Session_*` folders — the walk is recursive, so one entry covers
+a whole visit:
 
 ```python
-INPUT_ROOTS = [r"E:\Field_Recordings\2026-01-08"]   # one entry per visit
-OUTPUT_ROOT = r"E:\Dataset_Vidalia"
-DRY_RUN     = True                                   # run this first
+INPUT_ROOTS = [
+    {
+        "path":       r"E:\Field_Recordings\2026-10-26_vidalia",
+        "trip":       "vid4",          # becomes the session_id prefix - never rename it later
+        "site":       "vidalia",
+        "field":      "field_A",
+        "scene_hint": "mixed",         # mixed | onion_only | weed_only | unknown
+        "notes":      "v3 capture - WeedScan 2.0.0",
+    },
+]
+OUTPUT_ROOT = r"E:\Dataset_Vidalia\vid4_20261026"
 ```
+
+`DRY_RUN` lives *inside* `CONFIG`, further down — set `"DRY_RUN": True` there,
+not as a bare top-level name. A `DRY_RUN = True` written at module level is a
+new, unused variable: the run writes everything and says nothing about it.
 
 ```powershell
 conda activate dl
-python seeweed3d/extraction/extract_sessions.py     # DRY_RUN=True: inspect
-# then set DRY_RUN = False and run again
-python seeweed3d/extraction/extract_sessions.py
+python -m seeweed3d.extraction.extract_sessions      # "DRY_RUN": True - inspect
+# then set "DRY_RUN": False and run again
+python -m seeweed3d.extraction.extract_sessions
 ```
 
-**Produces** `E:\Dataset_Vidalia\sessions\<session_id>\` containing `rgb/`,
-`depth/`, `conf/`, `meta/pool.csv`, `meta/frames_index.csv`,
-`meta/calibration.json`, plus a top-level `registry.csv`.
+**Produces** `<OUTPUT_ROOT>\sessions\<trip>_<YYYYmmdd>_<HHMMSS>\` containing
+`rgb/`, `depth/`, `conf/`, `right/`, `meta/session.json`,
+`meta/frames_index.csv`, `meta/pool.csv`, `meta/calibration.json`,
+`meta/markers.csv`, plus a top-level `registry.csv`.
 
-Read `registry.csv` before continuing — check `median_depth_valid_frac_veg` and
-pick which sessions you will hold out for testing.
+The session id comes from the **filenames**, not the folder, so a folder
+renamed to `Session_20261026_101500_plot_A` still extracts as
+`vid4_20261026_101500`.
+
+Read `registry.csv` before continuing — check `capture_format`, `depth_kind`,
+`median_depth_valid_frac_veg`, and pick which sessions you will hold out for
+testing. **Decide the holdout now**, before any cut-outs are taken: a drive is
+a cut-out bank or a source of whole frames, never both.
+
+### v3 captures (WeedScan ZED 2i app 2.0.0)
+
+A v3 session is recognised by `session_metadata.json` and extracts with no
+extra configuration — but four things are normalised on the way in. Each one is
+visible in the run's own output; the dry run shows all of them:
+
+```
+  [vid4_20261026_101500] v3 | 2208x1242 @ 15.00fps | stride=5 | ts=frames_csv_v3 | left+right+depth+conf
+      ! depth rescaled from 10 counts/mm to millimetres; codes 65534 and 65535 mapped to 0 (invalid)
+      -> 287 pool frames of 1436 decoded
+      -> median valid depth on vegetation: 91.4%
+```
+
+| What to look for | Means |
+|---|---|
+| `v3` in the session line | `session_metadata.json` was found and read — a v3 capture read as `v2` means that file is missing |
+| `depth rescaled from 10 counts/mm` | tenths of a mm converted; sentinels `65534`/`65535` mapped to `0` = invalid |
+| `ts=frames_csv_v3` | timestamps joined on `mkv_index`, so frames with `mkv_written != 1` leave holes instead of shifting everything after them |
+| `confidence_encoding.polarity` in `meta/session.json` reads `higher_is_worse` | ZED confidence is 16-bit and inverted; `65535` (undefined) maps to the **worst** value, not the best |
+
+Do **not** set `DEPTH_SCALE_MM_PER_UNIT` for a v3 session — it is read from the
+capture's own `encoding.depth_units_per_mm`. A v3 session that does not record
+its scale is **refused**, not defaulted to 10: a crash is recoverable and a
+ten-fold depth field is not. If you hit that refusal, the capture app wrote an
+incomplete `session_metadata.json` — fix it there rather than hard-coding a
+guess here.
+
+Depth under `depth/` is millimetres for **every** capture format once
+extraction has run, which is what makes `registry.csv` comparable across
+visits.
 
 > **Depth is raw uint16 millimetres, `0` = invalid.** Never rescale it. Always
 > read it via `common/depth_utils.load_depth_mm()`.

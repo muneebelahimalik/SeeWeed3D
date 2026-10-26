@@ -741,3 +741,28 @@ def test_v3_calibration_is_read_from_its_own_key_names(extracted_root):
     assert calib["left"]["fx"] == 350.0
     assert calib["baseline_mm"] == 120.0
     assert calib["mm_per_px_at_1000mm"] == pytest.approx(1000.0 / 350.0, abs=1e-3)
+
+
+def test_a_dry_run_prints_the_warnings_it_exists_to_surface(raw_root, tmp_path,
+                                                            capsys):
+    """DRY_RUN is the run you do BEFORE committing to an extraction, so it has
+    to report a rescaled depth stream, a missing calibration or a synthesised
+    timestamp. The warnings were collected and then printed only at the end of
+    a real extraction, so the one run meant for reading was the one run that
+    never mentioned them."""
+    s1 = load_script("extraction/extract_sessions.py")
+    s1.CONFIG.update({
+        "INPUT_ROOTS": [{"path": str(raw_root["root"] / "C"), "trip": "vid",
+                         "site": "s", "field": "f", "scene_hint": "mixed",
+                         "notes": ""}],
+        "OUTPUT_ROOT": str(tmp_path / "out"),
+        "OVERWRITE": True, "DRY_RUN": True,
+    })
+    s1.main()
+    out = capsys.readouterr().out
+
+    assert "v3" in out and "ts=frames_csv_v3" in out
+    assert "rescaled" in out and "counts/mm" in out, (
+        "a dry run over a v3 session must say depth was rescaled")
+    assert not (tmp_path / "out" / "sessions").exists()
+    assert not (tmp_path / "out" / "registry.csv").exists()

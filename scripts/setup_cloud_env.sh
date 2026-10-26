@@ -43,7 +43,21 @@ say "installing Python packages"
 # NOT `pip install --upgrade pip`: pip here is Debian-managed and has no
 # RECORD file, so the upgrade aborts with "Cannot uninstall pip" and takes the
 # whole script down with it under `set -e`. The shipped pip is fine.
-python -m pip install -q "numpy>=1.26,<2" "opencv-python-headless<5" pillow pytest
+#
+# EVERY install here goes through `python -m pip`, never bare `pip`. They are
+# not the same interpreter on this image: `python` is 3.11 under /usr/local,
+# while `pip` on PATH belongs to Debian's 3.13. Bare `pip install` reports
+# success and installs into a Python that never runs the tests.
+#
+# `pillow>=11` is a VERSION FLOOR, not a preference. Debian's pillow 10.2 sits
+# in /usr/lib/python3/dist-packages, which is on 3.11's sys.path, and its C
+# extensions are built for a different ABI (_imaging.cpython-312.so). An
+# unpinned `pip install pillow` sees 10.2 as already satisfied, installs
+# nothing, and `import PIL.Image` then dies on the foreign .so - taking
+# torchvision, and the 31 tests behind it, with it. The floor forces a real
+# cp311 wheel into /usr/local, which precedes the Debian directory on the path.
+python -m pip install -q "numpy>=1.26,<2" "opencv-python-headless<5" \
+  "pillow>=11" pytest
 
 # numpy is pinned <2 because Meta's sam3 requires it, and recent
 # opencv-python-headless declares numpy>=2. pip resolves that by upgrading
@@ -64,8 +78,14 @@ command -v ffprobe >/dev/null || { echo "ffprobe missing"; exit 1; }
 python - <<'PYEOF'
 import sys
 import numpy, cv2, pytest, torch, torchvision, matplotlib
+import PIL, PIL.Image          # the C extension, not just the package
 assert numpy.__version__.startswith("1."), (
     f"numpy {numpy.__version__} - the <2 pin was clobbered, and sam3 needs it")
+# Anything resolving out of Debian's tree is a different interpreter's build and
+# will fail on import sooner or later. Checked here while it is still cheap.
+for mod in (numpy, cv2, PIL, torch, matplotlib):
+    assert "/usr/lib/python3/dist-packages" not in (mod.__file__ or ""), (
+        f"{mod.__name__} resolved to Debian's tree: {mod.__file__}")
 print(f"  numpy {numpy.__version__}  cv2 {cv2.__version__}  "
       f"torch {torch.__version__}")
 print(f"  torchvision {torchvision.__version__}  "
