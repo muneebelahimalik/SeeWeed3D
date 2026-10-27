@@ -185,6 +185,61 @@ Depth under `depth/` is millimetres for **every** capture format once
 extraction has run, which is what makes `registry.csv` comparable across
 visits.
 
+### When a session fails to extract
+
+A session that cannot be probed is reported, skipped, and written to
+`extraction_failures.csv` beside the registry — it has no registry row, so
+without that file the record of a ten-folder run reads as a clean five-session
+success. The run also ends with the fraction: `5 of 10 session folder(s)
+FAILED: 5 false_start`.
+
+ffprobe's own output on a broken Matroska file (`Duplicate element`, `0x00 at
+pos 110 invalid as first byte of an EBML number`) cannot tell apart the two
+cases that matter, and they have **opposite** answers:
+
+| Verdict | What happened | What to do |
+|---|---|---|
+| `false_start` | Header written, no frame ever arrived — the file is a few kB of header followed by the zeroed seek reserve. Those zeros are what ffprobe trips over. | Nothing to recover. Check the SVO; otherwise delete the folder. It is a false start, not lost data. |
+| `unfinalised` | Frames were written, then the process died before the index was appended. Every frame before the cut is intact. | `ffmpeg -err_detect ignore_err -i Broken.mkv -c copy Fixed.mkv`, then re-extract with `OVERWRITE=True`. No re-encode, so no pixels change. |
+
+Guessing wrong one way throws away a good drive; guessing wrong the other sends
+you chasing frames that were never recorded. To get the verdict on a folder or
+a whole visit:
+
+```powershell
+python -m seeweed3d.validation.inspect_broken_recording --root "E:\Dataset_Vidalia\Data_15_16_October_2026"
+```
+
+It reads a few bytes per file, writes nothing, and reports per session: each
+video's size and whether it holds any cluster (frame data), `frames.csv` row
+count and how many rows claim an MKV frame, SVO presence and size, then the
+verdict and the exact recovery command. Several short failed folders clustered
+within a minute or two of a long successful one is the signature of a false
+start — the operator starting, stopping and starting again.
+
+### MAX_POOL_PER_SESSION widens the stride; it does not cut the drive short
+
+When the cap would be exceeded, the stride is widened so the pool still spans
+the whole session, and the run says so:
+
+```
+! pool stride widened 5 -> 11 so 400 frames span the whole 4173-frame session;
+  raise MAX_POOL_PER_SESSION for a denser pool
+```
+
+It used to stop writing at the cap, which takes the **head**: a 4173-frame
+drive at stride 5 pooled the first 1995 frames and nothing after them. The far
+half of the field was not thinned, it was absent — and the only trace was a
+round `400 pooled` that reads like a setting rather than a loss. A cap is a
+statement about how many frames you are willing to annotate, not about which
+part of the field you care about.
+
+**If you extracted before this change**, any session whose log shows exactly
+`MAX_POOL_PER_SESSION` pooled frames needs re-extracting with `OVERWRITE=True`:
+compare `decoded` against `pool` in `registry.csv`, and anywhere
+`pool × stride` falls well short of `decoded`, the tail of that drive never
+reached the pool.
+
 > **Depth is raw uint16 millimetres, `0` = invalid.** Never rescale it. Always
 > read it via `common/depth_utils.load_depth_mm()`.
 

@@ -375,7 +375,8 @@ def _avi_session(tmp_path, colormap=None, n=6, h=90, w=160):
 
 def _extract(tmp_path, **over):
     cfg = dict(ex.CONFIG, OUTPUT_ROOT=str(tmp_path / "out"),
-               DRY_RUN=False, OVERWRITE=True, POOL_STRIDE=1, **over)
+               DRY_RUN=False, OVERWRITE=True, POOL_STRIDE=1)
+    cfg.update(over)          # the caller's value wins over the defaults above
     cfg["INPUT_ROOTS"] = [{"path": str(tmp_path), "trip": "T", "site": "s",
                            "field": "f", "scene_hint": "mixed", "notes": ""}]
     sess = ex.discover(cfg)
@@ -766,3 +767,57 @@ def test_a_dry_run_prints_the_warnings_it_exists_to_surface(raw_root, tmp_path,
         "a dry run over a v3 session must say depth was rescaled")
     assert not (tmp_path / "out" / "sessions").exists()
     assert not (tmp_path / "out" / "registry.csv").exists()
+
+
+# --------------------------------------------------------------------------- #
+# MAX_POOL_PER_SESSION
+#
+# A cap says how many frames you are willing to annotate. It used to be applied
+# by stopping once it was reached, which says something quite different: that
+# you only care about the start of the drive.
+# --------------------------------------------------------------------------- #
+
+def _long_session(tmp_path, n):
+    from conftest import _write_session
+    _write_session(tmp_path / f"Session_20261016_112306", "v2", n=n)
+
+
+def _pool_indices(out, sid):
+    return sorted(int(r["video_frame_idx"])
+                  for r in _rows(out / "sessions" / sid / "meta" / "pool.csv"))
+
+
+def test_the_pool_cap_spreads_over_the_session_instead_of_taking_the_head(
+        tmp_path):
+    """The original failure: a 4173-frame drive at stride 5 capped to 400 wrote
+    the first 1995 frames and nothing after them. The second half of the field
+    was not thinned out, it was absent - and the only trace was a round "400
+    pooled", which reads like a setting rather than a loss."""
+    _long_session(tmp_path, 60)
+    cfg, rec = _extract(tmp_path, POOL_STRIDE=1, MAX_POOL_PER_SESSION=10)
+    idx = _pool_indices(tmp_path / "out", rec["session_id"])
+
+    assert len(idx) <= 10, "the cap must still be a cap"
+    assert max(idx) >= 45, (
+        f"pool stops at frame {max(idx)} of 60 - the tail of the drive is "
+        f"missing, which is the bug this guards")
+    assert min(idx) == 0
+
+
+def test_a_widened_stride_is_announced(tmp_path):
+    """Changing which frames you get without saying so would be worse than the
+    truncation it replaces."""
+    _long_session(tmp_path, 60)
+    cfg, rec = _extract(tmp_path, POOL_STRIDE=1, MAX_POOL_PER_SESSION=10)
+    assert any("stride widened" in w for w in rec["warnings"]), rec["warnings"]
+    assert any("MAX_POOL_PER_SESSION" in w for w in rec["warnings"])
+
+
+def test_a_cap_that_does_not_bite_changes_nothing(tmp_path):
+    """No spurious widening, and no warning on the normal case - a warning that
+    fires every run is one nobody reads."""
+    _long_session(tmp_path, 20)
+    cfg, rec = _extract(tmp_path, POOL_STRIDE=2, MAX_POOL_PER_SESSION=400)
+    idx = _pool_indices(tmp_path / "out", rec["session_id"])
+    assert idx == list(range(0, 20, 2))
+    assert not any("stride widened" in w for w in rec["warnings"])

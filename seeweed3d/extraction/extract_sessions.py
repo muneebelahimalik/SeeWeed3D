@@ -79,6 +79,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.progress import Progress  # noqa: E402
+from common.mkv_integrity import diagnose_session  # noqa: E402
 
 # #############################################################################
 # ##                                                                         ##
@@ -270,11 +271,30 @@ def run_json(cmd):
     return json.loads(r.stdout)
 
 
+class ProbeError(RuntimeError):
+    """ffprobe could not read a video file.
+
+    Carries the path, because the ffprobe stderr alone - a wall of EBML parser
+    complaints - says the container is malformed without saying whether any
+    frames are in it. The path lets the caller go and look.
+    """
+
+    def __init__(self, path, detail):
+        self.path = Path(path)
+        self.detail = str(detail)
+        super().__init__(f"cannot read {self.path.name}: {self.detail}")
+
+
 def probe(ffprobe, path):
     """Real stream parameters from the file header - never trust sidecar files."""
-    d = run_json([ffprobe, "-v", "error", "-select_streams", "v:0",
-                  "-show_streams", "-show_format", "-of", "json", str(path)])
-    s = d["streams"][0]
+    try:
+        d = run_json([ffprobe, "-v", "error", "-select_streams", "v:0",
+                      "-show_streams", "-show_format", "-of", "json", str(path)])
+        s = d["streams"][0]
+    except RuntimeError as e:
+        raise ProbeError(path, e) from None
+    except (KeyError, IndexError):
+        raise ProbeError(path, "no video stream in the file") from None
     num, den = (s.get("r_frame_rate") or "0/1").split("/")
     fps = float(num) / float(den) if float(den) else 0.0
     nb = s.get("nb_frames")
@@ -962,6 +982,33 @@ def extract_session(sess, out_root, cfg):
     stride = cfg["POOL_STRIDE"] or max(1, int(round(fps / cfg["TARGET_POOL_FPS"])))
     have = [k for k in ("right", "depth", "conf") if sess[k]]
 
+    # THE CAP WIDENS THE STRIDE; IT DOES NOT TRUNCATE THE DRIVE.
+    #
+    # MAX_POOL_PER_SESSION used to stop writing once it was reached, which
+    # takes the HEAD of a session. On a 4173-frame drive at stride 5 that is
+    # 400 frames spanning the first 1995 - the second half of the field was
+    # not thinned, it was absent, and the only sign of it was a round "400
+    # pooled" that looks like a setting rather than a loss.
+    #
+    # A cap is a statement about how many frames you want to annotate, not
+    # about which part of the field you care about, so it is spent evenly over
+    # the whole session instead.
+    n_total = rgb_info.get("nb_frames_header") or (
+        int(rgb_info["duration_s"] * fps) if rgb_info.get("duration_s") else 0)
+    cap = cfg["MAX_POOL_PER_SESSION"]
+    if cap and n_total:
+        if -(-n_total // stride) > cap:          # ceil div: candidates > cap
+            widened = -(-n_total // cap)
+            warnings.append(
+                f"pool stride widened {stride} -> {widened} so {cap} frames "
+                f"span the whole {n_total}-frame session; raise "
+                f"MAX_POOL_PER_SESSION for a denser pool")
+            stride = widened
+    elif cap:
+        warnings.append(
+            f"session length unknown, so MAX_POOL_PER_SESSION={cap} can only "
+            f"be applied by stopping early - the pool may cover just the start")
+
     print(f"  [{sid}] {fmt} | {W}x{H} @ {fps:.2f}fps | stride={stride} | "
           f"ts={ts_source} | left+{'+'.join(have) if have else 'none'}"
           f"{' | SVO' if sess['svo'] else ''}")
@@ -1016,11 +1063,8 @@ def extract_session(sess, out_root, cfg):
     index_rows, pool_rows = [], []
     n_written = 0
     png_opt = [cv2.IMWRITE_PNG_COMPRESSION, cfg["PNG_COMPRESSION"]]
-    cap = cfg["MAX_POOL_PER_SESSION"]
 
-    est_total = rgb_info.get("nb_frames_header") or (
-        int(rgb_info["duration_s"] * fps) if rgb_info.get("duration_s") else 0)
-    prog = Progress(est_total, f"  [{sid}]", unit="frames")
+    prog = Progress(n_total, f"  [{sid}]", unit="frames")
     for i, bgr in enumerate(decs["rgb"]):
         got = {k: next(v, None) for k, v in its.items()}
         # NORMALISE BEFORE ANYTHING READS IT, including the QC metrics. Those
@@ -1228,6 +1272,46 @@ def extract_session(sess, out_root, cfg):
     return session_json
 
 
+def report_failure(sess, exc):
+    """Explain a failed session, on screen and in a row for the CSV.
+
+    A failed session appears NOWHERE in registry.csv - it has no row to carry a
+    status - so without this the record of the run says five sessions where ten
+    folders were found, and the other five exist only in a terminal scrollback
+    that is gone by the time anyone asks what happened to them.
+
+    An unreadable container also gets a verdict rather than ffprobe's parser
+    output, because "no frame was ever written" and "the frames are there but
+    the index is not" look identical in that output and have opposite answers.
+    """
+    folder = Path(sess["folder"])
+    row = {"folder": str(folder), "error": str(exc), "verdict": "error",
+           "detail": "", "recovery": "", "svo_bytes": 0,
+           "frames_csv_rows": "", "frames_csv_written": ""}
+
+    if isinstance(exc, ProbeError):
+        d = diagnose_session(folder)
+        row.update(verdict=d["verdict"], recovery=d["recovery"],
+                   svo_bytes=d["svo_bytes"],
+                   frames_csv_rows="" if d["frames_csv_rows"] is None
+                   else d["frames_csv_rows"],
+                   frames_csv_written="" if d["frames_csv_written"] is None
+                   else d["frames_csv_written"],
+                   detail="; ".join(f"{f['path'].name}: {f['detail']}"
+                                    for f in d["files"]))
+        print(f"  [FAIL] {folder.name}: {d['verdict']}")
+        for f in d["files"]:
+            print(f"           {f['path'].name}: {f['detail']}")
+        if d["frames_csv_rows"] is not None:
+            print(f"           frames.csv: {d['frames_csv_rows']} rows"
+                  + (f", {d['frames_csv_written']} written to MKV"
+                     if d["frames_csv_written"] is not None else ""))
+        print(f"      -> {d['recovery']}")
+    else:
+        print(f"  [FAIL] {folder}: {exc}")
+    return row
+
+
 def main():
     cfg = CONFIG
 
@@ -1254,13 +1338,14 @@ def main():
 
     out_root.mkdir(parents=True, exist_ok=True)
     results = []
+    failures = []
     for s in sessions:
         try:
             r = extract_session(s, out_root, cfg)
             if r:
                 results.append(r)
         except Exception as e:
-            print(f"  [FAIL] {s['folder']}: {e}")
+            failures.append(report_failure(s, e))
 
     rows = [{"session_id": r["session_id"], "capture_format": r["capture_format"],
              "trip": r["trip"], "site": r["site"], "field": r["field"],
@@ -1286,7 +1371,25 @@ def main():
             w.writerows(rows)
         print(f"\nRegistry written: {out_root / 'registry.csv'}")
 
+    if failures and not cfg["DRY_RUN"]:
+        fpath = out_root / "extraction_failures.csv"
+        with open(fpath, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(failures[0].keys()))
+            w.writeheader()
+            w.writerows(failures)
+        print(f"Failures written:  {fpath}")
+
     print(f"\nDone. {len(results)} session(s) processed.")
+    if failures:
+        # Said as a FRACTION of what was found. "5 session(s) processed" is a
+        # success line, and on its own it reads like one even when half the
+        # folders never got there.
+        by_verdict = {}
+        for f in failures:
+            by_verdict[f["verdict"]] = by_verdict.get(f["verdict"], 0) + 1
+        print(f"      {len(failures)} of {len(sessions)} session folder(s) "
+              f"FAILED: "
+              + ", ".join(f"{n} {v}" for v, n in sorted(by_verdict.items())))
 
 
 if __name__ == "__main__":
