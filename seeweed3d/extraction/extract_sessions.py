@@ -865,7 +865,9 @@ def discover(cfg):
                                  and p.suffix.lower() not in (".txt", ".json",
                                                               ".csv")})
                 if has_svo:
-                    why = "SVO only - decode it to MKV first"
+                    why = ("SVO only - export it first: python -m "
+                           "seeweed3d.extraction.export_svo --session "
+                           f"\"{folder}\" --out <dir>")
                 elif has_depth:
                     why = "depth present but no RGB/left video"
                 elif others:
