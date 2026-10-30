@@ -185,6 +185,45 @@ Depth under `depth/` is millimetres for **every** capture format once
 extraction has run, which is what makes `registry.csv` comparable across
 visits.
 
+### A session that holds only an SVO
+
+Some captures — the Jetson recordings among them — write `recording.svo2` and
+the sidecar logs, and no MKVs at all. Extraction reports those folders and
+skips them, which is right: an SVO is a stereo archive, not an image stream.
+Export it first:
+
+```powershell
+# ALWAYS do a trial run first - 50 frames, seconds, nothing committed
+python -m seeweed3d.extraction.export_svo --session "D:\ZED_Data_Jetson\Session_20261021_123954" --out "E:\Dataset_Vidalia\Jetson_exported" --limit 50
+
+# then the real one
+python -m seeweed3d.extraction.export_svo --session "D:\ZED_Data_Jetson\Session_20261021_123954" --out "E:\Dataset_Vidalia\Jetson_exported"
+```
+
+Then point `INPUT_ROOTS` at `E:\Dataset_Vidalia\Jetson_exported` and extract
+normally — the export is a v3 session and needs no special case.
+
+It needs the **ZED SDK and pyzed** on that machine, and a CUDA GPU. The source
+folder is never written to; everything lands in `<out>\<session name>\`.
+
+Three things worth knowing:
+
+- **Depth is recomputed, not replayed.** An SVO stores the rectified stereo
+  pair, so depth comes from running the matcher again at export time. It
+  depends on the SDK version and the depth mode used *here*, not at capture.
+  Both are written into `session_metadata.json` under `export`. Two exports of
+  one SVO under different modes are different measurements of the same field.
+- **The SDK's own `ZED_SVO_Export` is not a substitute.** It writes depth as an
+  8-bit preview or with its own PNG conventions, and an 8-bit depth preview is
+  exactly what `REQUIRE_16BIT_DEPTH` exists to refuse — ffmpeg turns it into
+  plausible millimetres that are fiction.
+- **Frames are matched to `frames.csv` by timestamp, not by position.** If the
+  two sequences do not line up, pairing by position gives every frame its
+  neighbour's pose and exposure, undetectably. A frame with no matching row
+  stops the export rather than being written with a guess, and a log that
+  belongs to a different recording is caught in the first few frames rather
+  than after forty minutes.
+
 ### When a session fails to extract
 
 A session that cannot be probed is reported, skipped, and written to
