@@ -56,9 +56,10 @@ def _fake_svo(n=6, ts=None):
     fake has to skip frames the way the real reader seeks past them, or a
     strided export would look right here and write the wrong frames in the
     field."""
-    def opener(svo_path, depth_mode=None, stride=1):
+    def opener(svo_path, depth_mode=None, stride=1, positions=None):
         step = max(1, int(stride))
-        taken = list(range(0, n, step))
+        taken = ([int(x) for x in positions] if positions is not None
+                 else list(range(0, n, step)))
         info = {"width": W, "height": H, "fps": FPS, "n_frames": len(taken),
                 "n_recorded": n, "stride": step,
                 "depth_mode": depth_mode or "NEURAL", "sdk_version": "4.1.0"}
@@ -71,7 +72,8 @@ def _fake_svo(n=6, ts=None):
     return opener
 
 
-def _session(folder, n=6, ts=None, with_meta=True, columns=None):
+def _session(folder, n=6, ts=None, with_meta=True, columns=None,
+             dist=None):
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "recording.svo2").write_bytes(b"\x00" * 1024)
     cols = columns or ["rec_frame_idx", "image_timestamp_ns", "tx_mm",
@@ -81,7 +83,8 @@ def _session(folder, n=6, ts=None, with_meta=True, columns=None):
         w.writerow(cols)
         for i in range(n):
             t = ts(i) if ts else T0 + i * int(1e9 / FPS)
-            w.writerow([i, t, i * 17.0, round(i * 0.017, 4), "OK"][:len(cols)])
+            d = dist(i) if dist else round(i * 0.017, 4)
+            w.writerow([i, t, i * 17.0, d, "OK"][:len(cols)])
     if with_meta:
         (folder / "session_metadata.json").write_text(json.dumps(
             {"status": "COMPLETE", "capture": {"fps": FPS,
@@ -411,7 +414,7 @@ def test_a_strided_export_still_round_trips_through_the_extractor(tmp_path):
 
 def _flaky_svo(n=20, bad_positions=(3, 7, 11)):
     """A reader that reports some frames as unreadable, as pyzed does."""
-    def opener(svo_path, depth_mode=None, stride=1):
+    def opener(svo_path, depth_mode=None, stride=1, positions=None):
         step = max(1, int(stride))
         info = {"width": W, "height": H, "fps": FPS, "stride": step,
                 "n_frames": len(range(0, n, step)), "n_recorded": n,
@@ -483,3 +486,113 @@ def test_the_written_stream_matches_the_capture_apps_own_ffv1_settings(tmp_path)
     assert ex_svo.FfvWriter.FFV1_ARGS[
         ex_svo.FfvWriter.FFV1_ARGS.index("-slices") + 1] == "24"
     assert "-slicecrc" in ex_svo.FfvWriter.FFV1_ARGS
+
+
+# --------------------------------------------------------------------------- #
+# Sampling by metres of ground
+#
+# 886 m of row across eight drives, pushed by hand at 0.17-0.26 m/s. A fixed
+# stride is a statement about the recording; a dataset needs one about the
+# field, and the two part company every time the operator slows down.
+# --------------------------------------------------------------------------- #
+
+def test_frames_are_chosen_by_distance_travelled(tmp_path):
+    rows = [{"rec_frame_idx": i, "distance_m": i * 0.05} for i in range(100)]
+    got = ex_svo.select_positions_by_distance(rows, 0.25)
+    assert got[0] == 0, "the first frame of a drive is always taken"
+    assert got[:5] == [0, 5, 10, 15, 20]
+
+
+def test_a_stall_does_not_produce_a_hundred_pictures_of_one_spot(tmp_path):
+    """The failure a stride cannot see. Two of these ten sessions travelled
+    one centimetre in 48 seconds; within a drive the same thing happens
+    whenever the operator stops to move a cable."""
+    rows = ([{"rec_frame_idx": i, "distance_m": i * 0.05} for i in range(10)]
+            + [{"rec_frame_idx": 10 + i, "distance_m": 0.5}       # stalled
+               for i in range(200)]
+            + [{"rec_frame_idx": 210 + i, "distance_m": 0.5 + i * 0.05}
+               for i in range(10)])
+    got = ex_svo.select_positions_by_distance(rows, 0.25)
+
+    stalled = [g for g in got if 10 <= g < 210]
+    assert stalled == [10], (
+        f"{len(stalled)} frames taken from a 200-frame stall. One is right - "
+        f"frame 10 sits a full 0.25 m past its predecessor and is a genuinely "
+        f"new place. The other 199 are the same spot, and a stride of 5 would "
+        f"have taken 40 of them")
+    assert len(got) < 10, f"{len(got)} frames for 1 m of row"
+
+
+def test_rows_without_odometry_are_skipped_not_guessed(tmp_path):
+    rows = [{"rec_frame_idx": 0, "distance_m": 0.0},
+            {"rec_frame_idx": 1, "distance_m": ""},
+            {"rec_frame_idx": 2, "distance_m": "nonsense"},
+            {"rec_frame_idx": 3, "distance_m": 0.4}]
+    assert ex_svo.select_positions_by_distance(rows, 0.25) == [0, 3]
+
+
+def test_an_export_can_be_planned_in_metres(tmp_path):
+    """17 mm per frame in the fixture, so 0.25 m is every 15th frame."""
+    src = _session(tmp_path / "Session_20261106_134659", n=60)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(60), metres=0.25)
+    assert r["frames"] == 4           # frames 0, 15, 30, 45
+    assert r["matched"] == 4
+
+    rows = list(csv.DictReader(open(r["out"] / "frames.csv", encoding="utf-8")))
+    written = [x for x in rows if x["mkv_written"] == "1"]
+    assert [int(x["rec_frame_idx"]) for x in written] == [0, 15, 30, 45]
+
+
+def test_the_metre_plan_is_recorded_beside_the_frame_count(tmp_path):
+    """A dataset built from a 0.25 m plan is a different object from one built
+    at a fixed stride, even when both hold the same number of frames."""
+    src = _session(tmp_path / "Session_20261106_134659", n=60)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(60), metres=0.25)
+    exp = json.loads((r["out"] / "session_metadata.json").read_text())["export"]
+    assert exp["metres_between_frames"] == 0.25
+    assert exp["effective_stride"] == pytest.approx(15.0, abs=0.1)
+
+
+def test_a_metre_plan_over_a_drive_that_stalled_takes_almost_nothing(tmp_path):
+    """Session_20261021_123954: 727 frames, 1 cm of travel. Exporting it on a
+    frame count would put 145 pictures of one spot into the pool."""
+    src = _session(tmp_path / "Session_20261021_123954", n=100,
+                   dist=lambda i: 0.0001 * i)        # 0.1 mm per frame
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(100), metres=0.25)
+    assert r["frames"] == 1, (
+        f"{r['frames']} frames from a drive that covered 1 cm")
+
+
+def test_a_log_with_no_odometry_at_all_refuses_rather_than_striding(tmp_path):
+    src = _session(tmp_path / "Session_20261106_134659", n=20,
+                   columns=["rec_frame_idx", "image_timestamp_ns", "tx_mm"])
+    with pytest.raises(SystemExit) as e:
+        ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(20), metres=0.25)
+    assert "distance_m" in str(e.value) and "--stride" in str(e.value)
+
+
+def test_a_metre_planned_export_round_trips_through_the_extractor(tmp_path):
+    src = _session(tmp_path / "Session_20261106_134659", n=60)
+    ex_svo.export_session(src, tmp_path / "exported",
+                          open_source=_fake_svo(60), metres=0.25)
+
+    ex = load_script("extraction/extract_sessions.py")
+    cfg = dict(ex.CONFIG, OUTPUT_ROOT=str(tmp_path / "dataset"),
+               DRY_RUN=False, OVERWRITE=True, POOL_STRIDE=1,
+               MAX_POOL_PER_SESSION=None)
+    cfg["INPUT_ROOTS"] = [{"path": str(tmp_path / "exported"), "trip": "jet",
+                           "site": "s", "field": "f", "scene_hint": "mixed",
+                           "notes": ""}]
+    rec = ex.extract_session(ex.discover(cfg)[0], tmp_path / "dataset", cfg)
+    assert rec["capture_format"] == "v3"
+    assert rec["frames"]["decoded"] == 4
+
+    idx = list(csv.DictReader(open(
+        tmp_path / "dataset" / "sessions" / rec["session_id"] / "meta"
+        / "frames_index.csv", encoding="utf-8")))
+    assert [r["distance_m"] for r in idx] == [
+        str(round(i * 0.017, 4)) for i in (0, 15, 30, 45)]
