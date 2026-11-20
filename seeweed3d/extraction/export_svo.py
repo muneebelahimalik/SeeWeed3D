@@ -130,12 +130,26 @@ def encode_confidence(conf_pct, scale):
 class FfvWriter:
     """One lossless FFV1 stream, fed raw frames over a pipe."""
 
+    # The capture app's own FFV1 settings, matched deliberately so an exported
+    # session and a recorded one decode identically:
+    #   -g 1        every frame a keyframe. FFV1 is intra-only anyway; this
+    #               states it, so nothing downstream can seek into a
+    #               dependency that is not there.
+    #   -slices 24  24 independently coded regions, which is what lets the
+    #               decoder use more than one core. On 2208x1242 that is the
+    #               difference between a pool extraction that keeps up with
+    #               the disk and one that does not.
+    #   -slicecrc 1 a checksum per slice, so a corrupted read is detected
+    #               rather than decoded into plausible pixels.
+    FFV1_ARGS = ["-c:v", "ffv1", "-level", "3", "-g", "1",
+                 "-slices", "24", "-slicecrc", "1"]
+
     def __init__(self, path, pix_fmt, w, h, fps, ffmpeg="ffmpeg"):
         self.path = Path(path)
         self.proc = subprocess.Popen(
             [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo",
              "-pix_fmt", pix_fmt, "-s", f"{w}x{h}", "-r", f"{fps}",
-             "-i", "pipe:0", "-c:v", "ffv1", "-level", "3",
+             "-i", "pipe:0", *self.FFV1_ARGS,
              "-pix_fmt", pix_fmt, str(path)],
             stdin=subprocess.PIPE)
         self.n = 0
@@ -208,11 +222,15 @@ def open_svo(svo_path, depth_mode=None, stride=1):
                                         sl.Camera, "get_sdk_version") else "?"}
 
     step = max(1, int(stride))
+    # Filled in as the iterator runs; the caller reads it once the stream ends.
+    bad = info["unreadable_frames"] = []
+    max_consecutive_bad = 50
 
     def frames():
         img, dep, cnf = sl.Mat(), sl.Mat(), sl.Mat()
         rt = sl.RuntimeParameters()
         pos = 0
+        run_len = 0
         try:
             while True:
                 if step > 1:
@@ -224,8 +242,26 @@ def open_svo(svo_path, depth_mode=None, stride=1):
                 if err == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:
                     break
                 if err != sl.ERROR_CODE.SUCCESS:
-                    raise SystemExit(f"grab failed at SVO position "
-                                     f"{cam.get_svo_position()}: {err}")
+                    # A FRAME THE SDK CANNOT DECODE IS NOT A REASON TO THROW
+                    # AWAY THE DRIVE. These recordings carry a handful of them
+                    # by design - session_metadata reports `svo_frames_failed`
+                    # and frames.csv flags each one with svo_frame_ok=0 - so
+                    # aborting here would stop a 14,000-frame export on the
+                    # fifth bad frame and leave the other 13,995 unexported.
+                    #
+                    # Skipped, counted, and reported at the end. A RUN of them
+                    # is different: that is a damaged file rather than a bad
+                    # frame, and it stops.
+                    bad.append((cam.get_svo_position(), str(err)))
+                    run_len += 1
+                    if run_len > max_consecutive_bad:
+                        raise SystemExit(
+                            f"{run_len} consecutive unreadable frames from SVO "
+                            f"position {cam.get_svo_position()}: the file is "
+                            f"damaged from here on, not merely missing frames. "
+                            f"{len(bad)} bad in total before this.")
+                    continue
+                run_len = 0
                 cam.retrieve_image(img, sl.VIEW.LEFT)
                 cam.retrieve_measure(dep, sl.MEASURE.DEPTH)
                 cam.retrieve_measure(cnf, sl.MEASURE.CONFIDENCE)
@@ -408,6 +444,10 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
         "source_fps": fps,
         "written_fps": out_fps,
         "source_frames_recorded": info.get("n_recorded"),
+        # Frames the SDK could not decode. The capture's own metadata reports
+        # the same count as `svo_frames_failed`, so the two should agree; a
+        # disagreement means the file changed after it was verified.
+        "unreadable_frames": len(info.get("unreadable_frames") or []),
     }
     (out_sess / "session_metadata.json").write_text(json.dumps(meta, indent=2))
 
@@ -416,6 +456,10 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
           + (f", {unmatched} UNMATCHED" if unmatched else ""))
     if meta["export"]["partial"]:
         print("     PARTIAL export (--limit) - not a dataset, just a check")
+    n_bad = len(info.get("unreadable_frames") or [])
+    if n_bad:
+        print(f"     ! {n_bad} frame(s) could not be decoded and were skipped; "
+              f"compare with `svo_frames_failed` in the capture's own metadata")
     if unmatched:
         print(f"     ! {unmatched} exported frame(s) have no row in "
               f"frames.csv: they carry no timestamp, pose or exposure and "

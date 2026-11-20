@@ -398,3 +398,88 @@ def test_a_strided_export_still_round_trips_through_the_extractor(tmp_path):
         / "frames_index.csv", encoding="utf-8")))
     assert [int(r["timestamp_ns"]) for r in idx] == [
         T0 + i * int(1e9 / FPS) for i in (0, 5, 10, 15)]
+
+
+# --------------------------------------------------------------------------- #
+# Frames the SDK cannot decode
+#
+# The real recordings carry a handful by design: session_metadata reports
+# `svo_frames_failed: 5` of 727, and frames.csv flags each with
+# svo_frame_ok=0. Aborting on one would stop a 14,000-frame export on the
+# fifth bad frame and leave the other 13,995 unexported.
+# --------------------------------------------------------------------------- #
+
+def _flaky_svo(n=20, bad_positions=(3, 7, 11)):
+    """A reader that reports some frames as unreadable, as pyzed does."""
+    def opener(svo_path, depth_mode=None, stride=1):
+        step = max(1, int(stride))
+        info = {"width": W, "height": H, "fps": FPS, "stride": step,
+                "n_frames": len(range(0, n, step)), "n_recorded": n,
+                "depth_mode": depth_mode or "NEURAL_LIGHT",
+                "sdk_version": "5.2.3"}
+        bad = info["unreadable_frames"] = []
+
+        def frames():
+            for i in range(0, n, step):
+                if i in bad_positions:
+                    bad.append((i, "ERROR_CODE.CORRUPTED_FRAME"))
+                    continue
+                yield (T0 + i * int(1e9 / FPS), _bgr(i), _depth_mm(i),
+                       _conf(i))
+        return info, frames()
+    return opener
+
+
+def test_an_unreadable_frame_is_skipped_not_fatal(tmp_path):
+    src = _session(tmp_path / "Session_20261021_123954", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_flaky_svo(20, (3, 7, 11)))
+    assert r["frames"] == 17, "the other 17 frames must still be exported"
+    assert r["matched"] == 17
+
+
+def test_the_skipped_frames_are_counted_in_the_metadata(tmp_path):
+    """The capture's own metadata reports the same number as
+    `svo_frames_failed`, so the two can be compared. A silent skip could
+    not be."""
+    src = _session(tmp_path / "Session_20261021_123954", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_flaky_svo(20, (3, 7, 11)))
+    exp = json.loads((r["out"] / "session_metadata.json").read_text())["export"]
+    assert exp["unreadable_frames"] == 3
+    assert exp["frames_written"] == 17
+
+
+def test_a_skipped_frame_does_not_shift_the_rows_after_it(tmp_path):
+    """The whole reason the join is on timestamps. A skipped frame must leave
+    its own row unwritten, not hand its timestamp to its neighbour."""
+    src = _session(tmp_path / "Session_20261021_123954", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_flaky_svo(20, (3, 7, 11)))
+    rows = list(csv.DictReader(open(r["out"] / "frames.csv", encoding="utf-8")))
+    by_rec = {int(x["rec_frame_idx"]): x for x in rows}
+
+    for skipped in (3, 7, 11):
+        assert by_rec[skipped]["mkv_written"] == "0"
+        assert by_rec[skipped]["mkv_frame_idx"] == ""
+    # And the frame after a skip points at its own place in the written file.
+    assert int(by_rec[4]["mkv_frame_idx"]) == 3      # 0,1,2 written, 3 skipped
+    assert int(by_rec[8]["mkv_frame_idx"]) == 6
+
+
+def test_the_written_stream_matches_the_capture_apps_own_ffv1_settings(tmp_path):
+    """-g 1, 24 slices, slice CRCs. The slices are what let the decoder use
+    more than one core on a 2208x1242 frame; the CRCs make a corrupted read
+    detectable rather than plausible."""
+    src = _session(tmp_path / "Session_20261021_123954", n=3)
+    r = ex_svo.export_session(src, tmp_path / "out", open_source=_fake_svo(3))
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
+         "-of", "json", str(r["out"] / "RGB_left.mkv")],
+        capture_output=True, text=True, check=True)
+    s = json.loads(out.stdout)["streams"][0]
+    assert s["codec_name"] == "ffv1"
+    assert "-slices" in ex_svo.FfvWriter.FFV1_ARGS
+    assert ex_svo.FfvWriter.FFV1_ARGS[
+        ex_svo.FfvWriter.FFV1_ARGS.index("-slices") + 1] == "24"
+    assert "-slicecrc" in ex_svo.FfvWriter.FFV1_ARGS
