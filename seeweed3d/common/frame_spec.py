@@ -94,3 +94,32 @@ def select_filenames(filenames, tokens):
         return list(filenames)
     return [f for f in filenames
             if (i := index_of(f)) >= 0 and matches(i, indices, ranges)]
+
+
+def spread_evenly(items, limit):
+    """`limit` items spread ACROSS the sequence, not the first `limit` of it.
+
+    The trap this closes has now been found three times in this codebase, in
+    three stages, each written by someone who knew about it somewhere else:
+    `--limit` in predict_images, MAX_POOL_PER_SESSION in extraction, and
+    LIMIT_PER_SESSION in every prelabeler. Taking the head is the obvious
+    implementation and it is wrong in the same way each time.
+
+    It matters most for exactly the use the config comments suggest - "20 for
+    a quick quality trial". Twenty frames off the front of a 142-frame drive
+    is the first 14% of one field, under one light, and whatever it shows gets
+    read as a judgement about the method. On a drive that changes scene
+    partway, it is a judgement about the half that happens to come first.
+
+    The last item is always included, so the end of the drive is represented
+    however the arithmetic falls.
+    """
+    items = list(items)
+    n = int(limit or 0)
+    if not n or n >= len(items):
+        return items
+    if n == 1:
+        return items[:1]
+    last = len(items) - 1
+    idx = sorted({round(i * last / (n - 1)) for i in range(n)})
+    return [items[i] for i in idx]

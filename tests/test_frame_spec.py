@@ -159,3 +159,58 @@ def test_the_range_is_applied_before_the_limit(script):
     src = (Path(__file__).resolve().parents[1] / "seeweed3d" / script
            ).read_text(encoding="utf-8")
     assert src.index("ONLY_FRAMES") < src.index('cfg["LIMIT_PER_SESSION"]')
+
+
+# --------------------------------------------------------------------------- #
+# spread_evenly
+#
+# Found three times in this codebase in three stages. Taking the head is the
+# obvious implementation and it is wrong the same way every time.
+# --------------------------------------------------------------------------- #
+
+def test_a_trial_sample_covers_the_whole_drive_not_its_start():
+    """The config comments suggest "20 for a quick quality trial". Twenty
+    frames off the front of a 142-frame drive is the first 14% of one field."""
+    frames = [f"f_{i:06d}.png" for i in range(142)]
+    got = fs.spread_evenly(frames, 20)
+    assert len(got) == 20
+    assert got[0] == frames[0]
+    assert got[-1] == frames[-1], "the end of the drive must be represented"
+    # No clustering: every chosen frame is near its proportional position.
+    idx = [frames.index(g) for g in got]
+    assert max(idx) >= 140 and min(idx) == 0
+    gaps = [b - a for a, b in zip(idx, idx[1:])]
+    assert max(gaps) - min(gaps) <= 1, f"uneven spacing: {gaps}"
+
+
+def test_a_limit_at_or_above_the_count_keeps_everything():
+    frames = [f"f_{i}.png" for i in range(5)]
+    assert fs.spread_evenly(frames, 5) == frames
+    assert fs.spread_evenly(frames, 99) == frames
+    assert fs.spread_evenly(frames, 0) == frames
+    assert fs.spread_evenly(frames, None) == frames
+
+
+def test_a_limit_of_one_takes_the_first():
+    frames = [f"f_{i}.png" for i in range(5)]
+    assert fs.spread_evenly(frames, 1) == ["f_0.png"]
+
+
+def test_order_is_preserved():
+    frames = [f"f_{i:03d}.png" for i in range(50)]
+    got = fs.spread_evenly(frames, 7)
+    assert got == sorted(got)
+
+
+def test_every_prelabeler_spreads_its_trial_sample():
+    """All four had `frames[:LIMIT]`. A fix in one is worth nothing if the
+    next person copies the stage beside it."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "seeweed3d" / "annotation"
+    for name in ("prelabel_mixed_sam3.py", "prelabel_weeds_sam3.py",
+                 "prelabel_onions_sam3.py", "prelabel_complement_sam3.py"):
+        src = (root / name).read_text(encoding="utf-8")
+        assert 'frames[:cfg["LIMIT_PER_SESSION"]]' not in src, (
+            f"{name} still takes the head of the drive")
+        assert "spread_evenly" in src, f"{name} does not spread its sample"

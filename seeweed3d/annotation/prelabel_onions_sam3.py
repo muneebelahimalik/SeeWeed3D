@@ -582,7 +582,10 @@ def prelabel_session(sid, session_dir, out_root, cfg, predictor, sam_fn):
                   f"check the indices against meta/pool.csv")
             return None
     if cfg["LIMIT_PER_SESSION"]:
-        frames = frames[:cfg["LIMIT_PER_SESSION"]]
+        from common.frame_spec import spread_evenly
+        # Spread across the drive, never the head: a trial judged on
+        # the first N frames is a judgement about one end of one field.
+        frames = spread_evenly(frames, cfg["LIMIT_PER_SESSION"])
     print_pool_report(sid, session_dir, len(frames))
 
     from perception import ground as gr
