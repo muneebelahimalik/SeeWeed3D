@@ -13,6 +13,7 @@ writer and the reader agree with each other and both are wrong.
 """
 import csv
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,13 +52,19 @@ def _bgr(i):
 
 
 def _fake_svo(n=6, ts=None):
-    """Stands in for pyzed. Same signature as open_svo."""
-    def opener(svo_path, depth_mode=None):
-        info = {"width": W, "height": H, "fps": FPS, "n_frames": n,
+    """Stands in for pyzed. Same signature as open_svo, stride included - the
+    fake has to skip frames the way the real reader seeks past them, or a
+    strided export would look right here and write the wrong frames in the
+    field."""
+    def opener(svo_path, depth_mode=None, stride=1):
+        step = max(1, int(stride))
+        taken = list(range(0, n, step))
+        info = {"width": W, "height": H, "fps": FPS, "n_frames": len(taken),
+                "n_recorded": n, "stride": step,
                 "depth_mode": depth_mode or "NEURAL", "sdk_version": "4.1.0"}
 
         def frames():
-            for i in range(n):
+            for i in taken:
                 t = ts(i) if ts else T0 + i * int(1e9 / FPS)
                 yield t, _bgr(i), _depth_mm(i), _conf(i)
         return info, frames()
@@ -297,3 +304,97 @@ def test_the_round_trip_carries_the_timestamps_and_pose(tmp_path):
         T0 + i * int(1e9 / FPS) for i in range(5)]
     assert [r["distance_m"] for r in idx] == [
         str(round(i * 0.017, 4)) for i in range(5)]
+
+
+# --------------------------------------------------------------------------- #
+# Striding
+#
+# A 78 GB SVO is tens of thousands of depth computations to build a pool that
+# keeps one frame in five. The frames in between are decoded, encoded, written
+# and thrown away.
+# --------------------------------------------------------------------------- #
+
+def test_a_strided_export_writes_every_nth_frame_and_says_which(tmp_path):
+    src = _session(tmp_path / "Session_20261029_180546", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(20), stride=5)
+    assert r["frames"] == 4
+
+    rows = list(csv.DictReader(
+        open(r["out"] / "frames.csv", encoding="utf-8")))
+    written = [r_ for r_ in rows if r_["mkv_written"] == "1"]
+    assert [int(w["rec_frame_idx"]) for w in written] == [0, 5, 10, 15]
+    assert [int(w["mkv_frame_idx"]) for w in written] == [0, 1, 2, 3], (
+        "mkv_frame_idx is the position in the WRITTEN file, not in the SVO")
+    # The skipped rows keep their place in the log and claim no frame.
+    assert sum(1 for r_ in rows if r_["mkv_written"] == "0") == 16
+
+
+def test_a_strided_export_records_the_factor_it_sampled_by(tmp_path):
+    """Read as the whole recording, a sample is wrong by exactly this factor -
+    in pool density, in metres between split boundaries, and in any frame
+    count quoted as a result."""
+    src = _session(tmp_path / "Session_20261029_180546", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(20), stride=5)
+    exp = json.loads((r["out"] / "session_metadata.json").read_text())["export"]
+    assert exp["svo_stride"] == 5
+    assert exp["source_frames_recorded"] == 20
+    assert exp["frames_written"] == 4
+
+
+def test_the_written_frame_rate_matches_what_the_file_holds(tmp_path):
+    """Tagging a 1-in-5 export at the capture rate makes the container claim a
+    duration five times shorter than the ground it covers - and extraction
+    derives its own pool stride from that number."""
+    src = _session(tmp_path / "Session_20261029_180546", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(20), stride=5)
+    exp = json.loads((r["out"] / "session_metadata.json").read_text())["export"]
+    assert exp["source_fps"] == FPS
+    assert exp["written_fps"] == pytest.approx(FPS / 5)
+
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
+         "-show_format", "-of", "json", str(r["out"] / "RGB_left.mkv")],
+        capture_output=True, text=True, check=True)
+    d = json.loads(out.stdout)
+    num, den = d["streams"][0]["r_frame_rate"].split("/")
+    assert float(num) / float(den) == pytest.approx(FPS / 5), (
+        "the container must be tagged at the rate it actually holds")
+    assert float(d["format"]["duration"]) == pytest.approx(
+        20 / FPS, abs=0.5), "duration must still span the real elapsed time"
+
+
+def test_stride_one_is_unchanged(tmp_path):
+    src = _session(tmp_path / "Session_20261029_180546", n=8)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(8), stride=1)
+    assert r["frames"] == 8 and r["matched"] == 8
+    exp = json.loads((r["out"] / "session_metadata.json").read_text())["export"]
+    assert exp["svo_stride"] == 1 and exp["written_fps"] == FPS
+
+
+def test_a_strided_export_still_round_trips_through_the_extractor(tmp_path):
+    """The sampled session must be an ordinary v3 session, with its timestamps
+    still on the right frames."""
+    src = _session(tmp_path / "Session_20261029_180546", n=20)
+    ex_svo.export_session(src, tmp_path / "exported",
+                          open_source=_fake_svo(20), stride=5)
+
+    ex = load_script("extraction/extract_sessions.py")
+    cfg = dict(ex.CONFIG, OUTPUT_ROOT=str(tmp_path / "dataset"),
+               DRY_RUN=False, OVERWRITE=True, POOL_STRIDE=1,
+               MAX_POOL_PER_SESSION=None)
+    cfg["INPUT_ROOTS"] = [{"path": str(tmp_path / "exported"), "trip": "jet",
+                           "site": "s", "field": "f", "scene_hint": "mixed",
+                           "notes": ""}]
+    rec = ex.extract_session(ex.discover(cfg)[0], tmp_path / "dataset", cfg)
+    assert rec["capture_format"] == "v3"
+    assert rec["frames"]["decoded"] == 4
+
+    idx = list(csv.DictReader(open(
+        tmp_path / "dataset" / "sessions" / rec["session_id"] / "meta"
+        / "frames_index.csv", encoding="utf-8")))
+    assert [int(r["timestamp_ns"]) for r in idx] == [
+        T0 + i * int(1e9 / FPS) for i in (0, 5, 10, 15)]
