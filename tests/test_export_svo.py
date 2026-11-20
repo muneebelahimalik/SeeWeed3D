@@ -596,3 +596,44 @@ def test_a_metre_planned_export_round_trips_through_the_extractor(tmp_path):
         / "frames_index.csv", encoding="utf-8")))
     assert [r["distance_m"] for r in idx] == [
         str(round(i * 0.017, 4)) for i in (0, 15, 30, 45)]
+
+
+# --------------------------------------------------------------------------- #
+# Planning without the SDK
+# --------------------------------------------------------------------------- #
+
+def _no_sdk(*a, **k):
+    raise SystemExit("pyzed is not installed.")
+
+
+def test_the_plan_is_answerable_with_no_sdk_and_no_gpu(tmp_path):
+    """How many frames a spacing yields comes from frames.csv alone. Making
+    that wait for a GB-scale SDK install, to answer a question about a CSV, is
+    the wrong way round - and it is the question you want settled BEFORE
+    committing hours of matcher time."""
+    src = _session(tmp_path / "Session_20261106_142555", n=60)
+    r = ex_svo.export_session(src, tmp_path / "out", open_source=_no_sdk,
+                              metres=0.25, plan_only=True)
+    assert r["plan_only"] is True
+    assert r["frames"] == 4
+    assert r["rows"] == 60
+
+
+def test_a_plan_writes_nothing_at_all(tmp_path):
+    src = _session(tmp_path / "Session_20261106_142555", n=60)
+    ex_svo.export_session(src, tmp_path / "out", open_source=_no_sdk,
+                          metres=0.25, plan_only=True)
+    assert not (tmp_path / "out" / src.name).exists(), (
+        "a plan must not leave an empty session folder that later looks "
+        "like a failed export")
+
+
+def test_a_plan_reports_the_distance_the_drive_actually_covered(tmp_path):
+    """The number that separates a 47 m drive from 48 seconds of standing
+    still, and the two are indistinguishable by frame count."""
+    src = _session(tmp_path / "Session_20261021_123954", n=100,
+                   dist=lambda i: 0.0001 * i)
+    r = ex_svo.export_session(src, tmp_path / "out", open_source=_no_sdk,
+                              metres=0.25, plan_only=True)
+    assert r["span_m"] == pytest.approx(0.0099, abs=1e-3)
+    assert r["frames"] == 1
