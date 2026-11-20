@@ -160,7 +160,28 @@ bound by the `numpy>=1.26,<2` pin that exists solely for SAM 3 — though leavin
 numpy where `requirements.txt` puts it is fine and keeps the two machines
 comparable.
 
-**pyzed / the ZED SDK.** Capture only.
+**pyzed / the ZED SDK.** Capture *and* SVO export. It used to be capture only,
+which is why this line said so — but a session recorded as `recording.svo2`
+with no MKVs has to go through `extraction/export_svo.py` before anything can
+read it, and that runs the SDK's matcher to recompute depth. So the machine
+that exports needs the SDK, pyzed, and a CUDA GPU, even if it never records
+anything. Extraction, training and prelabeling still do not.
+
+Installing it into a conda env, on Windows, with the env **active** so the
+wheel lands in the right place:
+
+```powershell
+python -V                                     # the wheel is per Python version
+Get-ChildItem "C:\Program Files (x86)\ZED SDK" | Select-Object -First 5
+python "C:\Program Files (x86)\ZED SDK\get_python_api.py"
+python -c "import pyzed.sl as sl; print(sl.Camera.get_sdk_version())"
+```
+
+`get_python_api.py` downloads the pyzed wheel matching your SDK *and* your
+Python version, so it needs the internet and a Python the SDK ships a wheel
+for. If it reports no matching wheel, that is a Python-version mismatch, not a
+missing SDK — make an env on a version it supports rather than forcing a wheel
+built for another.
 
 > Keep prelabeling and training in **separate environments** if you ever do both
 > here. `requirements-training.txt` says why: the two stages never run in one
