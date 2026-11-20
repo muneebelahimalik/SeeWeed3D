@@ -637,3 +637,22 @@ def test_a_plan_reports_the_distance_the_drive_actually_covered(tmp_path):
                               metres=0.25, plan_only=True)
     assert r["span_m"] == pytest.approx(0.0099, abs=1e-3)
     assert r["frames"] == 1
+
+
+def test_a_reader_that_cannot_open_leaves_no_husk_behind(tmp_path):
+    """Running the export before the SDK is installed used to create the
+    session folder and then fail, leaving an empty directory that looks like
+    an export which ran and produced nothing - and that a later discover()
+    would find and report as a broken session."""
+    src = _session(tmp_path / "Session_20261029_182236", n=20)
+    with pytest.raises(SystemExit):
+        ex_svo.export_session(src, tmp_path / "out", open_source=_no_sdk,
+                              metres=0.25)
+    assert not (tmp_path / "out" / src.name).exists()
+
+
+def test_a_successful_export_still_creates_its_folder(tmp_path):
+    src = _session(tmp_path / "Session_20261029_182236", n=20)
+    r = ex_svo.export_session(src, tmp_path / "out",
+                              open_source=_fake_svo(20), metres=0.25)
+    assert (r["out"] / "RGB_left.mkv").exists()

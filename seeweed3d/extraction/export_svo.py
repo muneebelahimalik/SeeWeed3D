@@ -383,8 +383,12 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
             f"exposure. Refusing to write a session whose metadata would be "
             f"attached by position.")
 
+    # The folder is NOT created yet. Creating it here and then failing to open
+    # the SVO - no SDK installed, a damaged file - leaves an empty session
+    # folder behind that looks exactly like an export which ran and produced
+    # nothing, and a later discover() would find it and report it as broken.
+    # It is made once there is something to put in it.
     out_sess = Path(out_dir) / session_dir.name
-    out_sess.mkdir(parents=True, exist_ok=True)
 
     positions, span = None, None
     if metres:
@@ -411,8 +415,6 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
         # drive is real travel, comes entirely from frames.csv - and it is
         # exactly what you want before committing a GPU to 66,000 frames.
         # Nothing is written and the SVO is never opened.
-        if not any(out_sess.iterdir()):
-            out_sess.rmdir()          # leave no empty folder behind
         return {"out": None, "plan_only": True,
                 "frames": len(positions) if positions else None,
                 "metres": metres, "span_m": span, "rows": len(rows)}
@@ -439,6 +441,7 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
           f" | depth_mode={info.get('depth_mode')} "
           f"| sdk={info.get('sdk_version')}")
 
+    out_sess.mkdir(parents=True, exist_ok=True)   # the SVO opened; commit now
     wr = {"rgb": FfvWriter(out_sess / "RGB_left.mkv", "bgr24", w, h, out_fps,
                            ffmpeg),
           "depth": FfvWriter(out_sess / "Depth.mkv", "gray16le", w, h, out_fps,
