@@ -168,7 +168,7 @@ class FfvWriter:
 # Reading the SVO (the only part that needs the ZED SDK)
 # --------------------------------------------------------------------------- #
 
-def open_svo(svo_path, depth_mode=None, stride=1):
+def open_svo(svo_path, depth_mode=None, stride=1, positions=None):
     """(info, frame_iterator) for an SVO. Yields (ts_ns, bgr, depth_mm, conf).
 
     `stride` takes every Nth recorded frame and SEEKS PAST THE REST. That is
@@ -222,6 +222,16 @@ def open_svo(svo_path, depth_mode=None, stride=1):
                                         sl.Camera, "get_sdk_version") else "?"}
 
     step = max(1, int(stride))
+    # An explicit list of frame indices wins over a stride. Seeking to exactly
+    # the frames a distance plan asked for is the same operation as striding,
+    # one list further on - and the timestamp join downstream keeps it honest
+    # either way: whatever frame actually comes back is matched to ITS own row,
+    # so a seek that lands elsewhere costs spacing, never correctness.
+    wanted = list(positions) if positions is not None else None
+    info["requested_positions"] = len(wanted) if wanted is not None else None
+    if wanted is not None:
+        info["n_frames"] = len(wanted)
+
     # Filled in as the iterator runs; the caller reads it once the stream ends.
     bad = info["unreadable_frames"] = []
     max_consecutive_bad = 50
@@ -231,9 +241,15 @@ def open_svo(svo_path, depth_mode=None, stride=1):
         rt = sl.RuntimeParameters()
         pos = 0
         run_len = 0
+        queue = iter(wanted) if wanted is not None else None
         try:
             while True:
-                if step > 1:
+                if queue is not None:
+                    nxt = next(queue, None)
+                    if nxt is None:
+                        break
+                    cam.set_svo_position(int(nxt))
+                elif step > 1:
                     if pos >= n_recorded:
                         break
                     cam.set_svo_position(pos)
@@ -298,6 +314,34 @@ def read_frames_csv(path):
     return names, rows, by_ts
 
 
+def select_positions_by_distance(rows, metres, index_key="rec_frame_idx",
+                                 distance_key="distance_m"):
+    """Frame indices spaced `metres` of GROUND apart, not frames apart.
+
+    A stride is a statement about the recording; what a dataset needs is a
+    statement about the field. The two are only the same at constant speed,
+    and these drives are pushed by hand: the same stride over-samples wherever
+    the operator slowed down and under-samples wherever they sped up, and
+    stopping entirely produces hundreds of pictures of one spot that a frame
+    count cannot tell apart from progress.
+
+    `distance_m` is cumulative odometry from positional tracking, recorded per
+    frame, so this needs no guessing. Returns indices in order, always
+    including the first row.
+    """
+    out, last = [], None
+    for r in rows:
+        try:
+            idx = int(r[index_key])
+            d = float(r[distance_key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if last is None or d - last >= metres:
+            out.append(idx)
+            last = d
+    return out
+
+
 def write_frames_csv(path, fieldnames, rows):
     for extra in ("mkv_written", "mkv_frame_idx"):
         if extra not in fieldnames:
@@ -314,7 +358,7 @@ def write_frames_csv(path, fieldnames, rows):
 
 def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
                    units_per_mm=10, conf_scale=100, depth_mode=None,
-                   ffmpeg="ffmpeg", probe_frames=5, stride=1):
+                   ffmpeg="ffmpeg", probe_frames=5, stride=1, metres=None):
     """Write an extractable v3 session beside the SVO it came from.
 
     The source folder is never written to. Everything lands in
@@ -341,7 +385,26 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
     out_sess = Path(out_dir) / session_dir.name
     out_sess.mkdir(parents=True, exist_ok=True)
 
-    info, frames = open_source(svo, depth_mode, stride)
+    positions = None
+    if metres:
+        positions = select_positions_by_distance(rows, float(metres))
+        if not positions:
+            raise SystemExit(
+                f"--metres needs a `distance_m` column in "
+                f"{session_dir / 'frames.csv'} and this one has none usable. "
+                f"Use --stride instead, and note that a stride over-samples "
+                f"wherever the drive slowed down.")
+        span = 0.0
+        try:
+            span = max(float(r["distance_m"]) for r in rows
+                       if r.get("distance_m"))
+        except ValueError:
+            pass
+        print(f"  distance plan: {len(positions)} frames every {metres} m "
+              f"over {span:.1f} m of row "
+              f"(1 in {len(rows) / max(1, len(positions)):.0f} recorded)")
+
+    info, frames = open_source(svo, depth_mode, stride, positions)
     w, h, fps = info["width"], info["height"], info["fps"]
 
     # THE WRITTEN FILE'S FRAME RATE DESCRIBES THE WRITTEN FILE. A strided
@@ -350,7 +413,12 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
     # covers - and extraction derives its own pool stride from exactly that
     # number. Dividing keeps the container's time base equal to real elapsed
     # time, and makes TARGET_POOL_FPS mean what it says on the result.
-    out_fps = fps / max(1, int(stride))
+    # A distance plan has no single stride - the operator's speed varied - so
+    # the effective one is whatever fraction of the recording came out. Either
+    # way the written file's duration stays equal to real elapsed time.
+    eff_stride = (info.get("n_recorded") or 0) / len(positions) \
+        if positions else max(1, int(stride))
+    out_fps = fps / max(1e-9, eff_stride)
     of_recorded = (f" (1 in {stride} of {info.get('n_recorded', '?')})"
                    if stride > 1 else "")
     print(f"  {svo.name}: {info.get('n_frames', '?')} frames to write"
@@ -441,6 +509,12 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
         # quoted in a methods section - is wrong by this factor if it is read
         # as the whole recording. The SVO remains the complete archive.
         "svo_stride": int(stride),
+        # What the sampling was actually ASKED for. A frame count read back
+        # without this is wrong by the sampling factor, and a dataset built
+        # from a 0.25 m plan is a different object from one built at a fixed
+        # stride even when both hold the same number of frames.
+        "metres_between_frames": float(metres) if metres else None,
+        "effective_stride": round(eff_stride, 2),
         "source_fps": fps,
         "written_fps": out_fps,
         "source_frames_recorded": info.get("n_recorded"),
@@ -479,6 +553,14 @@ def main(argv=None):
                          "source folder is never modified")
     ap.add_argument("--limit", type=int, default=None,
                     help="export only the first N frames (trial run)")
+    ap.add_argument("--metres", "--meters", type=float, default=None,
+                    dest="metres",
+                    help="sample every M METRES OF GROUND, using the "
+                         "`distance_m` odometry in frames.csv. Preferred over "
+                         "--stride: these drives are pushed by hand, so a "
+                         "fixed stride over-samples wherever the operator "
+                         "slowed down. At a 0.65 m footprint, 0.25 m leaves "
+                         "about 60%% overlap between neighbours")
     ap.add_argument("--stride", type=int, default=1,
                     help="export every Nth recorded frame and seek past the "
                          "rest (default 1 = all). Depth is recomputed per "
@@ -499,7 +581,7 @@ def main(argv=None):
     export_session(a.session, a.out, limit=a.limit, depth_mode=a.depth_mode,
                    units_per_mm=a.depth_units_per_mm,
                    conf_scale=a.confidence_scale, ffmpeg=a.ffmpeg,
-                   stride=a.stride)
+                   stride=a.stride, metres=a.metres)
 
 
 if __name__ == "__main__":
