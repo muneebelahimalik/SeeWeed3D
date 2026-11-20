@@ -154,8 +154,18 @@ class FfvWriter:
 # Reading the SVO (the only part that needs the ZED SDK)
 # --------------------------------------------------------------------------- #
 
-def open_svo(svo_path, depth_mode=None):
+def open_svo(svo_path, depth_mode=None, stride=1):
     """(info, frame_iterator) for an SVO. Yields (ts_ns, bgr, depth_mm, conf).
+
+    `stride` takes every Nth recorded frame and SEEKS PAST THE REST. That is
+    not a minor convenience on this data. A full export of a 78 GB SVO is tens
+    of thousands of frames of lossless FFV1 and, worse, tens of thousands of
+    depth computations on the GPU - to build a pool that then keeps one frame
+    in five. The frames in between are decoded, encoded, written, read back
+    and thrown away.
+
+    Depth is computed in grab(), so a skipped frame costs a seek instead of a
+    matcher pass, which is where nearly all the time goes.
 
     pyzed is imported here rather than at module scope so that everything
     above - the encoding, the join, the metadata - is testable, and fails in
@@ -187,19 +197,29 @@ def open_svo(svo_path, depth_mode=None):
         raise SystemExit(f"cannot open {svo_path}: {status}")
 
     res = cam.get_camera_information().camera_configuration.resolution
+    n_recorded = cam.get_svo_number_of_frames()
     info = {"width": res.width, "height": res.height,
             "fps": cam.get_camera_information().camera_configuration.fps,
-            "n_frames": cam.get_svo_number_of_frames(),
+            "n_frames": -(-n_recorded // max(1, int(stride))),
+            "n_recorded": n_recorded, "stride": int(stride),
             "depth_mode": init.depth_mode.name,
             "sdk_version": ".".join(str(x) for x in sl.Camera.get_sdk_version()
                                     .split(".")[:3]) if hasattr(
                                         sl.Camera, "get_sdk_version") else "?"}
 
+    step = max(1, int(stride))
+
     def frames():
         img, dep, cnf = sl.Mat(), sl.Mat(), sl.Mat()
         rt = sl.RuntimeParameters()
+        pos = 0
         try:
             while True:
+                if step > 1:
+                    if pos >= n_recorded:
+                        break
+                    cam.set_svo_position(pos)
+                    pos += step
                 err = cam.grab(rt)
                 if err == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:
                     break
@@ -258,7 +278,7 @@ def write_frames_csv(path, fieldnames, rows):
 
 def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
                    units_per_mm=10, conf_scale=100, depth_mode=None,
-                   ffmpeg="ffmpeg", probe_frames=5):
+                   ffmpeg="ffmpeg", probe_frames=5, stride=1):
     """Write an extractable v3 session beside the SVO it came from.
 
     The source folder is never written to. Everything lands in
@@ -285,16 +305,29 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
     out_sess = Path(out_dir) / session_dir.name
     out_sess.mkdir(parents=True, exist_ok=True)
 
-    info, frames = open_source(svo, depth_mode)
+    info, frames = open_source(svo, depth_mode, stride)
     w, h, fps = info["width"], info["height"], info["fps"]
-    print(f"  {svo.name}: {info.get('n_frames', '?')} frames, {w}x{h} @ {fps}fps"
+
+    # THE WRITTEN FILE'S FRAME RATE DESCRIBES THE WRITTEN FILE. A strided
+    # export holds every Nth frame, so tagging it at the capture rate would
+    # make the container claim a duration N times shorter than the ground it
+    # covers - and extraction derives its own pool stride from exactly that
+    # number. Dividing keeps the container's time base equal to real elapsed
+    # time, and makes TARGET_POOL_FPS mean what it says on the result.
+    out_fps = fps / max(1, int(stride))
+    of_recorded = (f" (1 in {stride} of {info.get('n_recorded', '?')})"
+                   if stride > 1 else "")
+    print(f"  {svo.name}: {info.get('n_frames', '?')} frames to write"
+          f"{of_recorded}, {w}x{h} @ {out_fps:g}fps"
           f" | depth_mode={info.get('depth_mode')} "
           f"| sdk={info.get('sdk_version')}")
 
-    wr = {"rgb": FfvWriter(out_sess / "RGB_left.mkv", "bgr24", w, h, fps, ffmpeg),
-          "depth": FfvWriter(out_sess / "Depth.mkv", "gray16le", w, h, fps, ffmpeg),
-          "conf": FfvWriter(out_sess / "Confidence.mkv", "gray16le", w, h, fps,
-                            ffmpeg)}
+    wr = {"rgb": FfvWriter(out_sess / "RGB_left.mkv", "bgr24", w, h, out_fps,
+                           ffmpeg),
+          "depth": FfvWriter(out_sess / "Depth.mkv", "gray16le", w, h, out_fps,
+                             ffmpeg),
+          "conf": FfvWriter(out_sess / "Confidence.mkv", "gray16le", w, h,
+                            out_fps, ffmpeg)}
 
     for r in rows:                      # nothing is in the MKV until it is
         r["mkv_written"], r["mkv_frame_idx"] = 0, ""
@@ -367,6 +400,14 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
         "frames_matched_to_log": matched,
         "frames_unmatched": unmatched,
         "partial": bool(limit) and n_written < (info.get("n_frames") or 0),
+        # THE EXPORT IS A SAMPLE, AND HAS TO SAY SO. Everything downstream -
+        # a pool density, a distance between split boundaries, a frame count
+        # quoted in a methods section - is wrong by this factor if it is read
+        # as the whole recording. The SVO remains the complete archive.
+        "svo_stride": int(stride),
+        "source_fps": fps,
+        "written_fps": out_fps,
+        "source_frames_recorded": info.get("n_recorded"),
     }
     (out_sess / "session_metadata.json").write_text(json.dumps(meta, indent=2))
 
@@ -394,6 +435,13 @@ def main(argv=None):
                          "source folder is never modified")
     ap.add_argument("--limit", type=int, default=None,
                     help="export only the first N frames (trial run)")
+    ap.add_argument("--stride", type=int, default=1,
+                    help="export every Nth recorded frame and seek past the "
+                         "rest (default 1 = all). Depth is recomputed per "
+                         "exported frame, so this is where the time goes: at "
+                         "--stride 5 the export is a fifth of the work and a "
+                         "fifth of the disk, and still denser than the pool "
+                         "extraction builds by default")
     ap.add_argument("--depth-mode", default=None,
                     help="SDK depth mode; defaults to the one the capture "
                          "recorded in session_metadata.json")
@@ -406,7 +454,8 @@ def main(argv=None):
 
     export_session(a.session, a.out, limit=a.limit, depth_mode=a.depth_mode,
                    units_per_mm=a.depth_units_per_mm,
-                   conf_scale=a.confidence_scale, ffmpeg=a.ffmpeg)
+                   conf_scale=a.confidence_scale, ffmpeg=a.ffmpeg,
+                   stride=a.stride)
 
 
 if __name__ == "__main__":

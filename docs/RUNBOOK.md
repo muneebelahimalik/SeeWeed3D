@@ -203,6 +203,25 @@ python -m seeweed3d.extraction.export_svo --session "D:\ZED_Data_Jetson\Session_
 Then point `INPUT_ROOTS` at `E:\Dataset_Vidalia\Jetson_exported` and extract
 normally — the export is a v3 session and needs no special case.
 
+**On a large SVO, use `--stride`.** Depth is recomputed per exported frame, so
+that is where the whole cost sits — a 78 GB SVO is tens of thousands of matcher
+passes and tens of thousands of lossless frames written, to build a pool that
+then keeps one frame in five. `--stride 5` seeks past the rest: a fifth of the
+GPU time, a fifth of the disk, and still denser than extraction's default pool.
+
+```powershell
+python -m seeweed3d.extraction.export_svo --session $S --out $OUT --stride 5
+```
+
+The written MKV is tagged at `fps / stride`, so its duration still equals the
+real elapsed time and extraction's own `TARGET_POOL_FPS` means what it says.
+Set `POOL_STRIDE = 1` when extracting a strided export, or you will thin an
+already-thinned drive. The factor is recorded as `export.svo_stride`; read as
+the whole recording, a sample is wrong by exactly that factor — in pool
+density, in metres between split boundaries, and in any frame count quoted as a
+result. The SVO stays the complete archive, so a denser export is always
+available later.
+
 It needs the **ZED SDK and pyzed** on that machine, and a CUDA GPU. The source
 folder is never written to; everything lands in `<out>\<session name>\`.
 
