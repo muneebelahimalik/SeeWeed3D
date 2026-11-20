@@ -358,7 +358,8 @@ def write_frames_csv(path, fieldnames, rows):
 
 def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
                    units_per_mm=10, conf_scale=100, depth_mode=None,
-                   ffmpeg="ffmpeg", probe_frames=5, stride=1, metres=None):
+                   ffmpeg="ffmpeg", probe_frames=5, stride=1, metres=None,
+                   plan_only=False):
     """Write an extractable v3 session beside the SVO it came from.
 
     The source folder is never written to. Everything lands in
@@ -385,7 +386,7 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
     out_sess = Path(out_dir) / session_dir.name
     out_sess.mkdir(parents=True, exist_ok=True)
 
-    positions = None
+    positions, span = None, None
     if metres:
         positions = select_positions_by_distance(rows, float(metres))
         if not positions:
@@ -403,6 +404,18 @@ def export_session(session_dir, out_dir, open_source=open_svo, limit=None,
         print(f"  distance plan: {len(positions)} frames every {metres} m "
               f"over {span:.1f} m of row "
               f"(1 in {len(rows) / max(1, len(positions)):.0f} recorded)")
+
+    if plan_only:
+        # THE PLAN IS ANSWERABLE WITHOUT THE SDK, SO IT SHOULD BE ASKABLE
+        # WITHOUT IT. How many frames a spacing yields, and how much of the
+        # drive is real travel, comes entirely from frames.csv - and it is
+        # exactly what you want before committing a GPU to 66,000 frames.
+        # Nothing is written and the SVO is never opened.
+        if not any(out_sess.iterdir()):
+            out_sess.rmdir()          # leave no empty folder behind
+        return {"out": None, "plan_only": True,
+                "frames": len(positions) if positions else None,
+                "metres": metres, "span_m": span, "rows": len(rows)}
 
     info, frames = open_source(svo, depth_mode, stride, positions)
     w, h, fps = info["width"], info["height"], info["fps"]
@@ -553,6 +566,12 @@ def main(argv=None):
                          "source folder is never modified")
     ap.add_argument("--limit", type=int, default=None,
                     help="export only the first N frames (trial run)")
+    ap.add_argument("--plan-only", action="store_true",
+                    help="print how many frames the sampling would yield and "
+                         "exit, writing nothing. Needs no ZED SDK and no GPU: "
+                         "the answer comes from frames.csv alone, which is "
+                         "what you want before committing hours of matcher "
+                         "time to a spacing you have not checked")
     ap.add_argument("--metres", "--meters", type=float, default=None,
                     dest="metres",
                     help="sample every M METRES OF GROUND, using the "
@@ -581,7 +600,8 @@ def main(argv=None):
     export_session(a.session, a.out, limit=a.limit, depth_mode=a.depth_mode,
                    units_per_mm=a.depth_units_per_mm,
                    conf_scale=a.confidence_scale, ffmpeg=a.ffmpeg,
-                   stride=a.stride, metres=a.metres)
+                   stride=a.stride, metres=a.metres,
+                   plan_only=a.plan_only)
 
 
 if __name__ == "__main__":
